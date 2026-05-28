@@ -101,6 +101,26 @@ SKIP_NAMESPACES = frozenset(
     }
 )
 
+# Inline formatting templates whose stripped form would lose meaningful
+# text (date dashes, non-breaking spaces, etc.). Wikitext leans heavily on
+# {{snd}} and {{ndash}} for life-span dates, so dropping them mangles every
+# modern figure's birth/death line.
+INLINE_TEMPLATE_TEXT = {
+    "snd": " – ",
+    "spaced ndash": " – ",
+    "ndash": "–",
+    "endash": "–",
+    "en dash": "–",
+    "mdash": "—",
+    "emdash": "—",
+    "em dash": "—",
+    "nbsp": " ",
+    "'": "'",
+    "=": "=",
+}
+CIRCA_TEMPLATES = frozenset({"circa", "c.", "ca.", "ca", "c"})
+FLORUIT_TEMPLATES = frozenset({"floruit", "fl.", "fl"})
+
 TITLE_RE = re.compile(rb"<title>([^<]*)</title>")
 NS_RE = re.compile(rb"<ns>(-?\d+)</ns>")
 REDIRECT_RE = re.compile(rb'<redirect title="([^"]*)"')
@@ -296,9 +316,36 @@ def parse_article(item: tuple[str, str]) -> tuple[str, dict | None]:
     except Exception:
         lead_code = mw.parse(str(code))
 
-    for node in list(lead_code.filter_templates()):
+    for tpl in list(lead_code.filter_templates()):
         try:
-            lead_code.remove(node)
+            name = str(tpl.name).strip().lower()
+        except Exception:
+            name = ""
+        if name in INLINE_TEMPLATE_TEXT:
+            replacement = INLINE_TEMPLATE_TEXT[name]
+        elif name in CIRCA_TEMPLATES:
+            year = ""
+            if tpl.params:
+                try:
+                    year = str(tpl.params[0].value).strip()
+                except Exception:
+                    year = ""
+            replacement = f"c. {year}" if year else "c."
+        elif name in FLORUIT_TEMPLATES:
+            year = ""
+            if tpl.params:
+                try:
+                    year = str(tpl.params[0].value).strip()
+                except Exception:
+                    year = ""
+            replacement = f"fl. {year}" if year else "fl."
+        else:
+            replacement = None
+        try:
+            if replacement is None:
+                lead_code.remove(tpl)
+            else:
+                lead_code.replace(tpl, replacement)
         except ValueError:
             pass
     for node in list(lead_code.filter_tags(matches="ref")):
