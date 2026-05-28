@@ -6,7 +6,7 @@ See [DESIGN.md](DESIGN.md) for the full design document and the rationale behind
 
 ## Status
 
-Preprocessing pipeline in progress. Stages 1 and 2 run end-to-end on the 2026-05 dumps. Stage 3 is written and unit-tested but waiting on the English Wikipedia dump download to validate against real data. The runtime (Three.js scene, embedding placement, terrain) is not yet implemented.
+Preprocessing pipeline in progress. Stages 1 through 3 run end-to-end on the 2026-05 dumps: Stage 1 emits about 914k figures, Stage 2 cuts to 638k on the recency and stub pre-filter, Stage 3 attaches a Wikipedia lead and outgoing link graph to 99.1% of those. The runtime (Three.js scene, embedding placement, terrain) is not yet implemented.
 
 ## Setup
 
