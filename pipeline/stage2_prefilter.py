@@ -23,7 +23,7 @@ stage is just to make the Stage 3 fetch a bit cheaper without prejudging
 who deserves to be in the piece.
 
 Run:
-    uv run pipeline/prefilter.py
+    uv run pipeline/stage2_prefilter.py
 """
 
 from __future__ import annotations

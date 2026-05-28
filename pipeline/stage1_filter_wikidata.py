@@ -22,7 +22,7 @@ just earns 429s in the log).
     aria2c -x 3 -s 3 -k 50M -c -d pipeline/data -o latest-all.json.bz2 https://dumps.wikimedia.org/wikidatawiki/entities/latest-all.json.bz2
 
 Then:
-    uv run pipeline/filter_wikidata.py
+    uv run pipeline/stage1_filter_wikidata.py
 
 Output: pipeline/cache/wikidata_figures.parquet
 """
