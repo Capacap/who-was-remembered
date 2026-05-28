@@ -1,0 +1,10 @@
+[project]
+name = "wiki-exploration"
+version = "0.1.0"
+description = "Preprocessing pipeline for the Wikipedia exploration art project"
+requires-python = ">=3.11"
+dependencies = [
+    "orjson>=3.10",
+    "pyarrow>=18",
+    "tqdm>=4.66",
+]

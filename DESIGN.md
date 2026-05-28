@@ -1,0 +1,319 @@
+# Wikipedia Exploration Game — Design
+
+Status: starting strategy. Pivoted after Stage 1 data review: from figurative statues placed by raw UMAP to books placed with time as radial distance. Captures the current direction; runtime architecture decisions are unchanged from the original plan.
+
+## Concept
+
+A browser-based 3D world the user walks through. The world is a low-poly desert scattered with books, each one representing a Wikipedia article about a historical figure. Approaching a book surfaces the article title and lead text and offers a link to read the full article on Wikipedia.
+
+The player spawns at year 2000 in the center of the world. Radial distance from the center represents distance into the past: walking outward moves the player back in time, and book density thins out with depth, expressing the gaps in collectively recorded knowledge. Walking sideways at constant distance threads through contemporaries grouped by semantic neighborhood.
+
+There is no gameplay loop. It is an art project, not a game. The aesthetic and emotional goal is the feeling of walking back into emptier and emptier deep time, with Wikipedia's recency bias as the explicit subject rather than a flaw to be corrected. Pre-history is genuinely sparse and the desert is genuinely vast; that is the piece.
+
+The book metaphor is deliberate. A book represents knowledge *about* a person, not a representation *of* them. This sidesteps the iconography questions a figurative-statue framing would raise (depictions of Muhammad, the Buddha, and so on are functionally equivalent to the Wikipedia articles themselves, which exist without controversy) and lets the figure set include ordinary people without inadvertently claiming they were "notable" in any monument-erecting sense. The unifying metaphor: lost knowledge is buried, and the further back you walk the more of it the desert has reclaimed.
+
+## Scope and non-goals
+
+In scope:
+
+- Static, client-side experience. Loads from a static host with no backend.
+- One precomputed JSON of book data shipped with the build (or chunked spatially).
+- Desktop-first, mobile-supported through a quality profile and swappable input controller.
+- Two or three book meshes (open, closed, stacked), instanced.
+- Procedural low-poly desert with vertex colors and atmospheric lighting.
+
+Out of scope:
+
+- Gameplay, scoring, progression, inventory.
+- Multiplayer, persistence, accounts.
+- Inline article rendering. Book interaction links out to Wikipedia.
+- PBR materials, physically based atmospherics, complex shaders.
+- A real physics engine or AI.
+
+## Preprocessing pipeline
+
+Run once, offline. Output is a static data file consumed by the runtime.
+
+### Data source
+
+Full English Wikipedia as the article set, joined to Wikidata for entity-level filtering and metadata. The pipeline synthesizes the world from raw dumps locally, not from live APIs or SPARQL endpoints, so it is fully reproducible and rate-limit-free.
+
+Three dumps:
+
+- **Wikidata** — `latest-all.json.bz2` (~100 GB compressed; ~101 GB as of 2026-05-27) from `dumps.wikimedia.org/wikidatawiki/entities/`. Stream-parsed (qwikidata or manual JSON-lines). Source of the human-with-date-of-death filter, sitelink counts, birth and death dates, and occupation labels.
+- **English Wikipedia** — `enwiki-latest-pages-articles-multistream.xml.bz2` (~22 GB compressed) plus its index file from `dumps.wikimedia.org/enwiki/latest/`. The multistream variant supports random-access seeking to specific articles via the index, so we read only articles in our filtered set rather than scanning the entire dump. Source of lead paragraphs and outgoing-link extraction.
+- **Pantheon** (held in reserve) — MIT Media Lab curated dataset of ~88k notable historical figures with precomputed popularity index. Substitute for the dump pipeline if processing the dumps proves intractable on local hardware.
+
+Cold-start cost: roughly 2-3 hours on a 12-thread CPU, dominated by `lbzip2` decompression of the Wikidata dump (first full run on the 2026-05 dump took 2h 29m and produced 913,830 figures). Subsequent runs read from the intermediate cache (next section) and never touch the raw dumps.
+
+### Acquisition and intermediate cache
+
+Between raw-dump parsing and the layout pipeline sits a single Parquet file, `figures.parquet`, that the rest of the preprocessing reads from. The dump-parse stage produces this file once. Downstream stages (filter cuts, embedding, projection, clustering, terrain) never re-open the `.bz2` files.
+
+Schema:
+
+- `qid` (string) — Wikidata QID, primary key
+- `title` (string) — canonical English Wikipedia article title after redirect resolution
+- `description` (string, nullable) — Wikidata one-line description, e.g., "French general and emperor (1769-1821)". Used for the placard tagline.
+- `short_description` (string, nullable) — Wikipedia `{{Short description}}` template content if the article defines one. One layer more detail than `description`.
+- `lead_text` (string) — Wikipedia first paragraph as plain text. The fullest summary we keep without leaving the page.
+- `birth_year` (int32) — signed; negative for BCE
+- `death_year` (int32)
+- `sitelink_count` (int32) — count of language Wikipedias the figure appears on; coarse coverage signal, NOT used as a notability rank (see Concept).
+- `claim_count` (int32) — total Wikidata statements on the entity; used as a stub-detection signal in Stage 2 pre-filter, not as a fame rank.
+- `identifier_count` (int32) — number of external authority IDs (VIAF, GND, LoC, ...). Cross-database presence complements `sitelink_count`.
+- `has_image` (bool) — Wikidata P18 is set. Cheap article-elaboration signal; stub-quality figures typically lack a primary image.
+- `gender` (string, nullable) — Wikidata P21 QID
+- `citizenships` (list<string>) — Wikidata P27 QIDs; geographic affiliation, often multiple
+- `birth_place_qid` (string, nullable) — Wikidata P19 QID; resolves to coordinates only if we add a later geo-enrichment pass
+- `death_place_qid` (string, nullable) — Wikidata P20 QID
+- `occupations` (list<string>) — Wikidata P106 QIDs, useful for sanity-checking clusters
+- `instance_of_qids` (list<string>) — full P31 list. A figure may carry Q5 (human) alongside markers like Q21070568 (legendary character), letting the runtime visually distinguish documented from semi-legendary figures.
+- `outgoing_qids` (list<string>) — figures-only adjacency list; contains only QIDs that also appear in this file
+
+The runtime uses the three summary fields as UI tiers: `description` for the placard tagline, `short_description` (when present) when the user lingers, `lead_text` for inspect mode, and a click-through link for the full article.
+
+Format choice: Parquet over SQLite. The workload is read-heavy and batch-oriented, never updates individual rows, and rewrites the whole file on every regeneration. The nested list column for the link graph fits naturally as a Parquet `list<string>`, avoiding a separate edges table. Polars reads it fast; DuckDB queries it directly with SQL when ad-hoc exploration during pipeline development is useful.
+
+Pipeline stages:
+
+1. **Wikidata stream-filter.** Read the bz2-decompressed JSON-lines through `orjson`, emit one row per entity matching `P31=Q5 AND has(P570) AND has(enwiki sitelink)`. Capture `qid`, `title`, `description`, `birth_year`, `death_year`, `sitelink_count`, `claim_count`, `identifier_count`, `has_image` (P18 presence), `gender` (P21), `citizenships` (P27), `birth_place_qid` (P19), `death_place_qid` (P20), `occupations` (P106), and `instance_of_qids` (full P31 list, for legendary/fictional flagging). All claim extraction is rank-aware: preferred values are picked over normal, deprecated values are skipped. Output on the 2026-05 dump: 913,830 rows.
+2. **Recency and pre-filter cut.** Drop figures with `death_year >= 2000` (the player spawn point sits at year 2000; post-2000 figures are also where still-contested politics concentrate). Drop clearly empty Stage-1 rows (no description, low identifier_count) as a cheap pre-filter before the expensive Stage 3 fetch. This is NOT a notability ranking; it is a stub pre-filter. Final article-quality filtering happens in Stage 3 once article content is available.
+3. **Wikipedia article extraction.** For each surviving title, use the multistream index to seek to the article in the XML dump and pull its wikitext. Parse with `mwparserfromhell`: extract the lead paragraph and the list of `[[link]]` targets. Resolve redirects against a redirects table extracted from the same dump pass.
+4. **Article quality filter.** Drop articles below a word-count or lead-completeness threshold. The cut criterion is "is this a real article" not "is this person famous." Target output: small enough to ship (see Target scale) while preserving the ordinary-people texture that makes the piece honest about Wikipedia coverage.
+5. **Link-graph restriction.** Replace each article's outgoing links with the subset whose resolved target is itself a row in our filtered set. Available to whichever embedding ends up driving angular placement (see Embedding).
+6. **Write Parquet.** Single file, one row per figure, atomic rewrite.
+
+Stages 1 and 3 are the slow ones (bz2-bound). Stages 2, 4, 5, 6 are seconds to minutes. The Parquet file is the boundary that lets us iterate freely on everything downstream.
+
+Wikidata-based filter:
+
+1. Restrict to articles whose Wikidata entity has `instance of (P31) = human (Q5)`.
+2. Require `date of death (P570)` to be present (excludes living people, ensures "historical").
+3. Require `death_year < 2000` for the recency cut.
+
+Rationale: Wikidata gives a clean, principled filter and yields useful derived properties (lifespan, occupation, era, nationality) for free. Category-based filtering inside Wikipedia is messy and inconsistent. Notability ranking is explicitly avoided: the piece is meant to be an honest map of who Wikipedia covers, including the long tail of ordinary figures.
+
+### Embedding
+
+Both options are worth running for comparison; preference shifted after the books/time pivot:
+
+- **Sentence-transformers (`all-MiniLM-L6-v2`) on the lead paragraph.** Produces a "museum of types" layout: composers near composers, generals near generals. Era is a strong natural axis since biographical leads carry period-specific vocabulary and entity references. This is the better default under the books/time framing, where angular position should group contemporaries by what-kind-of-person rather than by co-citation.
+- **Node2vec (or DeepWalk) on the people-restricted Wikipedia link subgraph.** Captures relational proximity (who is cited alongside whom in Wikipedia's prose). Originally the primary plan when the framing was narrative discovery via co-linked neighbors. The link-graph extraction in Stage 5 still runs, so this option remains available.
+
+Why node2vec instead of raw graph distance: the Wikipedia link graph is dense, scale-free, and noisy. Major hubs (Napoleon, Aristotle) dominate raw shortest-path projections and gravitationally pull unrelated figures toward them. Node2vec's random-walk sampling distributes attention more evenly and yields a smooth vector space that UMAP handles well. The same UMAP step ingests either embedding.
+
+### Projection to 2D
+
+UMAP, not t-SNE. UMAP preserves global structure, which matters when the 2D space becomes a walkable world. Inter-cluster distances need to mean something.
+
+### Placement and density
+
+The piece pivots on **time as radial distance from origin.** The player spawns at year 2000 in the center; walking outward moves the player back in time, and book density thins out with depth, making the gaps in collective recorded knowledge the explicit subject of the piece. Angular position around each year-ring is driven by the embedding (see above), so books at the same radius are contemporaries grouped by semantic neighborhood: a sweep at fixed radius takes the player through similar-era similar-kind figures, and walking inward or outward threads a slice of time through dense modernity into sparse antiquity.
+
+**Open layout question, decide after first visualization:** whether pure UMAP-2D produces a clean radial-time feel on its own (since era is a dominant axis in biographical-lead embeddings) or whether year should be explicitly enforced on the radial dimension with UMAP determining only the angular position around each ring. First try is to let it emerge from pure UMAP, plotted with the radial-time axis as one of the two; fallback is post-hoc radial reprojection from year, with angular position taken from the UMAP layout.
+
+Hard overlaps resolved with minimal jitter or a few iterations of pairwise repulsion using a spatial hash. Lloyd (Voronoi) relaxation is the heavier alternative if needed.
+
+The density distribution is exported as a 2D field that shapes the terrain (see Terrain generation): dunes rise in the sparse outer regions of deep history, flattening into clearings where modern figures cluster. Layout and terrain walk hand in hand: regenerating the layout means regenerating the terrain.
+
+### Visual variation
+
+Two channels carry orthogonal signals:
+
+- **Mesh variant: cluster.** K-means the embedding into 5-10 clusters. Each cluster maps to one of the 2-3 base book meshes (open, closed, stacked; mesh reuse across clusters is acceptable). Reinforces the clustering visually.
+- **Thickness or condition: article richness.** Book thickness scales with article word count (or sitelink count as a cheap proxy). Surface condition (well-bound to falling-apart, dust accumulation) can encode age. Shakespeare gets a heavy folio; the obscure regional politician gets a slim pamphlet. Gives the article-quality signal a visual home without it feeling like a fame ranking.
+
+Era is already encoded by radial position, so a separate color-by-era channel is largely redundant; a subtle sun-faded tint at the deep end may still help legibility at distance.
+
+Per-instance jitter on top: small random rotation, slight tilt, partial burial in sand. Cheap, adds life, reinforces the half-reclaimed feel.
+
+### Terrain generation
+
+Heightmap precomputed from the book distribution. Three steps:
+
+1. **Density field.** Gaussian kernel density estimate over book `(x, z)` coordinates, sampled on a grid (1024×1024 covering world bounds is the working target). Produces a continuous 2D density function.
+2. **Dune field.** Anisotropic ridged fBm on the same grid. Sample coordinates are stretched along a chosen wind direction so ridges align with it. The ridge transform (`1 - |2 * fbm - 1|`) makes peaks sharp and troughs flat; asymmetric bias optional. Produces dune-shaped dunes rather than amorphous hills.
+3. **Composite.** Multiply the dune field by `(1 - density_mask)`. Dunes rise where books are sparse, which under the radial-time layout means dunes rise dramatically in the outer regions of deep history while clearings flatten around modern clusters near the center. Books sit in basins or half-buried in flanking sand. The metaphor: lost knowledge is buried, and the further back you walk the more of it the desert has reclaimed.
+
+Output: a single heightmap, sampled by both the renderer (for terrain vertices) and the player controller (for player Y). Bilinear sampling in both cases.
+
+Optional: precomputed per-vertex terrain colors (sand tones varying with elevation and density), shipped as a second texture. Fallback is per-vertex color computed from height in-shader.
+
+### Output format
+
+The pipeline produces a versioned world dataset, treated as a single regenerable bundle:
+
+- `books.json.gz`: array of per-book records.
+- `heightmap.bin` (or `.png`): precomputed terrain heightmap.
+- `metadata.json`: world bounds, heightmap dimensions and world-units-per-pixel, dataset version, content hash of inputs for cache busting.
+
+Per-book record (target ~500 bytes uncompressed):
+
+- Wikidata QID or stable ID
+- Title
+- Lead sentence
+- World coordinates `(x, z)` (Y derived from heightmap at runtime)
+- Cluster ID / book mesh index
+- Death year (drives radial position; also surfaced in placard)
+- Birth year (surfaced in placard)
+- Thickness or richness scalar (drives book mesh thickness; from article word count)
+- Random seed for per-instance jitter
+- Wikipedia URL
+
+Heightmap format: raw `Float32Array` dumped to a binary file is the simplest path (4MB at 1024×1024, gzips well since heightfields are smooth). Alternative: 16-bit PNG, smaller but needs careful decoding. 8-bit PNG loses too much precision at this world scale.
+
+Shipped as a single bundle at the target scale of ~10k books (~5MB compressed JSON plus ~2-3MB compressed heightmap). Spatial chunking by tile becomes necessary above ~30-50k.
+
+## Target scale
+
+Initial target: ~10k books. Comfortable in the browser with instanced meshes, still feels vast. Easier to scale up than to scale down. Architecture supports growth via spatial chunking of the data file when needed. Stage 1 produces ~914k figures; the article-quality cut and the death_year < 2000 cut together need to bring that down to roughly this scale.
+
+## Runtime architecture
+
+### Stack
+
+- Three.js for rendering.
+- Vite for dev server and build.
+- TypeScript.
+- WebGL2 backend (WebGPU later, when Three.js's backend stabilises).
+
+Rejected alternatives: Godot (large WASM payload, threading complications on web, editor advantage irrelevant for data-driven placement), Bevy (rough WASM dev loop, ECS doesn't earn its cost in a near-static scene, large bundle).
+
+### Spatial structure
+
+Uniform grid tiling of the world. Each tile owns its own `InstancedMesh` per book mesh type, containing only the books whose computed `(x, z)` position lands in that tile.
+
+The same grid serves three purposes:
+
+1. Rendering: only tiles within view distance are added to the scene; each tile's InstancedMesh frustum-culls as one unit.
+2. Proximity queries: "what books are near the player" is a range query against the player's cell plus neighbors.
+3. Streaming boundary: if data ever chunks per tile, the same grid defines the chunks.
+
+Cell size roughly matches the largest query radius (proximity check or view-distance unit, whichever is larger). Note that the radial layout means tile density varies dramatically from center to edge; an angular-radial tiling scheme is an alternative to consider if uniform-grid streaming wastes effort on near-empty outer tiles.
+
+### Terrain
+
+Terrain is precomputed (see Preprocessing / Terrain generation) and shipped as a heightmap. Runtime samples it, never computes it.
+
+Heightmap loaded once at startup. Kept in memory as a `Float32Array` for CPU-side sampling, and uploaded to a `DataTexture` for GPU-side sampling. Bilinear interpolation in both.
+
+Terrain geometry generated per-tile to match the book tile grid. Each tile builds a displaced plane from its region of the heightmap, with the same culling and streaming behavior as the book tiles. Tile boundaries align with heightmap samples to prevent seams.
+
+Player Y derives from sampling the heightmap at the player's `(x, z)` plus eye-height offset. No raycast against terrain geometry needed. Renderer and player controller share a data source, so terrain and movement stay consistent.
+
+### Book rendering
+
+2-3 GLTF base meshes (open, closed, stacked), loaded once. One `InstancedMesh` per (mesh type, tile) pair. Per-instance transform matrix carries position, rotation, scale variation; thickness is encoded as per-instance scale on the Z axis to avoid needing distinct meshes per word-count bucket. Optional per-instance color via `InstancedBufferAttribute` for the sun-faded depth tint.
+
+### Lighting
+
+- One directional light at low angle (sun). Long shadows are most of the mood.
+- Hemisphere light for sky/ground ambient.
+- Cascaded Shadow Maps (CSM) for directional shadows, 2-3 cascades with logarithmic split. Fallback to baked blob decals under each book if CSM performance wobbles on the lower quality profile.
+
+### Atmospherics
+
+- `FogExp2` with warm sand color, density tuned to hide tile-load boundary.
+- Procedural sky: fragment shader gradient between zenith and horizon colors based on view direction Y. No skybox texture.
+- Optional sparse dust particles. Defer until base scene is working.
+
+### Movement and input
+
+- Player controller behind an interface. `DesktopController` uses `PointerLockControls`, WASD plus mouse look. `TouchController` (later) uses virtual joystick plus drag-to-look.
+- Euler-angle FPS camera, pitch clamped to ±89°.
+- Walk speed slow (around 2-3 units/sec) to suit the pacing. Optional hold-to-run.
+- No physics. Player Y snaps to terrain height plus eye offset each frame.
+
+### Interaction
+
+Each frame, query player's cell plus 8 neighbors against the spatial hash. Pick the closest book within trigger radius (say 4 units). If a book is in range, show a DOM overlay with title, dates, lead sentence, and a link to Wikipedia.
+
+DOM overlay rather than canvas text: easier to style as a book placard or open-page motif, accessible, and trivially supports clicking through to Wikipedia.
+
+## Quality profile system
+
+A single `QualityProfile` config threaded through the rendering systems from day one. Two presets initially: `desktop` and `mobile`. Selectable, with room for auto-detect or adaptive tiering later.
+
+Knobs:
+
+- View distance (drives fog density and tile load radius)
+- Tile load radius
+- Maximum instanced books rendered per frame
+- Shadow map enabled, cascade count, cascade range
+- Terrain plane subdivision count
+- Particle/dust count
+- `renderer.setPixelRatio` cap (critical on mobile, where devicePixelRatio of 2-3 tanks fill rate)
+- Anti-aliasing on/off
+- Target frame rate
+
+Threaded as a config object, not constants scattered across files. Retrofitting after the fact is the failure mode to avoid.
+
+## Algorithm inventory
+
+Named algorithms in use, listed by subsystem so they are easy to look up.
+
+Spatial and culling:
+
+- Uniform grid / spatial hashing for tiles and proximity queries.
+- AABB-vs-frustum culling per tile (built into Three.js).
+- Distance culling at the tile level.
+
+Terrain (preprocessing):
+
+- Gaussian kernel density estimate (KDE) over book positions for the density mask.
+- Simplex noise as the noise primitive (preferred over classic Perlin).
+- Fractional Brownian motion stacking 4-6 octaves of simplex.
+- Anisotropic sampling: stretch sample coordinates along a wind direction for directional ridges.
+- Ridged transform (`1 - |2 * fbm - 1|`) for sharp peaks and flat troughs.
+- Density-mask multiplication to suppress dunes around clusters.
+
+Terrain (runtime):
+
+- Bilinear sampling of the precomputed heightmap, CPU-side (player Y) and GPU-side (vertices).
+
+Book placement:
+
+- Sentence-transformer (`all-MiniLM-L6-v2`) or node2vec embedding of the figure set (see Embedding for the comparison).
+- UMAP for embedding-to-2D projection.
+- Radial-time layout: death_year mapped to radial distance, either implicitly via UMAP or explicitly via post-hoc reprojection (see Placement and density).
+- K-means clustering on the embedding for book mesh variant assignment.
+- Iterative pairwise repulsion via spatial hash for overlap resolution.
+- Lloyd (Voronoi) relaxation as a heavier alternative if needed.
+
+Lighting and shadows:
+
+- Cascaded Shadow Maps for directional light shadows.
+- Hemisphere lighting for sky/ground ambient.
+- Lambertian diffuse, optionally half-Lambert for softer unlit-side falloff.
+
+Atmospherics:
+
+- Exponential squared fog (`FogExp2`).
+- Procedural sky gradient via fragment shader.
+
+Movement and interaction:
+
+- Euler-angle first-person camera.
+- Kinematic player on heightmap (no physics).
+- Range query on the spatial hash for nearby books.
+
+Rendering:
+
+- GPU instancing via `InstancedMesh`.
+- Instanced vertex attributes for per-instance variation.
+
+Explicitly not building: BVH/octree, pathfinding, physics engine, PBR materials.
+
+## Open decisions
+
+These are deferred until they need to be made:
+
+1. **Final book count.** ~10k is the working target. Stage 1 produces ~914k figures; the article-quality cut and the death_year < 2000 cut bring this down. Final number depends on how dense the world feels in practice.
+2. **Layout signal: text vs graph embedding.** Sentence-transformer is the working default under the books/time framing (era is a strong natural axis in biographical leads). Generate a node2vec layout in parallel for comparison; pick after walking both.
+3. **Radial-time enforcement: emergent vs explicit.** First try is pure UMAP-2D, expecting era to surface as roughly the radial axis on its own. Fallback is post-hoc reprojection that pins radial distance to year and lets UMAP own only the angular component. Decide after first visualization.
+4. **Date resolution and uncertainty.** Many ancient figures have invented or wide date ranges (the Buddha listed as -500 to -500). Options: snap to published `death_year` and accept false precision, or render uncertain figures as a smudge, range, or dimmer marker. A piece *about* gaps in knowledge probably wants to express date uncertainty honestly.
+5. **Birth vs death year for radial placement.** Working default is `death_year` (when the record closes). Reconsider if it produces visual artifacts (long-lived figures with influential early careers showing up "later" than expected).
+6. **Heightmap format.** Raw `Float32Array` binary is the working plan. Switch to 16-bit PNG if bundle size matters more than load simplicity.
+7. **Shadow strategy.** CSM with fallback to baked blob decals. Final call depends on mobile profile performance.
+8. **Mobile rollout timing.** Desktop-first; mobile after the core experience is stable. Quality profile and input interface are in from day one so the cost of adding mobile is low.

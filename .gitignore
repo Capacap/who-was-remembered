@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+.python-version
+
+# Pipeline data and intermediate outputs
+pipeline/data/
+pipeline/cache/
+
+# Logs
+*.log
+
+# Local agent state
+.claude/
+
+# Editor
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
