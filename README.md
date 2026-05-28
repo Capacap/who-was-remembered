@@ -6,7 +6,7 @@ See [DESIGN.md](DESIGN.md) for the full design document and the rationale behind
 
 ## Status
 
-Preprocessing pipeline in progress. Stages 1 through 3 run end-to-end on the 2026-05 dumps: Stage 1 emits about 914k figures, Stage 2 cuts to 638k on the recency and stub pre-filter, Stage 3 attaches a Wikipedia lead and outgoing link graph to 99.1% of those. The runtime (Three.js scene, embedding placement, terrain) is not yet implemented.
+Preprocessing pipeline in progress. Stages 1 through 4 run end-to-end on the 2026-05 dumps: Stage 1 emits about 914k figures, Stage 2 cuts to 638k on the recency and stub pre-filter, Stage 3 attaches a Wikipedia lead and outgoing link graph to 99.1% of those, and Stage 4 keeps the 419k whose leads carry narrative past the opener. Density runs from a few hundred figures per century in deep antiquity to 279k in the 20th century, which is the temporal gradient the desert framing wants. The runtime (Three.js scene, embedding placement, terrain) is not yet implemented.
 
 ## Setup
 
@@ -69,6 +69,16 @@ Run (about 20 minutes):
 uv run pipeline/stage3_extract_articles.py
 ```
 
+### Stage 4: Article quality cut
+
+`pipeline/stage4_quality_cut.py` reads `wikidata_figures_with_articles.parquet` and writes `wikidata_figures_quality.parquet` (about 419k rows). The criterion is "the lead carries narrative past the opener", not fame: a row survives when its cleaned lead has at least two sentences and at least 30 words. Also strips leftover `__NOTOC__`-style magic words that the wikitext parser missed and recomputes the word count from the cleaned text. No download needed.
+
+Run (under a minute):
+
+```sh
+uv run pipeline/stage4_quality_cut.py
+```
+
 ### Later stages
 
-Article-quality cut, embedding, placement, terrain, and the runtime bundle are described in DESIGN.md but not yet implemented.
+Embedding, placement, terrain, and the runtime bundle are described in DESIGN.md but not yet implemented. The runtime will need spatial tile-based loading rather than a single bundle, because 419k books exceeds the ~30-50k DESIGN.md called the single-bundle limit.
