@@ -8,7 +8,11 @@ Each figure gets a polar position the runtime renders as a book in the desert:
   landing pad of radius R_INNER (year 2000) and walks outward into the past;
   the most recent figures ring the pad. alpha < 1 compresses the recent, dense
   centuries so the modern crowd stays legible; that crowding is the declared
-  subject (recency bias), so it is left honest rather than spread out.
+  subject (recency bias), so it is left honest rather than spread out. Uncertain
+  death years (round-number estimates, placeholders, anything deep in antiquity)
+  get extra radial scatter proportional to that uncertainty, so vague dates land
+  in a vague band rather than on a false-precise ring; see UNC_* constants. The
+  per-figure score is also emitted as date_uncertainty for the renderer.
 
 - angle = population CDF of birth (else death) longitude, not raw longitude.
 
@@ -76,6 +80,19 @@ RADIUS_ALPHA = 0.75
 RADIUS_JITTER = 0.012  # fraction of r_max
 ANGLE_JITTER = 0.10    # radians
 
+# Date-uncertainty radial scatter. Deep-past death years are mostly estimates:
+# round-number guesses (a death snapped to -500) and birth==death placeholders.
+# Placing them on a crisp radius claims a precision the record does not have and
+# renders the antiquity edge as an artificial circle. Instead we scatter radius
+# by how uncertain the date is, so vague dates land in a vague band and the rim
+# dissolves into an honest diffuse frontier. The signal is a proxy (Wikidata's
+# real date-precision qualifier was not captured in stage 1); year roundness
+# plus a floor that distrusts all deep dates stands in for it.
+UNC_RAMP_START = 1000.0   # death_year >= this is trusted (modern dates, no scatter)
+UNC_RAMP_SPAN = 1000.0    # years over which uncertainty ramps to full (full by year 0)
+UNC_FLOOR = 0.3           # ancient dates are uncertain even when they look precise
+UNC_MAX_SCATTER = 55.0    # world units: radial sigma at full uncertainty
+
 # Notability / landmark tier. A landmark is a figure the player is more likely
 # to recognize, so it can serve as a reference point while exploring. Two
 # sources feed it (see module docstring); both are tunable knobs frozen into the
@@ -120,6 +137,7 @@ def main() -> None:
 
     qids = figures["qid"].to_pylist()
     years = figures["death_year"].to_pylist()
+    birth_years = figures["birth_year"].to_pylist()
     birth_qs = figures["birth_place_qid"].to_pylist()
     death_qs = figures["death_place_qid"].to_pylist()
 
@@ -136,6 +154,22 @@ def main() -> None:
     yr = np.array([y if y is not None else 2000 for y in years], dtype=np.float64)
     t = np.clip((2000.0 - yr) / TIME_SPAN, 0.0, 1.0)
     radii = R_INNER + (R_MAX - R_INNER) * (t ** RADIUS_ALPHA) + radius_jitter
+
+    # --- date uncertainty -> extra radial scatter ---
+    # uncertainty in [0, 1]: roundness of the death year (a proxy for how
+    # estimated it is), floored so even precise-looking deep dates stay vague,
+    # and ramped to zero for modern dates we trust. by == dy is a placeholder.
+    by = np.array([b if b is not None else 2000 for b in birth_years], dtype=np.float64)
+    ady = np.abs(yr)
+    round_u = np.full(n, 0.1)
+    round_u[ady % 10 == 0] = 0.3
+    round_u[ady % 100 == 0] = 0.7
+    round_u[(ady % 1000 == 0) & (yr != 0)] = 1.0
+    round_u[by == yr] = 1.0  # birth==death placeholder
+    ramp = np.clip((UNC_RAMP_START - yr) / UNC_RAMP_SPAN, 0.0, 1.0)
+    uncertainty = ramp * np.maximum(round_u, UNC_FLOOR)
+    radii = radii + rng.normal(0.0, 1.0, size=n) * (UNC_MAX_SCATTER * uncertainty)
+
     below = radii < R_INNER
     radii[below] = 2 * R_INNER - radii[below]
 
@@ -211,6 +245,7 @@ def main() -> None:
     out = out.append_column("geo_source", pa.array(geo_source.tolist(), type=pa.string()))
     out = out.append_column("country_qid", pa.array(countries.tolist(), type=pa.string()))
     out = out.append_column("landmark_tier", pa.array(tier.tolist(), type=pa.string()))
+    out = out.append_column("date_uncertainty", pa.array(uncertainty, type=pa.float64()))
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
     pq.write_table(out, args.out, compression="zstd")
