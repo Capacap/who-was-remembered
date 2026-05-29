@@ -63,20 +63,25 @@ def load_xy(path: Path) -> tuple[np.ndarray, np.ndarray, dict]:
 
 
 def plot_era(x: np.ndarray, y: np.ndarray, years: list[int | None], out: Path) -> None:
-    valid = np.array([y is not None for y in years])
-    yrs = np.array([yy if yy is not None else 0 for yy in years], dtype=np.float64)
+    valid = np.array([yy is not None for yy in years])
+    yrs = np.array([yy if yy is not None else 2000 for yy in years], dtype=np.float64)
+    # Most of the corpus lives in the last few centuries; a linear colormap
+    # gets dominated by the few ancient outliers. log(years-before-2000)
+    # gives the recent dense cluster real contrast while still ordering
+    # antiquity correctly.
+    age = np.log1p(np.clip(2000 - yrs, 0, None))
     fig, ax = plt.subplots(figsize=(12, 12), dpi=110)
     sc = ax.scatter(
         x[valid],
         y[valid],
-        c=yrs[valid],
+        c=age[valid],
         s=0.4,
         alpha=0.25,
-        cmap="viridis",
+        cmap="viridis_r",
         linewidths=0,
     )
     cbar = plt.colorbar(sc, ax=ax, shrink=0.6)
-    cbar.set_label("death_year")
+    cbar.set_label("log(years before 2000)")
     ax.set_aspect("equal")
     ax.set_title(f"Placement by era ({valid.sum():,} figures)")
     ax.set_facecolor("#111")
