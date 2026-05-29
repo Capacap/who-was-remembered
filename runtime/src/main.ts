@@ -93,15 +93,17 @@ function buildField(field: Awaited<ReturnType<typeof loadPositions>>) {
 async function main() {
   const scene = new THREE.Scene();
   scene.background = new THREE.Color(0xd9c9a8);
-  scene.fog = new THREE.FogExp2(0xd9c9a8, 0.0011);
+  // world radius ~8000u now (linear time); fog tuned so the far frontier hazes
+  // out rather than popping at the draw edge.
+  scene.fog = new THREE.FogExp2(0xd9c9a8, 0.00016);
 
   const camera = new THREE.PerspectiveCamera(
     60,
     window.innerWidth / window.innerHeight,
     0.5,
-    6000,
+    24000,
   );
-  camera.position.set(0, 120, 260);
+  camera.position.set(0, 900, 1900);
 
   const renderer = new THREE.WebGLRenderer({ antialias: true });
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
@@ -110,7 +112,7 @@ async function main() {
 
   const controls = new OrbitControls(camera, renderer.domElement);
   controls.target.set(0, 0, 0);
-  controls.maxDistance = 4000;
+  controls.maxDistance = 18000;
   controls.maxPolarAngle = Math.PI / 2 - 0.02; // stay above the ground
 
   // low sun for long shadows-of-mood later; flat lambert for now.
@@ -119,17 +121,17 @@ async function main() {
   sun.position.set(-400, 300, 200);
   scene.add(sun);
 
-  // ground large enough to cover the full disc (radius ~1040 + jitter).
+  // ground large enough to cover the full disc (radius ~8075 + scatter tail).
   const ground = new THREE.Mesh(
-    new THREE.PlaneGeometry(3000, 3000),
+    new THREE.PlaneGeometry(18000, 18000),
     new THREE.MeshLambertMaterial({ color: 0xcdbd99 }),
   );
   ground.rotation.x = -Math.PI / 2;
   scene.add(ground);
 
-  // a thin ring marking the landing pad edge (R_INNER = 30).
+  // a thin ring marking the landing pad edge (R_INNER = 200).
   const pad = new THREE.Mesh(
-    new THREE.RingGeometry(29, 31, 96),
+    new THREE.RingGeometry(198, 202, 192),
     new THREE.MeshBasicMaterial({ color: 0x7a6038, side: THREE.DoubleSide }),
   );
   pad.rotation.x = -Math.PI / 2;

@@ -4,11 +4,21 @@ Stage 6: radial-time placement with population-equalized longitude.
 Each figure gets a polar position the runtime renders as a book in the desert:
 
 - radius = era. r = R_INNER + (R_MAX - R_INNER) * t^alpha, t = (2000 -
-  death_year) / TIME_SPAN clipped to [0, 1]. The player spawns on an empty
-  landing pad of radius R_INNER (year 2000) and walks outward into the past;
-  the most recent figures ring the pad. alpha < 1 compresses the recent, dense
-  centuries so the modern crowd stays legible; that crowding is the declared
-  subject (recency bias), so it is left honest rather than spread out. Uncertain
+  death_year) / TIME_SPAN clipped to [0, 1]. The player spawns on a landing pad
+  of radius R_INNER (year 2000) and walks outward into the past. alpha = 1:
+  radius is linear in time, so every century gets equal radial width. This is
+  deliberate and load-bearing. Figure density is ~100x higher in the modern
+  centuries than in antiquity; a mapping that equalized book spacing would
+  compress the sparse ancient centuries into a thin ring and imply the past is
+  better recorded than it is. Linear time instead lets the few ancient figures
+  sit in vast near-empty rings, so the emptiness reads as the missing record it
+  is. The cost lands at the centre: the modern crowd is too dense to spread, so
+  the player spawns inside an overlapping thicket of the recently-dead that
+  thins underfoot as they walk back. That crowding is the declared subject
+  (recency bias), left honest rather than spread out. The span is so large
+  (R_MAX in the thousands of world units) that deep time is unwalkable by
+  design; it is a void to be crossed once flight is unlocked, not strolled.
+  Uncertain
   death years (round-number estimates, placeholders, anything deep in antiquity)
   get extra radial scatter proportional to that uncertainty, so vague dates land
   in a vague band rather than on a false-precise ring; see UNC_* constants. The
@@ -84,11 +94,17 @@ PLACES_PATH = ROOT / "cache" / "places.parquet"
 GAZETTEER_PATH = ROOT / "gazetteer.json"
 OUT_PATH = ROOT / "cache" / "placement.parquet"
 
-R_MAX = 1000.0
-R_INNER = 30.0         # empty landing pad: player spawns here, books start beyond it
-TIME_SPAN = 2800.0
-RADIUS_ALPHA = 0.75
-RADIUS_JITTER = 0.012  # fraction of r_max
+# Scale is derived, not chosen: linear time (alpha=1) over a 100:1 density
+# gradient forces a large world. R_MAX is set so the bulk modern band (~1850 on)
+# clears a ~1-second walk between books (~1.4 u, 1 unit ~= 1 m); the spawn decade
+# stays an overlapping thicket on purpose. See /tmp world-sizing math and the
+# project memory. R_INNER is a wide pad so the densest recent years have
+# circumference to ring rather than collapse onto the origin.
+R_MAX = 7100.0
+R_INNER = 200.0        # landing pad: player spawns at its rim, inside the modern crowd
+TIME_SPAN = 2800.0     # edge = year -800; the pre-800 tail scatters beyond as a frontier
+RADIUS_ALPHA = 1.0     # linear time: equal radial width per century (honest sparsity)
+RADIUS_JITTER = 2.5    # world units: ~one year of radial width, softens the year-rings
 ANGLE_JITTER = 0.10    # radians
 
 # Date-uncertainty radial scatter. Deep-past death years are mostly estimates:
@@ -102,7 +118,12 @@ ANGLE_JITTER = 0.10    # radians
 UNC_RAMP_START = 1000.0   # death_year >= this is trusted (modern dates, no scatter)
 UNC_RAMP_SPAN = 1000.0    # years over which uncertainty ramps to full (full by year 0)
 UNC_FLOOR = 0.3           # ancient dates are uncertain even when they look precise
-UNC_MAX_SCATTER = 55.0    # world units: radial sigma at full uncertainty
+# Under linear time, radius IS date, so radial uncertainty should equal date
+# uncertainty in years x radial-units-per-year (~2.46 u/yr at this scale). Full
+# uncertainty (a millennium-rounded date or birth==death placeholder) stands for
+# a ~century-scale error, so the sigma is hundreds of units: the antiquity rim
+# dissolves into a genuinely diffuse frontier instead of a crisp circle.
+UNC_MAX_SCATTER = 350.0   # world units: radial sigma at full uncertainty
 
 # Notability / landmark tier. A landmark is a figure the player is more likely
 # to recognize, so it can serve as a reference point while exploring. Two
@@ -196,7 +217,7 @@ def main() -> None:
     # edge: a clamp piled every near-origin figure onto one coordinate (year-1999
     # deaths land at t~0), reflection keeps the pad clear and the inner edge from
     # becoming a new pile-up ring.
-    radius_jitter = rng.normal(0.0, RADIUS_JITTER, size=n) * R_MAX
+    radius_jitter = rng.normal(0.0, RADIUS_JITTER, size=n)
     yr = np.array([y if y is not None else 2000 for y in years], dtype=np.float64)
     t = np.clip((2000.0 - yr) / TIME_SPAN, 0.0, 1.0)
     radii = R_INNER + (R_MAX - R_INNER) * (t ** RADIUS_ALPHA) + radius_jitter
