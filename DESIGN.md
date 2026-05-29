@@ -108,7 +108,7 @@ Dense longitude bands stretch across a wide arc and sparse ones shrink to sliver
 
 ### Placement and density
 
-The piece pivots on **time as radial distance from origin.** The player spawns at year 2000 in the center; walking outward moves the player back in time, and book density thins out with depth, making the gaps in collective recorded knowledge the explicit subject of the piece. Radius is `R_MAX * t^0.75` with `t = (2000 - death_year) / 2800`, the sub-linear exponent compressing the dense recent centuries so the modern crowd stays legible rather than smearing into a thin core. Angular position around each year-ring is geographic (see Angular placement), so books at the same radius are contemporaries grouped by region: a sweep at fixed radius takes the player through similar-era figures from neighbouring parts of the world, and walking inward or outward threads a slice of geography through dense modernity into sparse antiquity.
+The piece pivots on **time as radial distance from origin.** The player spawns at year 2000 on an empty landing pad in the center; walking outward moves the player back in time, and book density thins out with depth, making the gaps in collective recorded knowledge the explicit subject of the piece. Radius is `R_INNER + (R_MAX - R_INNER) * t^0.75` with `t = (2000 - death_year) / 2800`, the sub-linear exponent compressing the dense recent centuries so the modern crowd stays legible rather than smearing into a thin core. `R_INNER` (30 units) keeps a clear spawn clearing the player stands in; the most recent figures ring its edge, and jitter that would carry a book into the pad is reflected back out rather than clamped to the origin. Angular position around each year-ring is geographic (see Angular placement), so books at the same radius are contemporaries grouped by region: a sweep at fixed radius takes the player through similar-era figures from neighbouring parts of the world, and walking inward or outward threads a slice of geography through dense modernity into sparse antiquity.
 
 Radial distance is enforced explicitly from death_year and angle comes from geography, so the layout is computed directly rather than projected. The earlier open question of whether radial-time should emerge from a pure UMAP-2D layout is moot now that there is no embedding to project.
 
@@ -273,7 +273,7 @@ Terrain (runtime):
 
 Book placement:
 
-- Radial-time layout: death_year mapped to radial distance via `R_MAX * t^0.75`.
+- Radial-time layout: death_year mapped to radial distance via `R_INNER + (R_MAX - R_INNER) * t^0.75`, with an empty inner landing pad and jitter reflected at its edge.
 - Population-CDF (quantile) transform of birthplace longitude for the angular coordinate (see Angular placement).
 - Per-QID hash (blake2b) for deterministic jitter and for the random angle of geo-less figures.
 - Landmark tiering: absolute sitelink floor for the global tier, top-per-(sector x era) cell for the local tier (see Visual variation).

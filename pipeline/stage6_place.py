@@ -3,11 +3,12 @@ Stage 6: radial-time placement with population-equalized longitude.
 
 Each figure gets a polar position the runtime renders as a book in the desert:
 
-- radius = era. r = R_MAX * t^alpha, t = (2000 - death_year) / TIME_SPAN clipped
-  to [0, 1]. The player stands at the origin (year 2000) and walks outward into
-  the past. alpha < 1 compresses the recent, dense centuries so the modern crowd
-  stays legible; that crowding is the declared subject (recency bias), so it is
-  left honest rather than spread out.
+- radius = era. r = R_INNER + (R_MAX - R_INNER) * t^alpha, t = (2000 -
+  death_year) / TIME_SPAN clipped to [0, 1]. The player spawns on an empty
+  landing pad of radius R_INNER (year 2000) and walks outward into the past;
+  the most recent figures ring the pad. alpha < 1 compresses the recent, dense
+  centuries so the modern crowd stays legible; that crowding is the declared
+  subject (recency bias), so it is left honest rather than spread out.
 
 - angle = population CDF of birth (else death) longitude, not raw longitude.
 
@@ -69,6 +70,7 @@ PLACES_PATH = ROOT / "cache" / "places.parquet"
 OUT_PATH = ROOT / "cache" / "placement.parquet"
 
 R_MAX = 1000.0
+R_INNER = 30.0         # empty landing pad: player spawns here, books start beyond it
 TIME_SPAN = 2800.0
 RADIUS_ALPHA = 0.75
 RADIUS_JITTER = 0.012  # fraction of r_max
@@ -124,10 +126,18 @@ def main() -> None:
     rng = np.random.default_rng(args.seed)
 
     # --- radius from era ---
+    # The era curve maps into [R_INNER, R_MAX], leaving an empty landing pad of
+    # radius R_INNER around the origin where the player spawns. Jitter that would
+    # carry a book into the pad is reflected back out rather than clamped to the
+    # edge: a clamp piled every near-origin figure onto one coordinate (year-1999
+    # deaths land at t~0), reflection keeps the pad clear and the inner edge from
+    # becoming a new pile-up ring.
     radius_jitter = rng.normal(0.0, RADIUS_JITTER, size=n) * R_MAX
     yr = np.array([y if y is not None else 2000 for y in years], dtype=np.float64)
     t = np.clip((2000.0 - yr) / TIME_SPAN, 0.0, 1.0)
-    radii = np.maximum(0.0, R_MAX * (t ** RADIUS_ALPHA) + radius_jitter)
+    radii = R_INNER + (R_MAX - R_INNER) * (t ** RADIUS_ALPHA) + radius_jitter
+    below = radii < R_INNER
+    radii[below] = 2 * R_INNER - radii[below]
 
     # --- resolve a longitude per figure (birth, else death) ---
     lon_per = np.full(n, np.nan)
