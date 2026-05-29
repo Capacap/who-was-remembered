@@ -1,12 +1,12 @@
 # Wikipedia Exploration Game — Design
 
-Status: starting strategy. Pivoted after Stage 1 data review: from figurative statues placed by raw UMAP to books placed with time as radial distance. Captures the current direction; runtime architecture decisions are unchanged from the original plan.
+Status: living design doc, updated as the build settles. Two pivots from the original plan. First, from figurative statues placed by raw UMAP to books with time as radial distance. Then, from embedding-driven angular placement to geography: angle is the population-equalized longitude of birthplace, adopted after the Stage 1-4 data review showed that both semantic and link-graph embeddings encode social class and would herd the famous into one wedge. A notability axis was also added, a per-figure landmark tier derived from cross-lingual coverage, which selects the book mesh and serves as a player navigation aid; it never touches position. The runtime architecture (Three.js scene, tiling, terrain, lighting) is unchanged from the original plan and not yet built.
 
 ## Concept
 
 A browser-based 3D world the user walks through. The world is a low-poly desert scattered with books, each one representing a Wikipedia article about a historical figure. Approaching a book surfaces the article title and lead text and offers a link to read the full article on Wikipedia.
 
-The player spawns at year 2000 in the center of the world. Radial distance from the center represents distance into the past: walking outward moves the player back in time, and book density thins out with depth, expressing the gaps in collectively recorded knowledge. Walking sideways at constant distance threads through contemporaries grouped by semantic neighborhood.
+The player spawns at year 2000 in the center of the world. Radial distance from the center represents distance into the past: walking outward moves the player back in time, and book density thins out with depth, expressing the gaps in collectively recorded knowledge. Walking sideways at constant distance threads through contemporaries grouped by geographic region, since angular position is set by birthplace longitude.
 
 There is no gameplay loop. It is an art project, not a game. The aesthetic and emotional goal is the feeling of walking back into emptier and emptier deep time, with Wikipedia's recency bias as the explicit subject rather than a flaw to be corrected. Pre-history is genuinely sparse and the desert is genuinely vast; that is the piece.
 
@@ -48,7 +48,7 @@ Cold-start cost: roughly 2-3 hours on a 12-thread CPU, dominated by `lbzip2` dec
 
 ### Acquisition and intermediate cache
 
-Between raw-dump parsing and the layout pipeline sits a single Parquet file, `figures.parquet`, that the rest of the preprocessing reads from. The dump-parse stage produces this file once. Downstream stages (filter cuts, embedding, projection, clustering, terrain) never re-open the `.bz2` files.
+Between raw-dump parsing and the layout pipeline sits a series of Parquet files in `pipeline/cache/`, one per stage, each reading the previous stage's output. Only the dump-parse stages (1 and 3) touch the `.bz2` files; every downstream cut, the geo pass, and placement read Parquet. The schema below describes the figure columns carried through; later stages append to them (Stage 5 emits a separate `places.parquet`, Stage 6 appends the placement and landmark columns).
 
 Schema:
 
@@ -59,13 +59,13 @@ Schema:
 - `lead_text` (string) — Wikipedia first paragraph as plain text. The fullest summary we keep without leaving the page.
 - `birth_year` (int32) — signed; negative for BCE
 - `death_year` (int32)
-- `sitelink_count` (int32) — count of language Wikipedias the figure appears on; coarse coverage signal, NOT used as a notability rank (see Concept).
+- `sitelink_count` (int32) — count of language Wikipedias the figure appears on; cross-lingual coverage signal. Never a position coordinate, but it does drive the separate notability axis (landmark tier and book thickness; see Visual variation), read as player-facing recognizability rather than a fame ranking.
 - `claim_count` (int32) — total Wikidata statements on the entity; used as a stub-detection signal in Stage 2 pre-filter, not as a fame rank.
 - `identifier_count` (int32) — number of external authority IDs (VIAF, GND, LoC, ...). Cross-database presence complements `sitelink_count`.
 - `has_image` (bool) — Wikidata P18 is set. Cheap article-elaboration signal; stub-quality figures typically lack a primary image.
 - `gender` (string, nullable) — Wikidata P21 QID
 - `citizenships` (list<string>) — Wikidata P27 QIDs; geographic affiliation, often multiple
-- `birth_place_qid` (string, nullable) — Wikidata P19 QID; resolves to coordinates only if we add a later geo-enrichment pass
+- `birth_place_qid` (string, nullable) — Wikidata P19 QID; resolved to coordinates by the Stage 5 geo pass (`places.parquet`) and used as the primary longitude for angular placement
 - `death_place_qid` (string, nullable) — Wikidata P20 QID
 - `occupations` (list<string>) — Wikidata P106 QIDs, useful for sanity-checking clusters
 - `instance_of_qids` (list<string>) — full P31 list. A figure may carry Q5 (human) alongside markers like Q21070568 (legendary character), letting the runtime visually distinguish documented from semi-legendary figures.
@@ -81,8 +81,10 @@ Pipeline stages:
 2. **Recency and pre-filter cut.** Drop figures with `death_year >= 2000` (the player spawn point sits at year 2000; post-2000 figures are also where still-contested politics concentrate). Drop clearly empty Stage-1 rows (no description, low identifier_count) as a cheap pre-filter before the expensive Stage 3 fetch. This is NOT a notability ranking; it is a stub pre-filter. Final article-quality filtering happens in Stage 3 once article content is available.
 3. **Wikipedia article extraction.** For each surviving title, use the multistream index to seek to the article in the XML dump and pull its wikitext. Parse with `mwparserfromhell`: extract the lead paragraph and the list of `[[link]]` targets. Resolve redirects against a redirects table extracted from the same dump pass.
 4. **Article quality filter.** Drop articles below a word-count or lead-completeness threshold. The cut criterion is "is this a real article" not "is this person famous." Target output: small enough to ship (see Target scale) while preserving the ordinary-people texture that makes the piece honest about Wikipedia coverage.
-5. **Link-graph restriction.** Replace each article's outgoing links with the subset whose resolved target is itself a row in our filtered set. Available to whichever embedding ends up driving angular placement (see Embedding).
-6. **Write Parquet.** Single file, one row per figure, atomic rewrite.
+5. **Place extraction.** Collect every birth and death place QID and resolve its coordinates and country from Wikidata, writing `places.parquet`. This is the geo-enrichment pass that turns a birthplace QID into a longitude for angular placement.
+6. **Placement.** Assign each figure a radial-time position (era as radius, population-equalized longitude as angle; see Placement and density) and derive its landmark tier. Writes `placement.parquet`.
+
+(Link-graph restriction is folded into Stage 3, where outgoing links are resolved through redirects and filtered to in-corpus targets as each article is parsed.)
 
 Stages 1 and 3 are the slow ones (bz2-bound). Stages 2, 4, 5, 6 are seconds to minutes. The Parquet file is the boundary that lets us iterate freely on everything downstream.
 
@@ -94,24 +96,21 @@ Wikidata-based filter:
 
 Rationale: Wikidata gives a clean, principled filter and yields useful derived properties (lifespan, occupation, era, nationality) for free. Category-based filtering inside Wikipedia is messy and inconsistent. Notability ranking is explicitly avoided: the piece is meant to be an honest map of who Wikipedia covers, including the long tail of ordinary figures.
 
-### Embedding
+### Angular placement
 
-Both options are worth running for comparison; preference shifted after the books/time pivot:
+The original plan set angular position from an embedding (sentence-transformers on the lead, or node2vec on the people-link subgraph) projected through UMAP, grouping contemporaries by semantic neighborhood. The Stage 1-4 data review killed this. Both signals encode social class: the people-link graph is assortative by prominence (edges with both endpoints in the top 10% are ~22x over-represented), and even a prominence-blind version that down-weights hub links by `1/sqrt(degree)` did not fix it, because fame in this corpus is fundamentally geographic. Recognizable figures concentrate in a narrow Western-European longitude band, so any axis correlated with prominence collapses them into a single wedge. Grouping by social class is the one thing the piece must avoid.
 
-- **Sentence-transformers (`all-MiniLM-L6-v2`) on the lead paragraph.** Produces a "museum of types" layout: composers near composers, generals near generals. Era is a strong natural axis since biographical leads carry period-specific vocabulary and entity references. This is the better default under the books/time framing, where angular position should group contemporaries by what-kind-of-person rather than by co-citation.
-- **Node2vec (or DeepWalk) on the people-restricted Wikipedia link subgraph.** Captures relational proximity (who is cited alongside whom in Wikipedia's prose). Originally the primary plan when the framing was narrative discovery via co-linked neighbors. The link-graph extraction in Stage 5 still runs, so this option remains available.
+So angle is geography, made honest by equalization. Each figure's birthplace (else death place) longitude is mapped through its population CDF:
 
-Why node2vec instead of raw graph distance: the Wikipedia link graph is dense, scale-free, and noisy. Major hubs (Napoleon, Aristotle) dominate raw shortest-path projections and gravitationally pull unrelated figures toward them. Node2vec's random-walk sampling distributes attention more evenly and yields a smooth vector space that UMAP handles well. The same UMAP step ingests either embedding.
+    angle = 2*pi * (#figures with longitude <= this) / (#geo-anchored figures)
 
-### Projection to 2D
-
-UMAP, not t-SNE. UMAP preserves global structure, which matters when the 2D space becomes a walkable world. Inter-cluster distances need to mean something.
+Dense longitude bands stretch across a wide arc and sparse ones shrink to slivers, so every direction carries comparable population while east-west order and regional adjacency survive (China stays "up", the Americas "down-left"). The transform is global, so a region keeps a stable angle across every era ring. Raw longitude was rejected: it leaves the disc lopsided and renders the Western overrepresentation as a literal bright wedge. Equalization trades that visibility for a navigable field, and the primary subject, recency, stays honest on the radial axis regardless. About 73% of figures are geo-anchored; the rest take a deterministic per-QID random angle. The people-link graph still ships from Stage 3 in case a future iteration wants it, but nothing in placement consumes it, and there is no embedding or UMAP step in the pipeline.
 
 ### Placement and density
 
-The piece pivots on **time as radial distance from origin.** The player spawns at year 2000 in the center; walking outward moves the player back in time, and book density thins out with depth, making the gaps in collective recorded knowledge the explicit subject of the piece. Angular position around each year-ring is driven by the embedding (see above), so books at the same radius are contemporaries grouped by semantic neighborhood: a sweep at fixed radius takes the player through similar-era similar-kind figures, and walking inward or outward threads a slice of time through dense modernity into sparse antiquity.
+The piece pivots on **time as radial distance from origin.** The player spawns at year 2000 in the center; walking outward moves the player back in time, and book density thins out with depth, making the gaps in collective recorded knowledge the explicit subject of the piece. Radius is `R_MAX * t^0.75` with `t = (2000 - death_year) / 2800`, the sub-linear exponent compressing the dense recent centuries so the modern crowd stays legible rather than smearing into a thin core. Angular position around each year-ring is geographic (see Angular placement), so books at the same radius are contemporaries grouped by region: a sweep at fixed radius takes the player through similar-era figures from neighbouring parts of the world, and walking inward or outward threads a slice of geography through dense modernity into sparse antiquity.
 
-**Open layout question, decide after first visualization:** whether pure UMAP-2D produces a clean radial-time feel on its own (since era is a dominant axis in biographical-lead embeddings) or whether year should be explicitly enforced on the radial dimension with UMAP determining only the angular position around each ring. First try is to let it emerge from pure UMAP, plotted with the radial-time axis as one of the two; fallback is post-hoc radial reprojection from year, with angular position taken from the UMAP layout.
+Radial distance is enforced explicitly from death_year and angle comes from geography, so the layout is computed directly rather than projected. The earlier open question of whether radial-time should emerge from a pure UMAP-2D layout is moot now that there is no embedding to project.
 
 Hard overlaps resolved with minimal jitter or a few iterations of pairwise repulsion using a spatial hash. Lloyd (Voronoi) relaxation is the heavier alternative if needed.
 
@@ -121,8 +120,8 @@ The density distribution is exported as a 2D field that shapes the terrain (see 
 
 Two channels carry orthogonal signals:
 
-- **Mesh variant: cluster.** K-means the embedding into 5-10 clusters. Each cluster maps to one of the 2-3 base book meshes (open, closed, stacked; mesh reuse across clusters is acceptable). Reinforces the clustering visually.
-- **Thickness or condition: article richness.** Book thickness scales with article word count (or sitelink count as a cheap proxy). Surface condition (well-bound to falling-apart, dust accumulation) can encode age. Shakespeare gets a heavy folio; the obscure regional politician gets a slim pamphlet. Gives the article-quality signal a visual home without it feeling like a fame ranking.
+- **Mesh variant: landmark tier.** The `landmark_tier` column (major / minor / ordinary) selects the base book mesh. Majors read as grander books (a folio or monument silhouette) so a recognizable figure is legible as a reference point from a distance; minors and ordinary figures take the plainer open/closed/stacked meshes, with the specific variant randomized per instance for texture. This replaces the original k-means-cluster basis, which is gone with the embedding and would no longer reinforce anything spatial. Book color and a per-tier scale multiplier are candidate extra channels, deferred until there is a scene to tune them against.
+- **Thickness: notability magnitude.** Book thickness scales with `sitelink_count` on a gentle (log) curve, so the modern crowd keeps internal texture and a Confucius or Shakespeare stands taller than a mid-tier major. Surface condition (well-bound to falling-apart, dust accumulation) can still encode age. Read as player-facing recognizability and a navigation cue, not a fame ranking: the books framing already disclaims any monument-erecting notability claim (see Concept).
 
 Era is already encoded by radial position, so a separate color-by-era channel is largely redundant; a subtle sun-faded tint at the deep end may still help legibility at distance.
 
@@ -153,21 +152,21 @@ Per-book record (target ~500 bytes uncompressed):
 - Wikidata QID or stable ID
 - Title
 - Lead sentence
-- World coordinates `(x, z)` (Y derived from heightmap at runtime)
-- Cluster ID / book mesh index
+- World coordinates `(x, z)` (from placement: radial-time distance and geographic angle; Y derived from heightmap at runtime)
+- Landmark tier (major / minor / ordinary; selects the book mesh)
 - Death year (drives radial position; also surfaced in placard)
 - Birth year (surfaced in placard)
-- Thickness or richness scalar (drives book mesh thickness; from article word count)
+- `sitelink_count` (drives book thickness on a log curve; the notability magnitude)
 - Random seed for per-instance jitter
 - Wikipedia URL
 
 Heightmap format: raw `Float32Array` dumped to a binary file is the simplest path (4MB at 1024×1024, gzips well since heightfields are smooth). Alternative: 16-bit PNG, smaller but needs careful decoding. 8-bit PNG loses too much precision at this world scale.
 
-Shipped as a single bundle at the target scale of ~10k books (~5MB compressed JSON plus ~2-3MB compressed heightmap). Spatial chunking by tile becomes necessary above ~30-50k.
+At the original ~10k target a single bundle was viable (~5MB compressed JSON plus ~2-3MB compressed heightmap). At the actual ~419k scale the data ships chunked per spatial tile instead; the tile grid (see Runtime architecture) doubles as the chunk boundary.
 
 ## Target scale
 
-Initial target: ~10k books. Comfortable in the browser with instanced meshes, still feels vast. Easier to scale up than to scale down. Architecture supports growth via spatial chunking of the data file when needed. Stage 1 produces ~914k figures; the article-quality cut and the death_year < 2000 cut together need to bring that down to roughly this scale.
+The ~10k figure was the original target, when the plan was an aggressive notability-style cut. That changed. The Stage 4 quality cut keys on whether an article carries real narrative past its opener, not on fame, to preserve the ordinary-people texture that makes the piece honest about Wikipedia coverage. After the death_year < 2000 and quality cuts the corpus is ~419k figures, and the world ships at that scale. This makes spatial tile chunking of the data required rather than optional (see Output format and Runtime architecture); a single bundle is viable only up to ~30-50k.
 
 ## Runtime architecture
 
@@ -274,11 +273,11 @@ Terrain (runtime):
 
 Book placement:
 
-- Sentence-transformer (`all-MiniLM-L6-v2`) or node2vec embedding of the figure set (see Embedding for the comparison).
-- UMAP for embedding-to-2D projection.
-- Radial-time layout: death_year mapped to radial distance, either implicitly via UMAP or explicitly via post-hoc reprojection (see Placement and density).
-- K-means clustering on the embedding for book mesh variant assignment.
-- Iterative pairwise repulsion via spatial hash for overlap resolution.
+- Radial-time layout: death_year mapped to radial distance via `R_MAX * t^0.75`.
+- Population-CDF (quantile) transform of birthplace longitude for the angular coordinate (see Angular placement).
+- Per-QID hash (blake2b) for deterministic jitter and for the random angle of geo-less figures.
+- Landmark tiering: absolute sitelink floor for the global tier, top-per-(sector x era) cell for the local tier (see Visual variation).
+- Iterative pairwise repulsion via spatial hash for overlap resolution, if hard overlaps need it.
 - Lloyd (Voronoi) relaxation as a heavier alternative if needed.
 
 Lighting and shadows:
@@ -309,9 +308,9 @@ Explicitly not building: BVH/octree, pathfinding, physics engine, PBR materials.
 
 These are deferred until they need to be made:
 
-1. **Final book count.** ~10k is the working target. Stage 1 produces ~914k figures; the article-quality cut and the death_year < 2000 cut bring this down. Final number depends on how dense the world feels in practice.
-2. **Layout signal: text vs graph embedding.** Sentence-transformer is the working default under the books/time framing (era is a strong natural axis in biographical leads). Generate a node2vec layout in parallel for comparison; pick after walking both.
-3. **Radial-time enforcement: emergent vs explicit.** First try is pure UMAP-2D, expecting era to surface as roughly the radial axis on its own. Fallback is post-hoc reprojection that pins radial distance to year and lets UMAP own only the angular component. Decide after first visualization.
+1. **Final book count. (Resolved: ~419k.)** The quality cut keys on article narrative, not fame, so the world ships at ~419k figures rather than the original ~10k. Density is handled by the radial layout and tiling, not by a notability cut.
+2. **Layout signal: text vs graph embedding. (Resolved: geography, no embedding.)** Both embedding options were dropped. The data review showed text and link-graph signals both encode social class and would cluster the famous into one wedge. Angular position is the population-equalized longitude of birthplace instead (see Angular placement).
+3. **Radial-time enforcement: emergent vs explicit. (Resolved: explicit.)** Radius is computed directly from death_year; there is no projection for it to emerge from.
 4. **Date resolution and uncertainty.** Many ancient figures have invented or wide date ranges (the Buddha listed as -500 to -500). Options: snap to published `death_year` and accept false precision, or render uncertain figures as a smudge, range, or dimmer marker. A piece *about* gaps in knowledge probably wants to express date uncertainty honestly.
 5. **Birth vs death year for radial placement.** Working default is `death_year` (when the record closes). Reconsider if it produces visual artifacts (long-lived figures with influential early careers showing up "later" than expected).
 6. **Heightmap format.** Raw `Float32Array` binary is the working plan. Switch to 16-bit PNG if bundle size matters more than load simplicity.
