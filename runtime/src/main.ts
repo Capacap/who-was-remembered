@@ -43,17 +43,26 @@ async function loadPositions(url: string) {
   const y = new Float32Array(buf, off, n);
   off += n * 4;
   const tier = new Uint8Array(buf, off, n);
-  return { n, x, y, tier };
+  off += n;
+  // geo source / placement confidence: 0 birth, 1 death, 2 citizenship,
+  // 3 gazetteer, 4 residue (no recorded location -> placed adrift).
+  const geo = new Uint8Array(buf, off, n);
+  return { n, x, y, tier, geo };
 }
 
 function buildField(field: Awaited<ReturnType<typeof loadPositions>>) {
-  const { n, x, y, tier } = field;
-  const geo = new THREE.BoxGeometry(1.4, 1, 1.4);
+  const { n, x, y, tier, geo } = field;
+  const box = new THREE.BoxGeometry(1.4, 1, 1.4);
   const mat = new THREE.MeshLambertMaterial();
-  const mesh = new THREE.InstancedMesh(geo, mat, n);
+  const mesh = new THREE.InstancedMesh(box, mat, n);
   mesh.instanceMatrix.setUsage(THREE.StaticDrawUsage);
 
+  // residue (geo === 4) has no recorded location; its angle is a hash, not
+  // geography. Wash it toward a pale grey so it reads as adrift rather than
+  // confidently placed, the spatial echo of the date-uncertainty haze.
+  const ADRIFT = new THREE.Color(0xb7b0a2);
   const dummy = new THREE.Object3D();
+  const col = new THREE.Color();
   const rnd = mulberry32(0x1234abcd);
   for (let i = 0; i < n; i++) {
     const h = TIER_HEIGHT[tier[i]];
@@ -72,7 +81,9 @@ function buildField(field: Awaited<ReturnType<typeof loadPositions>>) {
     dummy.scale.set(foot, h, foot);
     dummy.updateMatrix();
     mesh.setMatrixAt(i, dummy.matrix);
-    mesh.setColorAt(i, TIER_COLOR[tier[i]]);
+    col.copy(TIER_COLOR[tier[i]]);
+    if (geo[i] === 4) col.lerp(ADRIFT, 0.75);
+    mesh.setColorAt(i, col);
   }
   mesh.instanceMatrix.needsUpdate = true;
   if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;

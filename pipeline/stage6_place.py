@@ -33,9 +33,17 @@ visibility of the West's overrepresentation (which raw longitude rendered as a
 bright wedge) for a navigable field; the primary subject, recency, lives on the
 radial axis and stays honest in every version.
 
-Geo-less figures (~26%, no resolvable birth/death place) take a deterministic
-per-QID uniform-random angle, which is already equalized. Prominence never
-enters position; it drives book thickness in the runtime, a separate axis.
+A quarter of figures have no birth/death place. Rather than scatter them at
+random, they fall through a ladder that reads only recorded data: P27
+citizenship, then a hand-curated gazetteer over the English description
+(demonyms, historical polities, regions; see gazetteer.json). A resolved
+country does not become a centroid; the figure borrows a real longitude
+sampled from an anchored compatriot, so it spreads across that country's true
+arc and folds into the same population CDF. What stays unresolved is genuinely
+place-less in the record and keeps the deterministic per-QID random angle, with
+geo_source left None so the runtime can mark it adrift rather than pretend it
+is anchored. Prominence never enters position; it drives book thickness in the
+runtime, a separate axis.
 
 That thickness axis is captured here as landmark_tier (major / minor /
 ordinary). A landmark exists purely for the PLAYER's benefit: it is a figure
@@ -60,7 +68,9 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import math
+import re
 import time
 from pathlib import Path
 
@@ -71,6 +81,7 @@ import pyarrow.parquet as pq
 ROOT = Path(__file__).resolve().parent
 FIGURES_PATH = ROOT / "cache" / "wikidata_figures_quality.parquet"
 PLACES_PATH = ROOT / "cache" / "places.parquet"
+GAZETTEER_PATH = ROOT / "gazetteer.json"
 OUT_PATH = ROOT / "cache" / "placement.parquet"
 
 R_MAX = 1000.0
@@ -106,10 +117,40 @@ def hash_qid(qid: str) -> int:
     return int.from_bytes(hashlib.blake2b(qid.encode(), digest_size=8).digest(), "big")
 
 
+def load_gazetteer(path: Path) -> tuple[dict, dict, re.Pattern, set, int]:
+    """Load the hand-curated geography map and compile its description matcher.
+
+    Returns (citizenship_aliases, regions, pattern, ignore). The pattern matches
+    any region key or ignore phrase on word boundaries, longest phrase first so
+    'ancient greek' wins over 'greek' and 'roman catholic' is caught before the
+    bare 'roman' polity. min_pool lives on the dict for the caller to read.
+    """
+    data = json.loads(path.read_text())
+    regions = {k.lower(): v for k, v in data["regions"].items()}
+    ignore = {k.lower() for k in data.get("_ignore", [])}
+    aliases = data["citizenship_aliases"]
+    keys = sorted(set(regions) | ignore, key=len, reverse=True)
+    pattern = re.compile(r"\b(" + "|".join(re.escape(k) for k in keys) + r")\b")
+    return aliases, regions, pattern, ignore, data.get("min_pool", 30)
+
+
+def match_region(desc: str | None, pattern: re.Pattern, regions: dict, ignore: set) -> str | None:
+    """First region QID named in a description, skipping ignore-list collisions."""
+    if not desc:
+        return None
+    for m in pattern.finditer(desc.lower()):
+        key = m.group(1)
+        if key in ignore:
+            continue
+        return regions[key]
+    return None
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--figures", type=Path, default=FIGURES_PATH)
     parser.add_argument("--places", type=Path, default=PLACES_PATH)
+    parser.add_argument("--gazetteer", type=Path, default=GAZETTEER_PATH)
     parser.add_argument("--out", type=Path, default=OUT_PATH)
     parser.add_argument("--seed", type=int, default=20260529)
     args = parser.parse_args()
@@ -140,6 +181,11 @@ def main() -> None:
     birth_years = figures["birth_year"].to_pylist()
     birth_qs = figures["birth_place_qid"].to_pylist()
     death_qs = figures["death_place_qid"].to_pylist()
+    descriptions = figures["description"].to_pylist()
+    citizenships = figures["citizenships"].to_pylist()
+
+    aliases, regions, gaz_re, gaz_ignore, min_pool = load_gazetteer(args.gazetteer)
+    print(f"  gazetteer: {len(regions):,} region terms, {len(aliases):,} citizenship aliases")
 
     rng = np.random.default_rng(args.seed)
 
@@ -173,7 +219,9 @@ def main() -> None:
     below = radii < R_INNER
     radii[below] = 2 * R_INNER - radii[below]
 
-    # --- resolve a longitude per figure (birth, else death) ---
+    # --- tier 1: longitude from a real birth (else death) place ---
+    # The strongest anchor: an actual coordinate. Everything below borrows from
+    # the spread of these figures rather than inventing a point.
     lon_per = np.full(n, np.nan)
     geo_source = np.empty(n, dtype=object)
     countries = np.empty(n, dtype=object)
@@ -189,17 +237,69 @@ def main() -> None:
             geo_source[i] = None
         countries[i] = place_country.get(b) or place_country.get(d)
 
-    geo_mask = ~np.isnan(lon_per)
-    n_geo = int(geo_mask.sum())
-    print(f"  geo-anchored: {n_geo:,} ({n_geo / n * 100:.1f}%)")
+    anchored = ~np.isnan(lon_per)
+    n_anchored = int(anchored.sum())
+    print(f"  tier 1 birth/death place: {n_anchored:,} ({n_anchored / n * 100:.1f}%)")
+
+    # Per-country pools of anchored longitudes. A geo-less figure we can assign a
+    # country (via citizenship or description) borrows a real longitude from a
+    # compatriot, so it spreads across that country's true arc instead of piling
+    # on a single centroid. Pools below min_pool are too thin to sample honestly.
+    pools: dict[str, np.ndarray] = {}
+    for cc in set(c for c in countries[anchored] if c):
+        lons = lon_per[anchored & (countries == cc)]
+        if len(lons) >= min_pool:
+            pools[cc] = lons
+
+    def pool_for(cc: str | None) -> str | None:
+        """Resolve a citizenship/region QID to a country with a sampleable pool."""
+        if cc is None:
+            return None
+        cc = aliases.get(cc, cc)
+        return cc if cc in pools else None
+
+    # --- tier 2: citizenship (P27), tier 3: description gazetteer ---
+    # Both read recorded data, then sample a longitude from the country's pool.
+    # Precedence: structured citizenship beats parsed text. Whatever stays
+    # unresolved is genuinely place-less in the record and kept as residue.
+    n_cit = n_gaz = 0
+    for i in np.where(~anchored)[0]:
+        cc = None
+        cit = citizenships[i]
+        if cit:
+            cc = pool_for(cit[0])
+            if cc is not None:
+                geo_source[i] = "citizenship"
+                n_cit += 1
+        if cc is None:
+            cc = pool_for(match_region(descriptions[i], gaz_re, regions, gaz_ignore))
+            if cc is not None:
+                geo_source[i] = "gazetteer"
+                n_gaz += 1
+        if cc is not None:
+            lon_per[i] = rng.choice(pools[cc])
+            countries[i] = cc
+
+    located = ~np.isnan(lon_per)
+    n_located = int(located.sum())
+    residue = n - n_located
+    print(
+        f"  tier 2 citizenship: {n_cit:,}   tier 3 gazetteer: {n_gaz:,}   "
+        f"residue (unplaceable): {residue:,} ({residue / n * 100:.1f}%)"
+    )
+    print(f"  located from recorded data: {n_located:,} ({n_located / n * 100:.1f}%)")
 
     # --- population CDF of longitude -> equalized angle ---
-    sorted_lons = np.sort(lon_per[geo_mask])
+    # Built over everyone we could locate (tiers 1-3). Because tiers 2-3 sampled
+    # from the anchored distribution, adding them barely moves the CDF for tier-1
+    # figures while spreading the borrowed ones across their countries' arcs.
+    sorted_lons = np.sort(lon_per[located])
     base = np.empty(n, dtype=np.float64)
-    cdf = np.searchsorted(sorted_lons, lon_per[geo_mask], side="right") / n_geo
-    base[geo_mask] = 2 * math.pi * cdf
-    # geo-less: deterministic per-qid uniform random (already equalized)
-    missing = np.where(~geo_mask)[0]
+    cdf = np.searchsorted(sorted_lons, lon_per[located], side="right") / n_located
+    base[located] = 2 * math.pi * cdf
+    # residue: deterministic per-qid uniform random. Unknown location is left
+    # unknown (geo_source is None) for the renderer to mark, not faked precise.
+    missing = np.where(~located)[0]
     base[missing] = np.array(
         [(hash_qid(qids[i]) % 10_000_000) / 10_000_000 * 2 * math.pi for i in missing]
     )
@@ -217,16 +317,16 @@ def main() -> None:
     is_major = sitelinks >= NOTABILITY_FLOOR
     tier[is_major] = "major"
     # local source: in each region-and-era cell with no major to anchor it, the
-    # most-covered geo-anchored figure becomes the local reference point. Only
-    # geo-anchored figures qualify: a minor landmark is noteworthy in the
-    # context of its position, and a geo-less figure's angle is just a hash.
+    # most-covered located figure becomes the local reference point. Only located
+    # figures qualify (tiers 1-3): a minor landmark is noteworthy in the context
+    # of its position, and a residue figure's angle is just a hash.
     sec = (angle % (2 * math.pi)) // (2 * math.pi / TIER_SECTORS)
     rmax = radii.max() or 1.0
     ring = np.clip((radii / rmax * TIER_RINGS).astype(int), 0, TIER_RINGS - 1)
     minor_n = 0
     for s in range(TIER_SECTORS):
         for rr in range(TIER_RINGS):
-            cell = np.where(geo_mask & (sec == s) & (ring == rr))[0]
+            cell = np.where(located & (sec == s) & (ring == rr))[0]
             if len(cell) == 0:
                 continue
             best = cell[np.argmax(sitelinks[cell])]
