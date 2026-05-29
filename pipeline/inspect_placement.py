@@ -187,23 +187,32 @@ def select_landmarks(
     titles: list[str | None],
     sitelinks: list[int | None] | None,
     angles: np.ndarray,
+    floor: int,
     top_n: int,
     mode: str,
     sectors: int,
     override_titles: list[str] | None,
 ) -> list[int]:
-    """Indices to overlay as landmarks, derived from sitelink_count.
+    """Major beacons: the GLOBAL notability source.
 
-    mode="global": top-N by sitelink across the whole corpus. Simple, but it
-    reproduces the corpus's Western skew in the milestone layer: the dense
-    European arc gets studded with beacons while genuine regional landmarks
-    (Li Bai, Qin Shi Huang) fall below the global bar.
+    Notability is its own axis, separate from placement, and it has two
+    independent feeds. This is the global one: a figure is a recognizable
+    milestone if its sitelink_count (cross-lingual coverage) clears an absolute
+    floor, wherever it sits. That is what makes every Roman emperor a beacon.
 
-    mode="local": top-(N/sectors) by sitelink within each angular sector, so
-    every populated direction gets beacons at its own scale. This is the honest
-    test of whether the desert is navigable region by region.
+    The earlier per-sector rank selection was the wrong shape: it promoted only
+    the best-in-direction and pooled all eras, so Caesar and Augustus captured
+    the Roman wedge while Nero, Caligula, Tiberius, Cato and Mark Antony, all
+    with 90+ sitelinks, stayed plain books and Caesar read as lonely. An
+    absolute floor sees their recognizability directly. It is Western/recent
+    dense in raw COUNT, which is honest about where global recognizability
+    actually concentrates; the local source (select_minor_landmarks) is what
+    keeps sparse directions and the deep past from going dark.
 
-    An explicit title list overrides both, for ad-hoc comparison.
+    mode="floor" (default): sitelink_count >= floor.
+    mode="global": top-N by sitelink (fixed budget, for comparison).
+    mode="local": top-(N/sectors) per angular sector (the old behaviour).
+    An explicit title list overrides everything, for ad-hoc comparison.
     """
     if override_titles:
         want = {s.lower() for s in override_titles}
@@ -211,6 +220,8 @@ def select_landmarks(
     if sitelinks is None:
         return []
     sl = np.array([s if s is not None else 0 for s in sitelinks])
+    if mode == "floor":
+        return list(np.where(sl >= floor)[0])
     if mode == "global":
         return list(np.argsort(-sl)[:top_n])
     per = max(1, top_n // sectors)
@@ -233,15 +244,16 @@ def select_minor_landmarks(
     rings: int,
     exclude: set[int],
 ) -> list[int]:
-    """Locally-significant beacons: top figure by sitelink in each
-    (angular sector x radial ring) cell, excluding the global majors.
+    """Minor beacons: the LOCAL notability source.
 
-    Major landmarks pool to the dense, recent, Western cells and leave the deep
-    past and sparse directions bare. Gridding by BOTH direction and era and
-    taking each cell's local best gives those empty patches something to walk
-    toward (Darius in the Persian deep-past, Djoser in the Egyptian), even when
-    the figure is globally obscure. It is noteworthy in the context of its
-    position, which is exactly the point.
+    The global floor (select_landmarks) catches everyone with absolute
+    recognizability, but it goes dark in directions and eras where nobody clears
+    the bar, the deep-past Persian, Egyptian, Mesopotamian, mid-Pacific cells.
+    This feed takes the top figure by sitelink in each (angular sector x radial
+    ring) cell that has no global major, so every populated patch has at least
+    one target to walk toward (Djoser, Narmer, the Achaemenid kings) even when
+    that figure is globally obscure. Noteworthy in the context of its position,
+    which is exactly the point. The two feeds together are the notability axis.
     """
     if sitelinks is None:
         return []
@@ -297,8 +309,8 @@ def plot_landmarks(
         sizes = np.full(len(hits), 60)
     ax.scatter(lx, ly, c="#ff7a18", s=sizes, alpha=0.9, edgecolors="white",
                linewidths=0.5, zorder=3)
-    # label the most notable third of majors to keep the plot readable
-    label_cut = np.percentile(sizes, 66) if len(sizes) else 0
+    # label only the most notable few dozen majors to keep the plot readable
+    label_cut = np.sort(sizes)[-40] if len(sizes) > 40 else (sizes.min() if len(sizes) else 0)
     for i, sz in zip(hits, sizes):
         if sz < label_cut:
             continue
@@ -333,11 +345,18 @@ def main() -> None:
     parser.add_argument("--bins", type=int, default=800)
     parser.add_argument(
         "--top-landmarks", type=int, default=96,
-        help="Total landmarks to overlay (by sitelink_count).",
+        help="Budget for --landmark-mode global/local (by sitelink_count).",
     )
     parser.add_argument(
-        "--landmark-mode", choices=["global", "local"], default="local",
-        help="global = top-N corpus-wide; local = top per angular sector.",
+        "--landmark-floor", type=int, default=80,
+        help="Sitelink floor for the global notability source "
+             "(--landmark-mode floor): a figure is a major beacon if its "
+             "sitelink_count clears this, wherever it sits.",
+    )
+    parser.add_argument(
+        "--landmark-mode", choices=["floor", "global", "local"], default="floor",
+        help="floor = absolute sitelink floor (global source, default); "
+             "global = top-N corpus-wide; local = top per angular sector.",
     )
     parser.add_argument("--landmark-sectors", type=int, default=12)
     parser.add_argument(
@@ -380,7 +399,8 @@ def main() -> None:
         angles = np.arctan2(y, x)
         hits = select_landmarks(
             meta["title"], meta["sitelink_count"], angles,
-            args.top_landmarks, args.landmark_mode, args.landmark_sectors, override,
+            args.landmark_floor, args.top_landmarks, args.landmark_mode,
+            args.landmark_sectors, override,
         )
         minor = None
         if args.minor_landmarks:
