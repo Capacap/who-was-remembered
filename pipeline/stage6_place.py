@@ -32,6 +32,20 @@ Geo-less figures (~26%, no resolvable birth/death place) take a deterministic
 per-QID uniform-random angle, which is already equalized. Prominence never
 enters position; it drives book thickness in the runtime, a separate axis.
 
+That thickness axis is captured here as landmark_tier (major / minor /
+ordinary). A landmark exists purely for the PLAYER's benefit: it is a figure
+the player is more likely to recognize, so a taller book gives them a reference
+point to steer by and orient against while crossing the desert. Recognizability
+has two independent sources. The GLOBAL one is an absolute sitelink_count floor:
+cross-lingual coverage means real recognizability wherever a figure sits, which
+is what makes every Roman emperor a landmark. The LOCAL one fills directions and
+eras where nobody clears the floor (the deep-past Egyptian, Persian, Mesopotamian
+cells): the most-covered geo-anchored figure in each region-and-era cell becomes
+a reference point even when globally obscure, because it is the thing worth
+walking toward in that part of the map. The continuous magnitude stays in
+sitelink_count; landmark_tier is the categorical "is this a reference point"
+flag the renderer reads to choose a book's asset and labelling.
+
 Run:
     uv run pipeline/stage6_place.py
     uv run pipeline/inspect_placement.py --in pipeline/cache/placement.parquet
@@ -59,6 +73,14 @@ TIME_SPAN = 2800.0
 RADIUS_ALPHA = 0.75
 RADIUS_JITTER = 0.012  # fraction of r_max
 ANGLE_JITTER = 0.10    # radians
+
+# Notability / landmark tier. A landmark is a figure the player is more likely
+# to recognize, so it can serve as a reference point while exploring. Two
+# sources feed it (see module docstring); both are tunable knobs frozen into the
+# output at bake time, which is cheap to redo since this stage runs in seconds.
+NOTABILITY_FLOOR = 80  # sitelink_count >= this => globally recognizable "major"
+TIER_SECTORS = 24      # local-coverage grid: angular sectors
+TIER_RINGS = 14        # local-coverage grid: radial / era rings
 
 
 def hash_qid(qid: str) -> int:
@@ -142,12 +164,43 @@ def main() -> None:
     x = radii * np.cos(angle)
     y_coord = radii * np.sin(angle)
 
+    # --- landmark tier: which books the player can use as reference points ---
+    sitelinks = np.array(
+        [s if s is not None else 0 for s in figures["sitelink_count"].to_pylist()]
+    )
+    tier = np.full(n, "ordinary", dtype=object)
+    # global source: absolute recognizability, wherever the figure sits.
+    is_major = sitelinks >= NOTABILITY_FLOOR
+    tier[is_major] = "major"
+    # local source: in each region-and-era cell with no major to anchor it, the
+    # most-covered geo-anchored figure becomes the local reference point. Only
+    # geo-anchored figures qualify: a minor landmark is noteworthy in the
+    # context of its position, and a geo-less figure's angle is just a hash.
+    sec = (angle % (2 * math.pi)) // (2 * math.pi / TIER_SECTORS)
+    rmax = radii.max() or 1.0
+    ring = np.clip((radii / rmax * TIER_RINGS).astype(int), 0, TIER_RINGS - 1)
+    minor_n = 0
+    for s in range(TIER_SECTORS):
+        for rr in range(TIER_RINGS):
+            cell = np.where(geo_mask & (sec == s) & (ring == rr))[0]
+            if len(cell) == 0:
+                continue
+            best = cell[np.argmax(sitelinks[cell])]
+            if not is_major[best]:  # cell has no major; promote its local best
+                tier[best] = "minor"
+                minor_n += 1
+    print(
+        f"  landmark tiers: {int(is_major.sum()):,} major, {minor_n:,} minor, "
+        f"{n - int(is_major.sum()) - minor_n:,} ordinary"
+    )
+
     out = figures.append_column("radius", pa.array(radii, type=pa.float64()))
     out = out.append_column("angle", pa.array(angle, type=pa.float64()))
     out = out.append_column("x", pa.array(x, type=pa.float64()))
     out = out.append_column("y", pa.array(y_coord, type=pa.float64()))
     out = out.append_column("geo_source", pa.array(geo_source.tolist(), type=pa.string()))
     out = out.append_column("country_qid", pa.array(countries.tolist(), type=pa.string()))
+    out = out.append_column("landmark_tier", pa.array(tier.tolist(), type=pa.string()))
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
     pq.write_table(out, args.out, compression="zstd")
