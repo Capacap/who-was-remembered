@@ -1,0 +1,21 @@
+{
+  "_comment": "Recognizable anchor figures used to eyeball whether high-prominence books spread across the desert or clump into one sector. Matched against the `title` column case-insensitively. These are NOT a placement input; they only annotate inspection plots. Book thickness in the final piece will scale with sitelink_count, so these are the would-be milestones.",
+  "figures": [
+    "Homer", "Confucius", "Sun Tzu", "Socrates", "Plato", "Aristotle",
+    "Alexander the Great", "Cicero", "Julius Caesar", "Cleopatra", "Augustus",
+    "Charlemagne", "Thomas Aquinas", "Marco Polo", "Dante Alighieri",
+    "Genghis Khan", "Joan of Arc", "Christopher Columbus", "Leonardo da Vinci",
+    "Nicolaus Copernicus", "Niccolò Machiavelli", "Martin Luther",
+    "Galileo Galilei", "William Shakespeare", "Rembrandt", "Isaac Newton",
+    "Johann Sebastian Bach", "Voltaire", "Jean-Jacques Rousseau",
+    "Wolfgang Amadeus Mozart", "Adam Smith", "George Washington",
+    "Immanuel Kant", "Thomas Jefferson", "Napoleon", "Johann Wolfgang von Goethe",
+    "Ludwig van Beethoven", "Abraham Lincoln", "Karl Marx", "Charles Darwin",
+    "Richard Wagner", "Fyodor Dostoevsky", "Charles Dickens", "Otto von Bismarck",
+    "Leo Tolstoy", "Mark Twain", "Vincent van Gogh", "Friedrich Nietzsche",
+    "Queen Victoria", "Nikola Tesla", "Sigmund Freud", "Marie Curie",
+    "Franz Kafka", "Vladimir Lenin", "Mahatma Gandhi", "Wolfgang Pauli",
+    "Albert Einstein", "Adolf Hitler", "Joseph Stalin", "Winston Churchill",
+    "Pablo Picasso", "Mao Zedong"
+  ]
+}

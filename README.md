@@ -6,7 +6,7 @@ See [DESIGN.md](DESIGN.md) for the full design document and the rationale behind
 
 ## Status
 
-Preprocessing pipeline in progress. Stages 1 through 4 run end-to-end on the 2026-05 dumps: Stage 1 emits about 914k figures, Stage 2 cuts to 638k on the recency and stub pre-filter, Stage 3 attaches a Wikipedia lead and outgoing link graph to 99.1% of those, and Stage 4 keeps the 419k whose leads carry narrative past the opener. Density runs from a few hundred figures per century in deep antiquity to 279k in the 20th century, which is the temporal gradient the desert framing wants. The runtime (Three.js scene, embedding placement, terrain) is not yet implemented.
+Preprocessing pipeline in progress. Stages 1 through 4 run end-to-end on the 2026-05 dumps: Stage 1 emits about 914k figures, Stage 2 cuts to 638k on the recency and stub pre-filter, Stage 3 attaches a Wikipedia lead and outgoing link graph to 99.1% of those, and Stage 4 keeps the 419k whose leads carry narrative past the opener. Density runs from a few hundred figures per century in deep antiquity to 279k in the 20th century, which is the temporal gradient the desert framing wants. Stages 5 and 6 then resolve birth/death coordinates and assign each figure a radial-time position (era as radius, population-equalized longitude as angle). The runtime (Three.js scene, terrain, tile loading) is not yet implemented.
 
 ## Setup
 
@@ -79,6 +79,23 @@ Run (under a minute):
 uv run pipeline/stage4_quality_cut.py
 ```
 
+### Stage 5: Place extraction
+
+`pipeline/stage5_extract_places.py` reads the Stage 4 parquet, collects every birth and death place QID, and resolves their coordinates and country from Wikidata, writing `places.parquet` (qid, label, lat, lon, instance_of, admin parent, country). This is the geographic lookup Stage 6 needs to turn a birthplace into an angle.
+
+### Stage 6: Placement
+
+`pipeline/stage6_place.py` reads the Stage 4 figures plus `places.parquet` and writes `placement.parquet`, adding polar coordinates (radius, angle) and their Cartesian projection (x, y). Radius is era only: `R_MAX * t^0.75` where `t = (2000 - death_year) / 2800`, so the player at the origin walks outward into the past and the dense recent centuries stay compressed and legible. Angle is the population CDF of the figure's longitude rather than raw longitude: raw longitude makes the angular axis a fame proxy (fame concentrates in the narrow Western-European longitude band and piles into a thin wedge), whereas the CDF gives every direction comparable population while preserving east-west order and regional adjacency. About 73% of figures are geo-anchored; the rest take a deterministic per-QID random angle. Prominence never enters position; it is reserved for book thickness in the runtime.
+
+`pipeline/inspect_placement.py` renders diagnostic PNGs (era, country, density, ring, landmarks) from a placement parquet. Landmark-tier selection (which figures become large milestone books) is still being tuned and is not yet baked into the placement output.
+
+Run (a few seconds each):
+
+```sh
+uv run pipeline/stage5_extract_places.py
+uv run pipeline/stage6_place.py
+```
+
 ### Later stages
 
-Embedding, placement, terrain, and the runtime bundle are described in DESIGN.md but not yet implemented. The runtime will need spatial tile-based loading rather than a single bundle, because 419k books exceeds the ~30-50k DESIGN.md called the single-bundle limit.
+Embedding, terrain, and the runtime bundle are described in DESIGN.md but not yet implemented. The runtime will need spatial tile-based loading rather than a single bundle, because 419k books exceeds the ~30-50k DESIGN.md called the single-bundle limit.
