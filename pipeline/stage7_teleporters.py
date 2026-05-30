@@ -64,19 +64,26 @@ SPREAD_LIMIT = 40.0
 # Wikipedia article titles; they resolve against placement.parquet by title.
 # Edit freely, but keep each list co-located in longitude or the bake will fail.
 ANCHORS: list[tuple[str, list[str]]] = [
-    # the Americas arc (western longitudes, their own sky)
+    # the Americas arc (western longitudes, their own sky). One early-modern US
+    # anchor only: "nineteenth-century America" (Lincoln, Twain, Edison) was
+    # dropped because it sat a short hop from revolutionary America, and
+    # teleporters that close together read as noise, not meaningful travel.
     ("Mesoamerica", ["Moctezuma II", "Nezahualcoyotl (tlatoani)", "Itzcoatl", "Ahuitzotl", "Tlacaelel"]),
     ("the Inca", ["Pachacuti", "Huayna Capac", "Topa Inca Yupanqui", "Huáscar"]),
     ("revolutionary America", ["George Washington", "Thomas Jefferson", "Benjamin Franklin", "John Adams", "Alexander Hamilton"]),
-    ("nineteenth-century America", ["Abraham Lincoln", "Mark Twain", "Frederick Douglass", "Ulysses S. Grant", "Thomas Edison"]),
     # the Norse north (narrowed to Norway; Iceland/Greenland scatter the longitude)
     ("the Viking Age", ["Harald Hardrada", "Harald Fairhair", "Erik the Red", "Olaf Tryggvason", "Haakon Sigurdsson"]),
-    # western Europe
-    ("Enlightenment Paris", ["Voltaire", "Jean-Jacques Rousseau", "Denis Diderot", "Montesquieu", "Blaise Pascal"]),
+    # western Europe. The recent-European corner (18-19c) is the most
+    # compressed region of the disc (recent = small radius, Europe = a narrow
+    # longitude wedge), so anchors there pile up and stop covering meaningful
+    # travel distance. Thinned to a single point, the French Revolution.
+    # Dropped were "Enlightenment Paris" (Voltaire et al., co-located with the
+    # Revolution at the Paris longitude), "industrial Britain" (Darwin et al.)
+    # and "the German Romantics" (Beethoven, Goethe, Marx); the last two sat
+    # within ~90 world-units of each other and of the Russian Empire. See
+    # [[project-teleporter-network]].
     ("the French Revolution", ["Maximilien Robespierre", "Georges Danton", "Jean-Paul Marat", "Louis XVI", "Napoleon"]),
-    ("industrial Britain", ["Charles Darwin", "Charles Dickens", "Michael Faraday", "Isambard Kingdom Brunel", "Charles Babbage"]),
     ("Moorish Iberia", ["Averroes", "Maimonides", "Ibn Hazm", "Al-Zahrawi", "Ibn Arabi"]),
-    ("the German Romantics", ["Ludwig van Beethoven", "Johann Wolfgang von Goethe", "Friedrich Nietzsche", "Karl Marx", "Johannes Brahms"]),
     # Italy / Rome
     ("the Roman Empire", ["Augustus", "Julius Caesar", "Cicero", "Virgil", "Marcus Aurelius", "Nero"]),
     ("the Italian Renaissance", ["Leonardo da Vinci", "Michelangelo", "Raphael", "Niccolò Machiavelli", "Galileo Galilei", "Sandro Botticelli"]),
