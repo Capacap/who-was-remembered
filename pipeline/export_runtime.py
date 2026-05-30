@@ -41,9 +41,12 @@ PLACEMENT_PATH = ROOT / "cache" / "placement.parquet"
 TELEPORTERS_PATH = ROOT / "cache" / "teleporters.parquet"
 OUT_PATH = ROOT.parent / "runtime" / "public" / "positions.bin"
 TELEPORTERS_OUT = ROOT.parent / "runtime" / "public" / "teleporters.json"
+META_OUT = ROOT.parent / "runtime" / "public" / "meta.bin"
 
 TIER_CODE = {"ordinary": 0, "minor": 1, "major": 2}
 GEO_CODE = {"birth": 0, "death": 1, "citizenship": 2, "gazetteer": 3}  # None -> 4 residue
+
+YEAR_MISSING = -32768  # int16 sentinel; below any real year in the corpus
 
 
 def export_teleporters() -> int:
@@ -64,6 +67,63 @@ def export_teleporters() -> int:
     TELEPORTERS_OUT.parent.mkdir(parents=True, exist_ok=True)
     TELEPORTERS_OUT.write_text(json.dumps(rows, ensure_ascii=False, indent=0))
     return len(rows)
+
+
+def export_meta() -> int:
+    """Per-figure label data for the look-at glance and inspect overlay, in the
+    SAME row order as positions.bin so the renderer's instanceId indexes it
+    directly. Packed binary, not JSON: the string blobs are decoded lazily (only
+    the book under the crosshair), so the ~30 MB never hits a JSON.parse. The
+    Wikipedia URL is derived client-side from the title. lead_text is omitted on
+    purpose; it is large and belongs to per-tile delivery, not this prototype.
+
+    Layout (little-endian), ordered so every typed section is naturally aligned
+    (uint32 sections on 4-byte bounds, int16 on 2-byte) and the byte blobs trail:
+
+        uint32  N
+        uint32  name_blob_len
+        uint32  desc_blob_len
+        uint32  name_off[N+1]   byte offsets into name_blob
+        uint32  desc_off[N+1]   byte offsets into desc_blob
+        int16   birth_year[N]   (YEAR_MISSING if unknown)
+        int16   death_year[N]
+        bytes   name_blob       concatenated UTF-8 titles
+        bytes   desc_blob       concatenated UTF-8 descriptions
+    """
+    t = pq.read_table(
+        PLACEMENT_PATH, columns=["title", "description", "birth_year", "death_year"]
+    )
+    n = t.num_rows
+    titles = t["title"].to_pylist()
+    descs = t["description"].to_pylist()
+
+    def to_year(v: object) -> int:
+        return YEAR_MISSING if v is None else int(v)
+
+    birth = np.array([to_year(v) for v in t["birth_year"].to_pylist()], dtype=np.int16)
+    death = np.array([to_year(v) for v in t["death_year"].to_pylist()], dtype=np.int16)
+
+    def pack(strs: list) -> tuple[np.ndarray, bytes]:
+        blob = bytearray()
+        offs = np.zeros(n + 1, dtype=np.uint32)
+        for i, s in enumerate(strs):
+            if s:
+                blob += s.encode("utf-8")
+            offs[i + 1] = len(blob)
+        return offs, bytes(blob)
+
+    name_off, name_blob = pack(titles)
+    desc_off, desc_blob = pack(descs)
+
+    with open(META_OUT, "wb") as f:
+        f.write(struct.pack("<III", n, len(name_blob), len(desc_blob)))
+        f.write(name_off.tobytes())
+        f.write(desc_off.tobytes())
+        f.write(birth.tobytes())
+        f.write(death.tobytes())
+        f.write(name_blob)
+        f.write(desc_blob)
+    return n
 
 
 def main() -> None:
@@ -96,6 +156,10 @@ def main() -> None:
 
     n_tp = export_teleporters()
     print(f"wrote {n_tp} teleporters -> {TELEPORTERS_OUT}")
+
+    export_meta()
+    meta_mb = META_OUT.stat().st_size / 1e6
+    print(f"wrote {n:,} meta records · {meta_mb:.2f} MB -> {META_OUT}")
 
 
 if __name__ == "__main__":

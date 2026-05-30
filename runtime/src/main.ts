@@ -72,6 +72,11 @@ function buildField(field: Awaited<ReturnType<typeof loadPositions>>) {
   const mesh = new THREE.InstancedMesh(box, mat, n);
   mesh.instanceMatrix.setUsage(THREE.StaticDrawUsage);
 
+  // keep the rendered (jittered) ground positions so the look-at picker aims at
+  // where a book actually stands, not its pre-scatter pipeline coordinate.
+  const px = new Float32Array(n);
+  const pz = new Float32Array(n);
+
   // residue (geo === 4) has no recorded location; its angle is a hash, not
   // geography. Wash it toward a pale grey so it reads as adrift rather than
   // confidently placed, the spatial echo of the date-uncertainty haze.
@@ -83,11 +88,9 @@ function buildField(field: Awaited<ReturnType<typeof loadPositions>>) {
     const h = TIER_HEIGHT[tier[i]];
     const foot = 1 + (rnd() * 2 - 1) * FOOT_VAR;
     // pipeline (x, y) is the ground plane; map to world (x, z), y is up.
-    dummy.position.set(
-      x[i] + (rnd() * 2 - 1) * SCATTER,
-      h / 2,
-      y[i] + (rnd() * 2 - 1) * SCATTER,
-    );
+    px[i] = x[i] + (rnd() * 2 - 1) * SCATTER;
+    pz[i] = y[i] + (rnd() * 2 - 1) * SCATTER;
+    dummy.position.set(px[i], h / 2, pz[i]);
     dummy.rotation.set(
       (rnd() * 2 - 1) * TILT_MAX,
       rnd() * Math.PI * 2,
@@ -102,7 +105,7 @@ function buildField(field: Awaited<ReturnType<typeof loadPositions>>) {
   }
   mesh.instanceMatrix.needsUpdate = true;
   if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
-  return mesh;
+  return { mesh, px, pz, tier: tier as Uint8Array };
 }
 
 // Teleporter monuments (26): tall emissive-blue pillars, the cool complement to
@@ -141,6 +144,112 @@ function buildTeleporters(list: Teleporter[]) {
     group.add(pillar);
   }
   return group;
+}
+
+// --- figure metadata (look-at + inspect) -----------------------------------
+// meta.bin is row-aligned with positions.bin, so a picked instanceId indexes it
+// directly. String blobs are decoded lazily (only the targeted book), never all
+// at once. Layout documented in pipeline/export_runtime.py:export_meta.
+const YEAR_MISSING = -32768;
+
+async function loadMeta(url: string) {
+  const buf = await (await fetch(url)).arrayBuffer();
+  const dv = new DataView(buf);
+  const n = dv.getUint32(0, true);
+  const nameLen = dv.getUint32(4, true);
+  const descLen = dv.getUint32(8, true);
+  let off = 12;
+  const nameOff = new Uint32Array(buf, off, n + 1);
+  off += 4 * (n + 1);
+  const descOff = new Uint32Array(buf, off, n + 1);
+  off += 4 * (n + 1);
+  const birth = new Int16Array(buf, off, n);
+  off += 2 * n;
+  const death = new Int16Array(buf, off, n);
+  off += 2 * n;
+  const nameBytes = new Uint8Array(buf, off, nameLen);
+  off += nameLen;
+  const descBytes = new Uint8Array(buf, off, descLen);
+
+  const decoder = new TextDecoder();
+  const name = (i: number) =>
+    decoder.decode(nameBytes.subarray(nameOff[i], nameOff[i + 1]));
+  const desc = (i: number) =>
+    decoder.decode(descBytes.subarray(descOff[i], descOff[i + 1]));
+  return { n, birth, death, name, desc };
+}
+
+function wikiUrl(name: string): string {
+  return "https://en.wikipedia.org/wiki/" + encodeURIComponent(name.replace(/ /g, "_"));
+}
+
+function fmtYear(v: number): string {
+  return v < 0 ? `${-v} BCE` : `${v}`;
+}
+
+function fmtYears(b: number, d: number): string {
+  const bb = b === YEAR_MISSING ? null : b;
+  const dd = d === YEAR_MISSING ? null : d;
+  if (bb !== null && dd !== null) return `${fmtYear(bb)} – ${fmtYear(dd)}`;
+  if (dd !== null) return `d. ${fmtYear(dd)}`;
+  if (bb !== null) return `b. ${fmtYear(bb)}`;
+  return "";
+}
+
+function escapeHtml(s: string): string {
+  return s.replace(
+    /[&<>"]/g,
+    (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]!,
+  );
+}
+
+// Look-at picker: each tick, find the book nearest the camera whose centre falls
+// within a narrow cone of the view direction. A distance cull rejects almost all
+// 576k instances before the alignment test, so the brute-force sweep is cheap at
+// the throttled cadence. Aims at jittered positions (matching what's drawn).
+function createPicker(
+  camera: THREE.PerspectiveCamera,
+  px: Float32Array,
+  pz: Float32Array,
+) {
+  // reading is close-up only: you have to travel and walk up to a book to learn
+  // who it is. Long-range legibility (landmarks visible from afar) is a separate
+  // problem for a beacon VFX, not for this radius. ~6 u ≈ 4 m at 1.4 u/m.
+  const MAX_DIST = 6;
+  const MAX_DIST2 = MAX_DIST * MAX_DIST;
+  // wider cone than a precise crosshair: once you're standing at a book, facing
+  // its general direction should read it without pixel-perfect aim.
+  const COS_CONE = Math.cos((11 * Math.PI) / 180);
+  // every book aims at the same low target height regardless of tier, so a tall
+  // major doesn't force you to look up at the one book you've walked right up to.
+  const PICK_HEIGHT = 1;
+  const n = px.length;
+  const fwd = new THREE.Vector3();
+
+  return function pick(): number {
+    camera.getWorldDirection(fwd);
+    const cx = camera.position.x;
+    const cy = camera.position.y;
+    const cz = camera.position.z;
+    const dyAll = PICK_HEIGHT - cy; // book pick-point vs eye, uniform across tiers
+    let best = -1;
+    let bestDist2 = Infinity;
+    for (let i = 0; i < n; i++) {
+      const dx = px[i] - cx;
+      const dz = pz[i] - cz;
+      const horiz2 = dx * dx + dz * dz;
+      if (horiz2 > MAX_DIST2) continue;
+      const dy = dyAll;
+      const dist2 = horiz2 + dy * dy;
+      const dot = (dx * fwd.x + dy * fwd.y + dz * fwd.z) / Math.sqrt(dist2);
+      if (dot < COS_CONE) continue;
+      if (dist2 < bestDist2) {
+        bestDist2 = dist2;
+        best = i;
+      }
+    }
+    return best;
+  };
 }
 
 // --- first-person controller ----------------------------------------------
@@ -257,15 +366,72 @@ async function main() {
   scene.add(pad);
 
   info.innerHTML = "loading positions…";
-  const [field, teleporters] = await Promise.all([
+  const [field, teleporters, meta] = await Promise.all([
     loadPositions("positions.bin"),
     loadTeleporters("teleporters.json"),
+    loadMeta("meta.bin"),
   ]);
-  scene.add(buildField(field));
+  const built = buildField(field);
+  scene.add(built.mesh);
   scene.add(buildTeleporters(teleporters));
 
+  // --- look-at glance + inspect overlay -------------------------------------
+  const glance = document.getElementById("glance") as HTMLDivElement;
+  const overlay = document.getElementById("overlay") as HTMLDivElement;
+  const card = document.getElementById("card") as HTMLDivElement;
+  const pick = createPicker(camera, built.px, built.pz);
+
+  let target = -1; // instanceId under the reticle, or -1
+  let overlayOpen = false;
+
+  const renderName = (i: number) => escapeHtml(meta.name(i) || "(untitled)");
+  const renderDesc = (i: number) => escapeHtml(meta.desc(i));
+
+  function showGlance(i: number) {
+    const desc = renderDesc(i);
+    const years = fmtYears(meta.birth[i], meta.death[i]);
+    glance.innerHTML =
+      `<div class="name">${renderName(i)}</div>` +
+      (desc ? `<div class="desc">${desc}</div>` : "") +
+      (years ? `<div class="years">${years}</div>` : "");
+    glance.style.display = "block";
+  }
+
+  function openOverlay(i: number) {
+    const desc = renderDesc(i);
+    const years = fmtYears(meta.birth[i], meta.death[i]);
+    const url = wikiUrl(meta.name(i));
+    card.innerHTML =
+      `<div class="name">${renderName(i)}</div>` +
+      (desc ? `<div class="desc">${desc}</div>` : "") +
+      (years ? `<div class="years">${years}</div>` : "") +
+      `<a href="${escapeHtml(url)}" target="_blank" rel="noopener">Read on Wikipedia →</a>` +
+      `<div class="hint">Esc or click outside to close</div>`;
+    overlay.style.display = "flex";
+    overlayOpen = true;
+    glance.style.display = "none";
+    controls.unlock(); // free the cursor so the link is clickable
+  }
+
+  function closeOverlay() {
+    overlay.style.display = "none";
+    overlayOpen = false;
+  }
+
+  // click on the backdrop (not the card) closes; clicking the card/link doesn't.
+  overlay.addEventListener("click", (e) => {
+    if (e.target === overlay) closeOverlay();
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.code === "KeyE" && !overlayOpen && controls.isLocked && target >= 0) {
+      openOverlay(target);
+    } else if (e.code === "Escape" && overlayOpen) {
+      closeOverlay();
+    }
+  });
+
   const hint =
-    "click to look · WASD move · Shift run · F fly · Space/C up·down · Esc release";
+    "click to look · WASD move · Shift run · F fly · Space/C up·down · E inspect · Esc release";
   const setHud = (flying: boolean) => {
     info.innerHTML = `${field.n.toLocaleString()} figures · ${
       flying ? "flying" : "walking"
@@ -281,6 +447,8 @@ async function main() {
 
   const clock = new THREE.Clock();
   let wasFlying = false;
+  let sincePick = 0;
+  const PICK_INTERVAL = 0.12; // ~8 Hz; the look-at label needn't be per-frame
   renderer.setAnimationLoop(() => {
     const dt = Math.min(clock.getDelta(), 0.1); // clamp after tab-out stalls
     const flying = update(dt);
@@ -288,6 +456,21 @@ async function main() {
       setHud(flying);
       wasFlying = flying;
     }
+
+    // look-at picking: only while walking the scene (locked) and not inspecting.
+    sincePick += dt;
+    if (!overlayOpen && controls.isLocked) {
+      if (sincePick >= PICK_INTERVAL) {
+        sincePick = 0;
+        target = pick();
+        if (target >= 0) showGlance(target);
+        else glance.style.display = "none";
+      }
+    } else if (glance.style.display !== "none") {
+      glance.style.display = "none";
+      target = -1;
+    }
+
     renderer.render(scene, camera);
   });
 }

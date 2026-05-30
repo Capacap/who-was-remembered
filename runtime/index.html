@@ -21,10 +21,105 @@
         pointer-events: none;
         user-select: none;
       }
+      /* crosshair: a faint dot marking what the look-at picker is aiming at */
+      #reticle {
+        position: fixed;
+        left: 50%;
+        top: 50%;
+        width: 5px;
+        height: 5px;
+        margin: -2.5px 0 0 -2.5px;
+        border-radius: 50%;
+        background: rgba(90, 74, 50, 0.55);
+        pointer-events: none;
+        user-select: none;
+      }
+      /* glance label: name / description / years for the targeted book. Sits
+         just below the reticle, ambient, never interactive. */
+      #glance {
+        position: fixed;
+        left: 50%;
+        top: calc(50% + 22px);
+        transform: translateX(-50%);
+        min-width: 180px;
+        max-width: 360px;
+        padding: 8px 12px;
+        font: 13px/1.4 system-ui, sans-serif;
+        color: #4a3c28;
+        background: rgba(217, 201, 168, 0.82);
+        border-radius: 4px;
+        text-align: center;
+        pointer-events: none;
+        user-select: none;
+        display: none;
+      }
+      #glance .name {
+        font-weight: 600;
+      }
+      #glance .desc {
+        opacity: 0.85;
+      }
+      #glance .years {
+        opacity: 0.7;
+        font-variant-numeric: tabular-nums;
+      }
+      /* inspect overlay: the deliberate stop. Backdrop captures clicks (closes
+         + re-locks); the card holds the Wikipedia link. */
+      #overlay {
+        position: fixed;
+        inset: 0;
+        display: none;
+        align-items: center;
+        justify-content: center;
+        background: rgba(60, 50, 34, 0.45);
+      }
+      #card {
+        min-width: 320px;
+        max-width: 460px;
+        padding: 24px 28px;
+        background: #e7dcc2;
+        border-radius: 8px;
+        box-shadow: 0 12px 40px rgba(0, 0, 0, 0.3);
+        font: 15px/1.5 system-ui, sans-serif;
+        color: #3a2f1f;
+      }
+      #card .name {
+        font-size: 22px;
+        font-weight: 600;
+        margin-bottom: 2px;
+      }
+      #card .desc {
+        opacity: 0.85;
+      }
+      #card .years {
+        opacity: 0.7;
+        margin-top: 2px;
+        font-variant-numeric: tabular-nums;
+      }
+      #card a {
+        display: inline-block;
+        margin-top: 18px;
+        padding: 9px 16px;
+        background: #2f6cff;
+        color: #fff;
+        text-decoration: none;
+        border-radius: 5px;
+        font-weight: 600;
+      }
+      #card .hint {
+        margin-top: 14px;
+        font-size: 12px;
+        opacity: 0.55;
+      }
     </style>
   </head>
   <body>
     <div id="info">loading…</div>
+    <div id="reticle"></div>
+    <div id="glance"></div>
+    <div id="overlay">
+      <div id="card"></div>
+    </div>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>
