@@ -69,7 +69,7 @@ ANCHORS: list[tuple[str, list[str]]] = [
     # dropped because it sat a short hop from revolutionary America, and
     # teleporters that close together read as noise, not meaningful travel.
     ("Mesoamerica", ["Moctezuma II", "Nezahualcoyotl (tlatoani)", "Itzcoatl", "Ahuitzotl", "Tlacaelel"]),
-    ("the Inca", ["Pachacuti", "Huayna Capac", "Topa Inca Yupanqui", "Huáscar"]),
+    ("the Inca", ["Pachacuti", "Huayna Capac", "Topa Inca Yupanqui", "Huáscar", "Atahualpa"]),
     ("revolutionary America", ["George Washington", "Thomas Jefferson", "Benjamin Franklin", "John Adams", "Alexander Hamilton"]),
     # the Norse north (narrowed to Norway; Iceland/Greenland scatter the longitude)
     ("the Viking Age", ["Harald Hardrada", "Harald Fairhair", "Erik the Red", "Olaf Tryggvason", "Haakon Sigurdsson"]),
@@ -111,7 +111,7 @@ ANCHORS: list[tuple[str, list[str]]] = [
     # the steppe
     ("the Mongol Empire", ["Genghis Khan", "Kublai Khan", "Ögedei Khan", "Möngke Khan", "Subutai"]),
     # Japan (one longitude band, separated by ring)
-    ("Heian Japan", ["Murasaki Shikibu", "Taira no Kiyomori", "Sei Shōnagon", "Minamoto no Yoritomo"]),
+    ("Heian Japan", ["Murasaki Shikibu", "Taira no Kiyomori", "Sei Shōnagon", "Minamoto no Yoritomo", "Fujiwara no Michinaga"]),
     ("the age of the samurai", ["Oda Nobunaga", "Toyotomi Hideyoshi", "Tokugawa Ieyasu", "Date Masamune", "Miyamoto Musashi"]),
 ]
 
