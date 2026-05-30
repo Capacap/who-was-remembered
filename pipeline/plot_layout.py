@@ -3,17 +3,20 @@ Plot the final layout with the teleporter network marked.
 
 Unlike inspect_placement.py (the placement-tuning bench, which renders single
 diagnostic views over one parquet), this joins the two finished artifacts the
-runtime actually walks on: the placed corpus (placement.parquet) and the
-fast-travel anchors (teleporters.parquet). It answers the question those two
-stages can't on their own: does each of the 30 monuments sit on populated
-ground, and do they spread across the disc or pile into one wedge?
+runtime actually walks on: the topology-adjusted corpus (layout.parquet, Stage
+8's relaxed-and-cleared placement) and the fast-travel anchors
+(teleporters.parquet). It answers the question those stages can't on their own:
+does each monument sit on populated ground, and do they spread across the disc
+or pile into one wedge? (Stage 8's sub-unit spacing nudges and the small
+teleporter plazas are local effects, invisible at full-disc scale; this view is
+for the macro structure, not for judging spacing.)
 
 The whole corpus is drawn faint and colored by era (recent bright, ancient
 dark), so the time gradient and the honest voids both read. On top of it the
 teleporters are gold stars labelled with their place name; their radius already
 encodes their era, so the faint concentric year rings give a quantitative read
-of how far back each monument sits. The player spawns at the rim of the
-R_INNER landing pad (year 2000) at the origin.
+of how far back each monument sits. The player spawns at the origin (year 2000)
+and surveys the field across the empty R_INNER plaza.
 
 The radius->year mapping (and so the ring placement) is imported from
 stage6_place, not duplicated, so retuning the world geometry keeps these
@@ -40,7 +43,7 @@ import pyarrow.parquet as pq
 from stage6_place import R_INNER, R_MAX, RADIUS_ALPHA, TIME_SPAN
 
 ROOT = Path(__file__).resolve().parent
-PLACEMENT_PATH = ROOT / "cache" / "placement.parquet"
+PLACEMENT_PATH = ROOT / "cache" / "layout.parquet"
 TELEPORTERS_PATH = ROOT / "cache" / "teleporters.parquet"
 OUT_PATH = ROOT / "cache" / "plots" / "layout.png"
 

@@ -1,9 +1,9 @@
 """
 Export a compact binary of book positions for the runtime tracer.
 
-Reads placement.parquet and writes runtime/public/positions.bin: just the
-fields the first visualization needs (position, landmark tier, geo source),
-packed little-endian as
+Reads layout.parquet (Stage 8's topology-adjusted placement) and writes
+runtime/public/positions.bin: just the fields the first visualization needs
+(position, landmark tier, geo source), packed little-endian as
 
     uint32   count N
     float32  x[N]
@@ -39,7 +39,10 @@ import pyarrow.parquet as pq
 from stage6_place import R_INNER, R_MAX, RADIUS_ALPHA, TIME_SPAN
 
 ROOT = Path(__file__).resolve().parent
-PLACEMENT_PATH = ROOT / "cache" / "placement.parquet"
+# layout.parquet is Stage 8's topology-adjusted placement (relaxed spacing,
+# teleporter clearings). placement.parquet is the pristine ground truth; the
+# runtime wants what the player actually walks through, so it reads the layout.
+PLACEMENT_PATH = ROOT / "cache" / "layout.parquet"
 TELEPORTERS_PATH = ROOT / "cache" / "teleporters.parquet"
 OUT_PATH = ROOT.parent / "runtime" / "public" / "positions.bin"
 TELEPORTERS_OUT = ROOT.parent / "runtime" / "public" / "teleporters.json"

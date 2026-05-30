@@ -29,7 +29,7 @@ const TIER_COLOR = [0xb89b6e, 0xdcab4c, 0xff5a2c].map((c) => new THREE.Color(c))
 // experiment — if it earns its keep it belongs in stage6's jitter, not here.
 const TILT_MAX = 0.1; // random lean, radians
 const FOOT_VAR = 0.3; // +/- fraction on footprint width
-const SCATTER = 3.0; // render-only positional jitter, world units
+const SCATTER = 0; // spacing is now stage6's job (relaxation pass); renderer draws placement as-is
 
 // mulberry32: cheap deterministic PRNG so the variety is stable across reloads.
 function mulberry32(seed: number) {
@@ -67,7 +67,10 @@ async function loadPositions(url: string) {
 
 function buildField(field: Awaited<ReturnType<typeof loadPositions>>) {
   const { n, x, y, tier, geo } = field;
-  const box = new THREE.BoxGeometry(1.4, 1, 1.4);
+  // book footprint ~0.35 x 0.5u: a closed book lying on the sand, deliberately
+  // smaller than the modern spacing (~0.9u) so neighbours read as distinct
+  // objects rather than an overlapping mass. Height comes from TIER_HEIGHT.
+  const box = new THREE.BoxGeometry(0.35, 1, 0.5);
   const mat = new THREE.MeshLambertMaterial();
   const mesh = new THREE.InstancedMesh(box, mat, n);
   mesh.instanceMatrix.setUsage(THREE.StaticDrawUsage);
@@ -484,9 +487,10 @@ async function main() {
   const { controls, update } = createController(camera, renderer.domElement);
   scene.add(controls.object);
 
-  // spawn at the pad rim (R_INNER = 200), facing outward into the modern
-  // thicket so the first view is books receding toward the deep-time void.
-  camera.position.set(0, EYE_HEIGHT, 200);
+  // spawn dead centre (0,0), facing outward across the empty plaza. The first
+  // view is the whole uneven ring at once: a dense wall of books toward the
+  // Western longitudes, near-empty ground toward the gaps. Survey, then travel.
+  camera.position.set(0, EYE_HEIGHT, 0);
   camera.lookAt(0, EYE_HEIGHT, 8000);
 
   // low sun for long shadows-of-mood later; flat lambert for now.
@@ -503,15 +507,6 @@ async function main() {
   ground.rotation.x = -Math.PI / 2;
   scene.add(ground);
 
-  // a thin ring marking the landing pad edge (R_INNER = 200).
-  const pad = new THREE.Mesh(
-    new THREE.RingGeometry(198, 202, 192),
-    new THREE.MeshBasicMaterial({ color: 0x7a6038, side: THREE.DoubleSide }),
-  );
-  pad.rotation.x = -Math.PI / 2;
-  pad.position.y = 0.1;
-  scene.add(pad);
-
   info.innerHTML = "loading positions…";
   const [field, teleporters, meta, world] = await Promise.all([
     loadPositions("positions.bin"),
@@ -522,6 +517,16 @@ async function main() {
   const built = buildField(field);
   scene.add(built.mesh);
   scene.add(buildTeleporters(teleporters));
+
+  // a thin ring marking the modern edge (R_INNER), where year 2000 sits and the
+  // books begin. Read from world.json so it tracks the placement, never drifts.
+  const pad = new THREE.Mesh(
+    new THREE.RingGeometry(world.R_INNER - 2, world.R_INNER + 2, 256),
+    new THREE.MeshBasicMaterial({ color: 0x7a6038, side: THREE.DoubleSide }),
+  );
+  pad.rotation.x = -Math.PI / 2;
+  pad.position.y = 0.1;
+  scene.add(pad);
 
   // --- look-at glance + inspect overlay -------------------------------------
   const glance = document.getElementById("glance") as HTMLDivElement;

@@ -26,12 +26,13 @@ Two filters keep a pin honest:
 - A geo-less member (geo_source is None in Stage 6) has no real coordinate; its
   angle is a per-QID hash, pure noise. Such members are dropped from the centroid
   and reported. Pinning to them would drag the monument into the void.
-- The monument sits on the most cross-lingually covered (highest sitelink_count)
-  surviving member: a real grave, the recognizable face of the group. For the
-  tight clusters these anchors are, that point is essentially the centroid.
+- The monument is placed at the surviving members' centroid pushed radially
+  outward (TP_RADIAL_OFFSET), so it stands at the cluster's outer threshold
+  rather than on its densest, most important figure. The most cross-lingually
+  covered member is kept only as a representative label, not a coordinate.
 
-Prominence is used here only to choose which grave the monument sits on and which
-places are worth a waypoint. It never moved a book in Stage 6 and does not here.
+Prominence is used here only to label the gate and choose which places are worth
+a waypoint. It never moved a book in Stage 6 and does not move one here.
 
 Run (after Stage 6):
     uv run pipeline/stage7_teleporters.py
@@ -58,6 +59,16 @@ OUT_PATH = ROOT / "cache" / "teleporters.parquet"
 # degrees) above which an anchor is not one place. ~40 deg is roughly the width
 # of Europe; beyond it the pin is averaging across separate regions.
 SPREAD_LIMIT = 40.0
+
+# The monument is NOT placed on its members. It sits at their centroid pushed
+# radially OUTWARD (toward deeper time) by this much, so it stands at the outer
+# threshold of the cluster rather than on top of it. This keeps it off the most
+# important grave in the region (the seat member is the densest, most recognized
+# figure there: the last person you want to evict to make room for a monument's
+# clearing), preserves the longitude/place exactly, and lands the clear-zone in
+# the sparser outward band where it displaces few books. You arrive at the gate
+# facing inward, with the era's crowd laid out ahead. Stage 8 clears the books.
+TP_RADIAL_OFFSET = 30.0  # world units outward from the member centroid
 
 # --- the authored anchor set: (label, [defining people]) ---
 # Grouped by PLACE first, era second, never by theme. Names are English
@@ -191,9 +202,19 @@ def main() -> None:
                 f"{SPREAD_LIMIT:.0f}; its people are not co-located. Split by place."
             )
 
-        # monument sits on the most-covered surviving member (a real grave).
+        # Position: the member centroid pushed radially outward by
+        # TP_RADIAL_OFFSET, so the gate stands at the cluster's outer threshold,
+        # not on anyone (see the constant). seat is kept only as a representative
+        # label (the recognizable face of the group), no longer a coordinate.
         seat = max(members, key=lambda i: sit[i])
         median_era = float(np.median([death[i] for i in members]))
+        cx = float(np.mean([x[i] for i in members]))
+        cy = float(np.mean([y[i] for i in members]))
+        c_r = math.hypot(cx, cy)
+        c_ang = math.atan2(cy, cx)
+        out_r = c_r + TP_RADIAL_OFFSET
+        mx = out_r * math.cos(c_ang)
+        my = out_r * math.sin(c_ang)
 
         flags = ""
         if missing:
@@ -202,13 +223,13 @@ def main() -> None:
             flags += f"  dropped-geoless={geoless}"
         print(
             f"  {label:28s} {len(members)}p spread={spread:3.0f} "
-            f"r={math.hypot(x[seat], y[seat]):5.0f} on:{title[seat]}{flags}"
+            f"r={out_r:5.0f} gate-of:{title[seat]}{flags}"
         )
 
         rows.append(dict(
             label=label,
-            x=float(x[seat]),
-            y=float(y[seat]),
+            x=mx,
+            y=my,
             seat_qid=qid[seat],
             seat_title=title[seat],
             people=names,
