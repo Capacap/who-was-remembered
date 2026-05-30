@@ -1,5 +1,5 @@
 """
-Stage 6: radial-time placement with population-equalized longitude.
+Stage 6: radial-time placement with raw-longitude angle.
 
 Each figure gets a polar position the runtime renders as a book in the desert:
 
@@ -24,24 +24,29 @@ Each figure gets a polar position the runtime renders as a book in the desert:
   in a vague band rather than on a false-precise ring; see UNC_* constants. The
   per-figure score is also emitted as date_uncertainty for the renderer.
 
-- angle = population CDF of birth (else death) longitude, not raw longitude.
+- angle = raw birth (else death) longitude, mapped straight onto the disc.
 
-The reconnaissance behind the CDF choice: raw longitude makes angle a
-fame/social-class proxy. Fame in this corpus concentrates in Western Europe,
-Western Europe is a narrow longitude band (~0-15 deg E), so raw longitude
-compresses most of the mass and nearly all the famous into a thin wedge and
-leaves the disc lopsided. Replacing longitude with its population CDF,
+The angle axis is the figure's real longitude: lon in [-180, 180] -> [0, 2*pi),
+so geography is literally true (China sits where China is, the Americas occupy
+their own arc) and the corpus's Western skew shows up as honest DENSITY. The
+Anglo-American and European longitude bands become an over-full wedge of books
+while the rest of the world stays sparse even in the modern ring; that wedge IS
+the recency/attention bias the piece is about, left visible in the data instead
+of smoothed away. An earlier version replaced longitude with its population CDF
+to give every direction equal density, but that only relocated the bias: it
+spent angular WIDTH on Wikipedia's attention (the USA alone claimed ~110 deg of
+the disc) and squeezed the recorded ancient world, which is mostly non-Western,
+into a thin sliver, lying about antiquity in the process. Raw longitude keeps the
+bias where it is honest and legible. The primary subject, recency, lives on the
+radial axis and is honest in either case.
 
-    angle = 2*pi * (#figures with longitude <= this) / (#geo-anchored figures)
-
-stretches dense longitude bands across a wide arc and shrinks sparse ones to
-slivers, so every angular direction carries comparable population. The transform
-is monotonic, so east-west ordering and regional adjacency survive (China stays
-"up", the Americas "down-left"), and it is global (one CDF for the whole corpus)
-so a region keeps a stable angle across every era ring. This trades away the
-visibility of the West's overrepresentation (which raw longitude rendered as a
-bright wedge) for a navigable field; the primary subject, recency, lives on the
-radial axis and stays honest in every version.
+Angular placement is deliberately loose, not precise cartography. A heavy,
+radius-aware jitter (ANGLE_JITTER + ANGLE_ARC_JITTER / radius) scatters each
+figure so cities dissolve from hard radial spokes into organic clumps. The
+radius-scaled term targets a roughly constant arc-length, so the dense modern
+core gets a wide angular spread while the sparse antiquity rim keeps its
+geography crisp. A general can land beside a shoemaker; the field suggests
+geography, it does not survey it.
 
 A quarter of figures have no birth/death place. Rather than scatter them at
 random, they fall through a ladder that reads only recorded data: P27
@@ -49,7 +54,7 @@ citizenship, then a hand-curated gazetteer over the English description
 (demonyms, historical polities, regions; see gazetteer.json). A resolved
 country does not become a centroid; the figure borrows a real longitude
 sampled from an anchored compatriot, so it spreads across that country's true
-arc and folds into the same population CDF. What stays unresolved is genuinely
+arc and onto the same longitude axis as everyone else. What stays unresolved is genuinely
 place-less in the record and keeps the deterministic per-QID random angle, with
 geo_source left None so the runtime can mark it adrift rather than pretend it
 is anchored. Prominence never enters position; it drives book thickness in the
@@ -105,7 +110,14 @@ R_INNER = 200.0        # landing pad: player spawns at its rim, inside the moder
 TIME_SPAN = 2800.0     # edge = year -800; the pre-800 tail scatters beyond as a frontier
 RADIUS_ALPHA = 1.0     # linear time: equal radial width per century (honest sparsity)
 RADIUS_JITTER = 2.5    # world units: ~one year of radial width, softens the year-rings
-ANGLE_JITTER = 0.10    # radians
+# Angular jitter is deliberately heavy so the field reads as organic clumps, not
+# rigid radial spokes (every figure born in one city shares that city's exact
+# longitude; without scatter each city is a hard radial line). Two components: a
+# flat floor in radians, plus a radius-scaled term targeting a roughly constant
+# arc-length, so the dense modern core (small radius) gets a wide angular spread
+# while the sparse antiquity rim (large radius) keeps its geography crisp.
+ANGLE_JITTER = 0.07         # radians: flat organic fuzz everywhere (~4 deg)
+ANGLE_ARC_JITTER = 80.0     # world units: extra angular sigma ~ this/radius
 
 # Date-uncertainty radial scatter. Deep-past death years are mostly estimates:
 # round-number guesses (a death snapped to -500) and birth==death placeholders.
@@ -310,14 +322,13 @@ def main() -> None:
     )
     print(f"  located from recorded data: {n_located:,} ({n_located / n * 100:.1f}%)")
 
-    # --- population CDF of longitude -> equalized angle ---
-    # Built over everyone we could locate (tiers 1-3). Because tiers 2-3 sampled
-    # from the anchored distribution, adding them barely moves the CDF for tier-1
-    # figures while spreading the borrowed ones across their countries' arcs.
-    sorted_lons = np.sort(lon_per[located])
+    # --- raw longitude -> angle ---
+    # The figure's real longitude mapped straight onto the disc: lon in
+    # [-180, 180] -> [0, 2*pi). Geography stays literally true and the corpus's
+    # Western skew reads as honest density (see module docstring for why this
+    # beats the population-CDF equalization it replaced).
     base = np.empty(n, dtype=np.float64)
-    cdf = np.searchsorted(sorted_lons, lon_per[located], side="right") / n_located
-    base[located] = 2 * math.pi * cdf
+    base[located] = ((lon_per[located] + 180.0) / 360.0) * 2 * math.pi
     # residue: deterministic per-qid uniform random. Unknown location is left
     # unknown (geo_source is None) for the renderer to mark, not faked precise.
     missing = np.where(~located)[0]
@@ -325,7 +336,11 @@ def main() -> None:
         [(hash_qid(qids[i]) % 10_000_000) / 10_000_000 * 2 * math.pi for i in missing]
     )
 
-    angle = (base + rng.normal(0.0, ANGLE_JITTER, size=n)) % (2 * math.pi)
+    # Heavy, radius-aware angular jitter: a flat floor plus a ~constant
+    # arc-length term, so the dense core spreads into organic clumps while
+    # antiquity keeps crisp geography. Without it each city is a hard spoke.
+    angle_sigma = ANGLE_JITTER + ANGLE_ARC_JITTER / np.maximum(radii, R_INNER)
+    angle = (base + rng.normal(0.0, 1.0, size=n) * angle_sigma) % (2 * math.pi)
     x = radii * np.cos(angle)
     y_coord = radii * np.sin(angle)
 
@@ -372,7 +387,7 @@ def main() -> None:
     pq.write_table(out, args.out, compression="zstd")
 
     elapsed = time.perf_counter() - start
-    print(f"placed {n:,} figures in {elapsed:.1f}s (population-equalized longitude)")
+    print(f"placed {n:,} figures in {elapsed:.1f}s (raw longitude)")
     print(f"wrote {args.out}")
 
 
