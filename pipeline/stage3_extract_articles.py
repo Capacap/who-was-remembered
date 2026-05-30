@@ -6,6 +6,10 @@ each surviving figure from Stage 2, and pulls:
 
 - the lead section text (everything before the first level-2 heading,
   with templates / refs / comments stripped),
+- whole-article substance signals for Stage 4's stub cut: article_word_count
+  (strip_code'd body prose, templates dropped), article_section_count (level-2
+  headings), and article_ref_count (<ref> citations). These measure the body,
+  which is what stub-ness actually is, rather than the lead's prose style,
 - the {{short description|...}} template value if the article has one,
 - the article's outgoing wikilinks, resolved through redirects and
   restricted to QIDs that are themselves figures in our set.
@@ -306,6 +310,25 @@ def parse_article(item: tuple[str, str]) -> tuple[str, dict | None]:
         seen.add(target)
         outgoing_titles.append(target)
 
+    # Whole-article substance signals for Stage 4's stub cut. Stub-ness is a
+    # property of the article body, not the lead's prose style, so we measure
+    # the body directly. strip_code drops templates (infoboxes, navboxes, and
+    # the citation templates inside <ref> tags), leaving mostly real prose, so
+    # a plain word count needs no special ref handling. Section and ref counts
+    # corroborate: a developed article has headings and citations, a stub has
+    # neither. All read-only on the parsed code; no second parse.
+    try:
+        article_word_count = len(code.strip_code().split())
+    except Exception:
+        article_word_count = 0
+    try:
+        article_section_count = max(
+            0, len(code.get_sections(levels=[2], flat=True)) - 1
+        )
+    except Exception:
+        article_section_count = 0
+    article_ref_count = len(code.filter_tags(matches="ref"))
+
     # Lead: everything up to the first level-2 heading. get_sections gives
     # us a clean split; the lead is sections[0] when include_lead is True.
     try:
@@ -391,6 +414,9 @@ def parse_article(item: tuple[str, str]) -> tuple[str, dict | None]:
     return title, {
         "lead_text": lead_text,
         "lead_word_count": lead_word_count,
+        "article_word_count": article_word_count,
+        "article_section_count": article_section_count,
+        "article_ref_count": article_ref_count,
         "short_description": short_desc,
         "outgoing_titles": outgoing_titles,
     }
@@ -536,6 +562,9 @@ def main() -> None:
     n = in_table.num_rows
     lead_text_out: list[str | None] = [None] * n
     lead_words_out: list[int | None] = [None] * n
+    article_words_out: list[int | None] = [None] * n
+    article_sections_out: list[int | None] = [None] * n
+    article_refs_out: list[int | None] = [None] * n
     short_desc_out: list[str | None] = [None] * n
     outgoing_qids_out: list[list[str]] = [[] for _ in range(n)]
 
@@ -545,6 +574,9 @@ def main() -> None:
             continue
         lead_text_out[i] = fields["lead_text"]
         lead_words_out[i] = fields["lead_word_count"]
+        article_words_out[i] = fields["article_word_count"]
+        article_sections_out[i] = fields["article_section_count"]
+        article_refs_out[i] = fields["article_ref_count"]
         short_desc_out[i] = fields["short_description"]
         outgoing_qids_out[i] = resolve_outgoing_qids(
             fields["outgoing_titles"], redirects, title_to_qid
@@ -555,6 +587,15 @@ def main() -> None:
     )
     out_table = out_table.append_column(
         "lead_word_count", pa.array(lead_words_out, type=pa.int32())
+    )
+    out_table = out_table.append_column(
+        "article_word_count", pa.array(article_words_out, type=pa.int32())
+    )
+    out_table = out_table.append_column(
+        "article_section_count", pa.array(article_sections_out, type=pa.int32())
+    )
+    out_table = out_table.append_column(
+        "article_ref_count", pa.array(article_refs_out, type=pa.int32())
     )
     out_table = out_table.append_column(
         "short_description", pa.array(short_desc_out, type=pa.string())

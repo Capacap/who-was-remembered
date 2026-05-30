@@ -1,26 +1,34 @@
 """
 Stage 4: article quality cut.
 
-Filter Stage 3 figures down to the ones whose Wikipedia lead carries at
-least a bit of narrative past the opening (name, dates, role) sentence.
-The criterion is "is there enough story to make the figure feel real",
-not "is this person famous".
+Drop database stubs (bare one-line entries) while keeping ordinary people
+with a genuine, if short, article. The criterion is article substance, not
+fame and not the lead's prose style.
 
-Concretely, a row survives when:
+A row survives when its Wikipedia article body has at least
+--min-article-words words (default 100). That body count comes from Stage 3,
+which strip_code's the whole article (templates, infoboxes and the citation
+templates inside ref tags are dropped), so it measures real prose rather than
+markup.
 
-- lead_text is non-null (Stage 3 successfully fetched and parsed the
-  article),
-- the cleaned lead contains a sentence boundary, i.e. terminal punctuation
-  followed by whitespace and a capital letter, taken as evidence of a real
-  second sentence rather than a label with an abbreviation, and
-- the cleaned lead has at least --min-words words (default 30, chosen
-  empirically: below ~25 words the corpus is dominated by single-sentence
-  "X (1810-1890) was a Y" labels; from ~30 words two-sentence leads with
-  biographical content become the norm).
+This replaces an earlier rule that gated on the LEAD shape (two sentences and
+30 words). Lead shape measured the first paragraph's style, not whether an
+article exists: it cut thousands of substantive figures whose lead happens to
+be a single dense sentence (Atahualpa, whose article runs past 4000 words; a
+wall of Nobel laureates) while passing thin bodies that merely opened with two
+sentences. Measuring the body fixes both errors.
 
-Also runs a magic-word cleanup pass (__NOTOC__ and similar markers that
-Stage 3 strip_code missed) and recomputes lead_word_count from the cleaned
-text. Adds a lead_sentence_count column for downstream stages.
+The floor is deliberately low. At 100 words the cut removes the genuine
+one-fact stubs ("X was a Y." plus at most a trailing fragment, almost all
+under ~75 words) and keeps the minimal-but-real bios that are the point of the
+piece (a sprinter who ran one relay, an obscure 17th-century MP). The corpus's
+25th percentile is ~200 article words, so this is a stub gate, not a
+notability bar.
+
+Also runs a magic-word cleanup pass (__NOTOC__ and similar markers that Stage
+3's strip_code missed) on the lead text and recomputes lead_word_count and
+lead_sentence_count. The lead is now a display and landmark-labelling column,
+no longer the cut.
 
 Run:
     uv run pipeline/stage4_quality_cut.py
@@ -34,7 +42,6 @@ import time
 from pathlib import Path
 
 import pyarrow as pa
-import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
 ROOT = Path(__file__).resolve().parent
@@ -75,16 +82,10 @@ def main() -> None:
     parser.add_argument("--in", dest="in_path", type=Path, default=IN_PATH)
     parser.add_argument("--out", type=Path, default=OUT_PATH)
     parser.add_argument(
-        "--min-words",
+        "--min-article-words",
         type=int,
-        default=30,
-        help="Minimum lead word count after cleanup. Default 30.",
-    )
-    parser.add_argument(
-        "--min-sentences",
-        type=int,
-        default=2,
-        help="Minimum lead sentence count. Default 2.",
+        default=100,
+        help="Minimum article body word count. Default 100.",
     )
     args = parser.parse_args()
 
@@ -95,60 +96,57 @@ def main() -> None:
     table = pq.read_table(args.in_path)
     total = table.num_rows
 
-    has_lead = pc.is_valid(table["lead_text"])
-    no_article = total - pc.sum(pc.cast(has_lead, pa.int64())).as_py()
-    table = table.filter(has_lead)
+    # The cut: article body length. None means Stage 3 found no article.
+    article_wc = table["article_word_count"].to_pylist()
+    keep_mask = [
+        (a is not None and a >= args.min_article_words) for a in article_wc
+    ]
 
+    # Tidy the lead text (a display / landmark column now, not the gate):
+    # strip leftover magic words, collapse whitespace, recompute its counts.
     leads = table["lead_text"].to_pylist()
-    cleaned: list[str] = []
-    word_counts: list[int] = []
-    sent_counts: list[int] = []
+    cleaned: list[str | None] = []
+    word_counts: list[int | None] = []
+    sent_counts: list[int | None] = []
     for raw in leads:
+        if raw is None:
+            cleaned.append(None)
+            word_counts.append(None)
+            sent_counts.append(None)
+            continue
         c, w, s = clean_lead(raw)
         cleaned.append(c)
         word_counts.append(w)
         sent_counts.append(s)
 
-    keep_mask = [
-        (w >= args.min_words) and (s >= args.min_sentences)
-        for w, s in zip(word_counts, sent_counts)
-    ]
-
-    new_lead = pa.array(cleaned, type=pa.string())
-    new_wc = pa.array(word_counts, type=pa.int32())
-    new_sc = pa.array(sent_counts, type=pa.int32())
-
     table = table.set_column(
-        table.schema.get_field_index("lead_text"), "lead_text", new_lead
+        table.schema.get_field_index("lead_text"),
+        "lead_text",
+        pa.array(cleaned, type=pa.string()),
     )
     table = table.set_column(
         table.schema.get_field_index("lead_word_count"),
         "lead_word_count",
-        new_wc,
+        pa.array(word_counts, type=pa.int32()),
     )
-    table = table.append_column("lead_sentence_count", new_sc)
+    table = table.append_column(
+        "lead_sentence_count", pa.array(sent_counts, type=pa.int32())
+    )
 
     filtered = table.filter(pa.array(keep_mask, type=pa.bool_()))
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
     pq.write_table(filtered, args.out, compression="zstd")
 
-    short_wc = sum(
-        1 for w, s, k in zip(word_counts, sent_counts, keep_mask)
-        if not k and w < args.min_words
-    )
-    single_sent = sum(
-        1 for w, s, k in zip(word_counts, sent_counts, keep_mask)
-        if not k and w >= args.min_words and s < args.min_sentences
+    no_article = sum(1 for a in article_wc if a is None)
+    below_floor = sum(
+        1 for a in article_wc if a is not None and a < args.min_article_words
     )
     kept = filtered.num_rows
     elapsed = time.perf_counter() - start
     print(f"read {total:,} rows from {args.in_path.name} in {elapsed:.1f}s")
     print(f"  no parsed article: -{no_article:,}")
-    print(f"  lead under {args.min_words} words: -{short_wc:,}")
-    print(
-        f"  single-sentence lead (after word cut): -{single_sent:,}"
-    )
+    print(f"  article body under {args.min_article_words} words: -{below_floor:,}")
     print(f"kept {kept:,} rows ({kept / total * 100:.1f}%) -> {args.out}")
 
 
