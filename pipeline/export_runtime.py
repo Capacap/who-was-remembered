@@ -21,10 +21,15 @@ the antiquity edge, and whether landmarks read as beacons. Regenerate after any
 stage 6 change:
 
     uv run pipeline/export_runtime.py
+
+Also writes runtime/public/teleporters.json: the 26 fast-travel monuments as a
+small array of {label, x, y, era, seat, n}. Tiny enough to ship as plain JSON
+rather than packed into the binary, and the labels/era are wanted for UI later.
 """
 
 from __future__ import annotations
 
+import json
 import struct
 from pathlib import Path
 
@@ -33,10 +38,32 @@ import pyarrow.parquet as pq
 
 ROOT = Path(__file__).resolve().parent
 PLACEMENT_PATH = ROOT / "cache" / "placement.parquet"
+TELEPORTERS_PATH = ROOT / "cache" / "teleporters.parquet"
 OUT_PATH = ROOT.parent / "runtime" / "public" / "positions.bin"
+TELEPORTERS_OUT = ROOT.parent / "runtime" / "public" / "teleporters.json"
 
 TIER_CODE = {"ordinary": 0, "minor": 1, "major": 2}
 GEO_CODE = {"birth": 0, "death": 1, "citizenship": 2, "gazetteer": 3}  # None -> 4 residue
+
+
+def export_teleporters() -> int:
+    t = pq.read_table(
+        TELEPORTERS_PATH, columns=["label", "x", "y", "era", "seat_title", "n_members"]
+    )
+    rows = [
+        {
+            "label": r["label"],
+            "x": round(r["x"], 1),
+            "y": round(r["y"], 1),
+            "era": r["era"],
+            "seat": r["seat_title"],
+            "n": r["n_members"],
+        }
+        for r in t.to_pylist()
+    ]
+    TELEPORTERS_OUT.parent.mkdir(parents=True, exist_ok=True)
+    TELEPORTERS_OUT.write_text(json.dumps(rows, ensure_ascii=False, indent=0))
+    return len(rows)
 
 
 def main() -> None:
@@ -66,6 +93,9 @@ def main() -> None:
     residue = int((geo == 4).sum())
     print(f"wrote {n:,} figures ({majors:,} major, {minors:,} minor) -> {OUT_PATH}")
     print(f"  {residue:,} residue (adrift) · {size_mb:.2f} MB")
+
+    n_tp = export_teleporters()
+    print(f"wrote {n_tp} teleporters -> {TELEPORTERS_OUT}")
 
 
 if __name__ == "__main__":

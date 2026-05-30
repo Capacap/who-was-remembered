@@ -1,14 +1,23 @@
 import * as THREE from "three";
-import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
+import { PointerLockControls } from "three/examples/jsm/controls/PointerLockControls.js";
 
-// --- field tracer ---------------------------------------------------------
-// One instanced box per figure, placed straight from the pipeline's (x, y).
-// No terrain, no text, no tiling. The point is to see the field: the landing
-// pad at the centre, how density falls off into the past, the empty quadrant,
-// and whether the landmark tiers read as beacons. Everything here is throwaway
-// scaffolding the real runtime will replace.
+// --- walkable field --------------------------------------------------------
+// One instanced box per figure, placed straight from the pipeline's (x, y), now
+// with a first-person controller so the disc can actually be walked. No terrain
+// yet: the ground is flat and getGroundHeight() returns 0, but the player Y is
+// already routed through it so the heightmap drops in without touching movement.
+// Books are still placeholder primitives. Everything visual here is scaffolding.
 
 const info = document.getElementById("info") as HTMLDivElement;
+
+// world scale: the pipeline derives R_MAX from ~1.4 world units to the metre
+// (see DESIGN.md / stage6). Eye height and speeds are in metres, converted once.
+const UNITS_PER_METRE = 1.4;
+const EYE_HEIGHT = 1.7 * UNITS_PER_METRE; // ~2.4u: stand a head above the sand
+const WALK_SPEED = 2.5; // units/sec, DESIGN's deliberately slow pace
+const RUN_MULT = 5; // hold-to-run
+const FLY_SPEED = 60; // crossing the void on foot is an 80-min walk by design
+const FLY_RUN_MULT = 6;
 
 // tier -> (book height, colour). Majors stand tall and hot so they read as
 // reference points from across the disc; ordinary books are low and sandy.
@@ -31,6 +40,12 @@ function mulberry32(seed: number) {
     t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   };
+}
+
+// Terrain seam: the only thing movement needs from the (future) heightmap is the
+// ground height under a point. Flat for now; the heightmap sampler slots in here.
+function getGroundHeight(_x: number, _z: number): number {
+  return 0;
 }
 
 async function loadPositions(url: string) {
@@ -90,30 +105,133 @@ function buildField(field: Awaited<ReturnType<typeof loadPositions>>) {
   return mesh;
 }
 
+// Teleporter monuments (26): tall emissive-blue pillars, the cool complement to
+// the hot-orange landmark books. They beacon through the fog so the player can
+// steer toward a known place from across the disc. Far taller than the 16u major
+// books because they're rare and meant to be seen from a long way off.
+const TP_HEIGHT = 60;
+const TP_FOOT = 5;
+
+interface Teleporter {
+  label: string;
+  x: number;
+  y: number;
+  era: string;
+  seat: string;
+  n: number;
+}
+
+async function loadTeleporters(url: string): Promise<Teleporter[]> {
+  return (await fetch(url)).json();
+}
+
+function buildTeleporters(list: Teleporter[]) {
+  const geom = new THREE.BoxGeometry(TP_FOOT, TP_HEIGHT, TP_FOOT);
+  // emissive so it reads as a lit beacon at distance rather than a shaded box
+  // that the fog swallows; a touch of lambert keeps some form on the near ones.
+  const mat = new THREE.MeshLambertMaterial({
+    color: 0x1c3a8c,
+    emissive: 0x2f6cff,
+    emissiveIntensity: 0.9,
+  });
+  const group = new THREE.Group();
+  for (const tp of list) {
+    const pillar = new THREE.Mesh(geom, mat);
+    pillar.position.set(tp.x, TP_HEIGHT / 2, tp.y);
+    group.add(pillar);
+  }
+  return group;
+}
+
+// --- first-person controller ----------------------------------------------
+// PointerLockControls owns the look (Euler camera, pitch clamped internally).
+// We own translation: a key-state object drives a velocity each frame. Walk
+// mode pins Y to the ground; fly mode frees Y and follows the full look vector.
+function createController(camera: THREE.PerspectiveCamera, dom: HTMLElement) {
+  const controls = new PointerLockControls(camera, dom);
+  const keys = new Set<string>();
+  let flying = false;
+
+  const onKeyDown = (e: KeyboardEvent) => {
+    if (e.code === "KeyF") flying = !flying;
+    keys.add(e.code);
+  };
+  const onKeyUp = (e: KeyboardEvent) => keys.delete(e.code);
+  document.addEventListener("keydown", onKeyDown);
+  document.addEventListener("keyup", onKeyUp);
+  // releasing the lock (Esc) should also drop held keys, or the player keeps
+  // drifting after the cursor reappears.
+  controls.addEventListener("unlock", () => keys.clear());
+  dom.addEventListener("click", () => controls.lock());
+
+  const forward = new THREE.Vector3();
+  const right = new THREE.Vector3();
+  const move = new THREE.Vector3();
+  const UP = new THREE.Vector3(0, 1, 0);
+
+  function update(dt: number) {
+    if (!controls.isLocked) return flying;
+
+    camera.getWorldDirection(forward);
+    if (!flying) forward.y = 0; // walk: ignore pitch, move along the ground
+    forward.normalize();
+    right.crossVectors(forward, UP).normalize();
+
+    move.set(0, 0, 0);
+    if (keys.has("KeyW") || keys.has("ArrowUp")) move.add(forward);
+    if (keys.has("KeyS") || keys.has("ArrowDown")) move.sub(forward);
+    if (keys.has("KeyD") || keys.has("ArrowRight")) move.add(right);
+    if (keys.has("KeyA") || keys.has("ArrowLeft")) move.sub(right);
+    if (flying) {
+      if (keys.has("Space")) move.y += 1;
+      if (keys.has("KeyC")) move.y -= 1;
+    }
+
+    const running = keys.has("ShiftLeft") || keys.has("ShiftRight");
+    const base = flying ? FLY_SPEED : WALK_SPEED;
+    const speed = base * (running ? (flying ? FLY_RUN_MULT : RUN_MULT) : 1);
+
+    if (move.lengthSq() > 0) {
+      move.normalize().multiplyScalar(speed * dt);
+      camera.position.add(move);
+    }
+    // walk mode keeps the eye a fixed height above the ground every frame;
+    // fly mode leaves Y wherever the player flew it.
+    if (!flying) {
+      camera.position.y = getGroundHeight(camera.position.x, camera.position.z) + EYE_HEIGHT;
+    }
+    return flying;
+  }
+
+  return { controls, update };
+}
+
 async function main() {
   const scene = new THREE.Scene();
   scene.background = new THREE.Color(0xd9c9a8);
-  // world radius ~8000u now (linear time); fog tuned so the far frontier hazes
+  // world radius ~7100u (linear time); fog tuned so the far frontier hazes
   // out rather than popping at the draw edge.
   scene.fog = new THREE.FogExp2(0xd9c9a8, 0.00016);
 
   const camera = new THREE.PerspectiveCamera(
-    60,
+    70,
     window.innerWidth / window.innerHeight,
-    0.5,
+    0.1,
     24000,
   );
-  camera.position.set(0, 900, 1900);
 
   const renderer = new THREE.WebGLRenderer({ antialias: true });
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
   renderer.setSize(window.innerWidth, window.innerHeight);
   document.body.appendChild(renderer.domElement);
 
-  const controls = new OrbitControls(camera, renderer.domElement);
-  controls.target.set(0, 0, 0);
-  controls.maxDistance = 18000;
-  controls.maxPolarAngle = Math.PI / 2 - 0.02; // stay above the ground
+  const { controls, update } = createController(camera, renderer.domElement);
+  scene.add(controls.object);
+
+  // spawn at the pad rim (R_INNER = 200), facing outward into the modern
+  // thicket so the first view is books receding toward the deep-time void.
+  camera.position.set(0, EYE_HEIGHT, 200);
+  camera.lookAt(0, EYE_HEIGHT, 8000);
 
   // low sun for long shadows-of-mood later; flat lambert for now.
   scene.add(new THREE.HemisphereLight(0xfff1d0, 0x8a7350, 1.1));
@@ -121,7 +239,7 @@ async function main() {
   sun.position.set(-400, 300, 200);
   scene.add(sun);
 
-  // ground large enough to cover the full disc (radius ~8075 + scatter tail).
+  // ground large enough to cover the full disc (radius ~7100 + scatter tail).
   const ground = new THREE.Mesh(
     new THREE.PlaneGeometry(18000, 18000),
     new THREE.MeshLambertMaterial({ color: 0xcdbd99 }),
@@ -138,20 +256,22 @@ async function main() {
   pad.position.y = 0.1;
   scene.add(pad);
 
-  // human-scale reference standing on the pad: ~1.7 units tall. The whole point
-  // is to read book size and walk scale against a body, so the world coordinate
-  // unit gets a felt meaning (R_INNER = 30 -> the pad is ~17 people wide).
-  const human = new THREE.Mesh(
-    new THREE.CapsuleGeometry(0.3, 1.1, 6, 12),
-    new THREE.MeshLambertMaterial({ color: 0x33597f }),
-  );
-  human.position.set(0, 0.85, 0);
-  scene.add(human);
-
-  info.textContent = "loading positions…";
-  const field = await loadPositions("positions.bin");
+  info.innerHTML = "loading positions…";
+  const [field, teleporters] = await Promise.all([
+    loadPositions("positions.bin"),
+    loadTeleporters("teleporters.json"),
+  ]);
   scene.add(buildField(field));
-  info.textContent = `${field.n.toLocaleString()} figures · drag to orbit, scroll to zoom · centre = year 2000`;
+  scene.add(buildTeleporters(teleporters));
+
+  const hint =
+    "click to look · WASD move · Shift run · F fly · Space/C up·down · Esc release";
+  const setHud = (flying: boolean) => {
+    info.innerHTML = `${field.n.toLocaleString()} figures · ${
+      flying ? "flying" : "walking"
+    } · centre = year 2000<br>${hint}`;
+  };
+  setHud(false);
 
   window.addEventListener("resize", () => {
     camera.aspect = window.innerWidth / window.innerHeight;
@@ -159,8 +279,15 @@ async function main() {
     renderer.setSize(window.innerWidth, window.innerHeight);
   });
 
+  const clock = new THREE.Clock();
+  let wasFlying = false;
   renderer.setAnimationLoop(() => {
-    controls.update();
+    const dt = Math.min(clock.getDelta(), 0.1); // clamp after tab-out stalls
+    const flying = update(dt);
+    if (flying !== wasFlying) {
+      setHud(flying);
+      wasFlying = flying;
+    }
     renderer.render(scene, camera);
   });
 }
