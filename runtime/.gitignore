@@ -5,3 +5,4 @@ dist/
 public/positions.bin
 public/teleporters.json
 public/meta.bin
+public/world.json

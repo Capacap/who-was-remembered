@@ -36,12 +36,17 @@ from pathlib import Path
 import numpy as np
 import pyarrow.parquet as pq
 
+from stage6_place import R_INNER, R_MAX, RADIUS_ALPHA, TIME_SPAN
+
 ROOT = Path(__file__).resolve().parent
 PLACEMENT_PATH = ROOT / "cache" / "placement.parquet"
 TELEPORTERS_PATH = ROOT / "cache" / "teleporters.parquet"
 OUT_PATH = ROOT.parent / "runtime" / "public" / "positions.bin"
 TELEPORTERS_OUT = ROOT.parent / "runtime" / "public" / "teleporters.json"
 META_OUT = ROOT.parent / "runtime" / "public" / "meta.bin"
+WORLD_OUT = ROOT.parent / "runtime" / "public" / "world.json"
+
+REF_YEAR = 2000  # the spawn year at radius R_INNER; matches stage6's (2000 - death)
 
 TIER_CODE = {"ordinary": 0, "minor": 1, "major": 2}
 GEO_CODE = {"birth": 0, "death": 1, "citizenship": 2, "gazetteer": 3}  # None -> 4 residue
@@ -126,6 +131,24 @@ def export_meta() -> int:
     return n
 
 
+def export_world() -> None:
+    """The placement constants the runtime needs to invert radius -> era for the
+    compass readouts. Imported from stage6_place so they cannot drift from the
+    actual placement; the runtime should never hard-code them.
+    """
+    WORLD_OUT.write_text(
+        json.dumps(
+            {
+                "R_INNER": R_INNER,
+                "R_MAX": R_MAX,
+                "TIME_SPAN": TIME_SPAN,
+                "RADIUS_ALPHA": RADIUS_ALPHA,
+                "REF_YEAR": REF_YEAR,
+            }
+        )
+    )
+
+
 def main() -> None:
     t = pq.read_table(PLACEMENT_PATH, columns=["x", "y", "landmark_tier", "geo_source"])
     n = t.num_rows
@@ -160,6 +183,9 @@ def main() -> None:
     export_meta()
     meta_mb = META_OUT.stat().st_size / 1e6
     print(f"wrote {n:,} meta records · {meta_mb:.2f} MB -> {META_OUT}")
+
+    export_world()
+    print(f"wrote world constants -> {WORLD_OUT}")
 
 
 if __name__ == "__main__":

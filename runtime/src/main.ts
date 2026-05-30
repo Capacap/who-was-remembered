@@ -252,6 +252,153 @@ function createPicker(
   };
 }
 
+// --- compass ----------------------------------------------------------------
+// A horizontal strip carrying the world's only true axis: time. ⊙ points to the
+// origin (inward = the present), ◯ to the radial outward direction (the past, the
+// way back in time); the two are always antipodal. This world has no north, only
+// longitude around and time in/out. The player drops their own bookmarks (no
+// designer landmarks), which slide on the bar by bearing. Readouts are years,
+// never raw units — your depth reads as your era, each bookmark shows its fixed era.
+const clamp = (v: number, lo: number, hi: number) => (v < lo ? lo : v > hi ? hi : v);
+
+interface World {
+  R_INNER: number;
+  R_MAX: number;
+  TIME_SPAN: number;
+  RADIUS_ALPHA: number;
+  REF_YEAR: number;
+}
+
+async function loadWorld(url: string): Promise<World> {
+  return (await fetch(url)).json();
+}
+
+function createCompass(
+  camera: THREE.PerspectiveCamera,
+  px: Float32Array,
+  pz: Float32Array,
+  meta: Awaited<ReturnType<typeof loadMeta>>,
+  world: World,
+) {
+  const root = document.getElementById("compass") as HTMLDivElement;
+  const eraEl = document.getElementById("compass-era") as HTMLDivElement;
+  const labelEl = document.getElementById("compass-label") as HTMLDivElement;
+
+  const HALF_SPAN = Math.PI / 2; // ±90° of bearing maps across the strip
+  const NOTCH = (8 * Math.PI) / 180; // within 8° of dead-ahead -> bloom the label
+  const ARRIVE = 2.5; // within this many units a marker hides: "you're here"
+
+  // ⊙ present (inward, toward origin) and ◯ past (outward) — the time axis.
+  const originEl = document.createElement("div");
+  originEl.className = "cmark origin";
+  originEl.textContent = "⊙";
+  root.appendChild(originEl);
+  const pastEl = document.createElement("div");
+  pastEl.className = "cmark past";
+  pastEl.textContent = "◯";
+  root.appendChild(pastEl);
+
+  const marks = new Map<number, HTMLElement>(); // instanceId -> bookmark glyph
+  const fwd = new THREE.Vector3();
+
+  function eraStr(year: number): string {
+    if (year >= world.REF_YEAR) return "the present";
+    return year < 0 ? `c.${-year} BCE` : `c.${year}`;
+  }
+
+  function playerEra(r: number): string {
+    if (r <= world.R_INNER) return "the present";
+    const t = clamp((r - world.R_INNER) / (world.R_MAX - world.R_INNER), 0, 1);
+    const tt = Math.pow(t, 1 / world.RADIUS_ALPHA);
+    const year = world.REF_YEAR - tt * world.TIME_SPAN;
+    return eraStr(Math.round(year / 10) * 10); // decade-rounded for a calm readout
+  }
+
+  function figureEra(i: number): string {
+    const y = meta.death[i] !== YEAR_MISSING ? meta.death[i] : meta.birth[i];
+    if (y === YEAR_MISSING) return "";
+    return y < 0 ? `c.${-y} BCE` : `c.${y}`;
+  }
+
+  // place a marker by world-space offset (target - player) relative to facing.
+  // returns the signed bearing and distance so the caller can pick the notch label.
+  function place(el: HTMLElement, dx: number, dz: number, fa: number) {
+    const dist = Math.hypot(dx, dz);
+    if (dist < ARRIVE) {
+      el.style.display = "none";
+      return { rel: Infinity, dist };
+    }
+    let rel = Math.atan2(dx, dz) - fa;
+    rel = Math.atan2(Math.sin(rel), Math.cos(rel)); // normalize to [-π, π]
+    // screen-right is the camera's +x, which sits at negative `rel` (see derivation
+    // in commit), hence the minus. Markers behind the window clamp to the edge.
+    const frac = 0.5 - 0.5 * clamp(rel / HALF_SPAN, -1, 1);
+    el.style.left = `${frac * 100}%`;
+    el.style.opacity = Math.abs(rel) > HALF_SPAN ? "0.4" : "1";
+    el.style.display = "block";
+    return { rel, dist };
+  }
+
+  function update() {
+    camera.getWorldDirection(fwd);
+    const fa = Math.atan2(fwd.x, fwd.z);
+    const cx = camera.position.x;
+    const cz = camera.position.z;
+    const r = Math.hypot(cx, cz);
+
+    eraEl.textContent = playerEra(r);
+
+    // track the marker nearest dead-ahead, to bloom its label under the notch.
+    let bestRel = Infinity;
+    let bestFrac = 0.5;
+    let bestText = "";
+    const consider = (rel: number, text: string) => {
+      if (Math.abs(rel) < bestRel) {
+        bestRel = Math.abs(rel);
+        bestFrac = 0.5 - 0.5 * clamp(rel / HALF_SPAN, -1, 1);
+        bestText = text;
+      }
+    };
+
+    const o = place(originEl, -cx, -cz, fa); // origin (present) is at world (0, 0)
+    consider(o.rel, "the present");
+    const p = place(pastEl, cx, cz, fa); // outward radial = deeper into the past
+    consider(p.rel, "the past");
+    for (const [i, el] of marks) {
+      const m = place(el, px[i] - cx, pz[i] - cz, fa);
+      const era = figureEra(i);
+      consider(m.rel, era ? `${meta.name(i)} · ${era}` : meta.name(i));
+    }
+
+    if (bestRel < NOTCH && bestText) {
+      labelEl.textContent = bestText;
+      labelEl.style.left = `${bestFrac * 100}%`;
+      labelEl.style.display = "block";
+    } else {
+      labelEl.style.display = "none";
+    }
+  }
+
+  return {
+    update,
+    has: (i: number) => marks.has(i),
+    toggle(i: number): boolean {
+      const el = marks.get(i);
+      if (el) {
+        el.remove();
+        marks.delete(i);
+        return false;
+      }
+      const m = document.createElement("div");
+      m.className = "cmark bookmark";
+      m.textContent = "◆";
+      root.appendChild(m);
+      marks.set(i, m);
+      return true;
+    },
+  };
+}
+
 // --- first-person controller ----------------------------------------------
 // PointerLockControls owns the look (Euler camera, pitch clamped internally).
 // We own translation: a key-state object drives a velocity each frame. Walk
@@ -366,10 +513,11 @@ async function main() {
   scene.add(pad);
 
   info.innerHTML = "loading positions…";
-  const [field, teleporters, meta] = await Promise.all([
+  const [field, teleporters, meta, world] = await Promise.all([
     loadPositions("positions.bin"),
     loadTeleporters("teleporters.json"),
     loadMeta("meta.bin"),
+    loadWorld("world.json"),
   ]);
   const built = buildField(field);
   scene.add(built.mesh);
@@ -380,6 +528,7 @@ async function main() {
   const overlay = document.getElementById("overlay") as HTMLDivElement;
   const card = document.getElementById("card") as HTMLDivElement;
   const pick = createPicker(camera, built.px, built.pz);
+  const compass = createCompass(camera, built.px, built.pz, meta, world);
 
   let target = -1; // instanceId under the reticle, or -1
   let overlayOpen = false;
@@ -405,8 +554,22 @@ async function main() {
       `<div class="name">${renderName(i)}</div>` +
       (desc ? `<div class="desc">${desc}</div>` : "") +
       (years ? `<div class="years">${years}</div>` : "") +
+      `<div class="actions">` +
       `<a href="${escapeHtml(url)}" target="_blank" rel="noopener">Read on Wikipedia →</a>` +
+      `<button id="bookmarkBtn"></button>` +
+      `</div>` +
       `<div class="hint">Esc or click outside to close</div>`;
+    const btn = card.querySelector("#bookmarkBtn") as HTMLButtonElement;
+    const renderBtn = () => {
+      const on = compass.has(i);
+      btn.textContent = on ? "★ Bookmarked" : "☆ Bookmark";
+      btn.classList.toggle("on", on);
+    };
+    renderBtn();
+    btn.addEventListener("click", () => {
+      compass.toggle(i);
+      renderBtn();
+    });
     overlay.style.display = "flex";
     overlayOpen = true;
     glance.style.display = "none";
@@ -471,6 +634,7 @@ async function main() {
       target = -1;
     }
 
+    compass.update();
     renderer.render(scene, camera);
   });
 }

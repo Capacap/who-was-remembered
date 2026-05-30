@@ -106,10 +106,105 @@
         border-radius: 5px;
         font-weight: 600;
       }
+      #card .actions {
+        margin-top: 18px;
+        display: flex;
+        gap: 10px;
+        align-items: center;
+      }
+      #card a {
+        margin-top: 0;
+      }
+      #card button {
+        padding: 9px 16px;
+        border: none;
+        border-radius: 5px;
+        cursor: pointer;
+        background: #cdbd99;
+        color: #3a2f1f;
+        font: inherit;
+        font-weight: 600;
+      }
+      #card button.on {
+        background: #2f6cff;
+        color: #fff;
+      }
       #card .hint {
         margin-top: 14px;
         font-size: 12px;
         opacity: 0.55;
+      }
+      /* compass: a horizontal strip anchored on ⊙ (origin = the present), not
+         cardinal N/E/S/W. Markers slide by bearing relative to where you face.
+         Density-faded near the dense centre (set from JS), present in the void. */
+      #compass {
+        position: fixed;
+        left: 50%;
+        top: 16px;
+        transform: translateX(-50%);
+        width: 520px;
+        height: 34px;
+        pointer-events: none;
+        user-select: none;
+        font: 14px system-ui, sans-serif;
+        color: #4a3c28;
+      }
+      #compass-track {
+        position: absolute;
+        left: 0;
+        right: 0;
+        top: 22px;
+        height: 2px;
+        background: rgba(90, 74, 50, 0.3);
+      }
+      #compass-notch {
+        position: absolute;
+        left: 50%;
+        top: 14px;
+        width: 2px;
+        height: 16px;
+        margin-left: -1px;
+        background: rgba(90, 74, 50, 0.7);
+      }
+      #compass-era {
+        position: absolute;
+        left: 50%;
+        top: 0;
+        transform: translateX(-50%);
+        font-size: 12px;
+        opacity: 0.8;
+        font-variant-numeric: tabular-nums;
+        white-space: nowrap;
+      }
+      .cmark {
+        position: absolute;
+        top: 13px;
+        transform: translateX(-50%);
+        font-size: 16px;
+        line-height: 1;
+      }
+      .cmark.origin {
+        color: #7a6038;
+      }
+      .cmark.past {
+        color: #7a6038;
+      }
+      .cmark.bookmark {
+        color: #2f6cff;
+      }
+      #compass-label {
+        position: absolute;
+        left: 50%;
+        top: 36px;
+        transform: translateX(-50%);
+        font-size: 13px;
+        white-space: nowrap;
+        text-align: center;
+        color: #3a2f1f;
+        background: rgba(217, 201, 168, 0.85);
+        padding: 2px 8px;
+        border-radius: 4px;
+        display: none;
       }
     </style>
   </head>
@@ -117,6 +212,12 @@
     <div id="info">loading…</div>
     <div id="reticle"></div>
     <div id="glance"></div>
+    <div id="compass">
+      <div id="compass-track"></div>
+      <div id="compass-notch"></div>
+      <div id="compass-era"></div>
+      <div id="compass-label"></div>
+    </div>
     <div id="overlay">
       <div id="card"></div>
     </div>
