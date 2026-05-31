@@ -1,11 +1,19 @@
 import * as THREE from "three";
 import { PointerLockControls } from "three/examples/jsm/controls/PointerLockControls.js";
+import {
+  initTerrain,
+  getGroundHeight,
+  getGroundNormal,
+  buildGroundMesh,
+  applyDistanceFade,
+} from "./terrain";
+import { buildSky } from "./sky";
 
 // --- walkable field --------------------------------------------------------
-// One instanced box per figure, placed straight from the pipeline's (x, y), now
-// with a first-person controller so the disc can actually be walked. No terrain
-// yet: the ground is flat and getGroundHeight() returns 0, but the player Y is
-// already routed through it so the heightmap drops in without touching movement.
+// One instanced box per figure, placed straight from the pipeline's (x, y), with
+// a first-person controller so the disc can be walked. The ground is a radial
+// hill (see terrain.ts): books are seated on it and tilted to its normal, and
+// the player's walk height samples the same function so nothing floats.
 // Books are still placeholder primitives. Everything visual here is scaffolding.
 
 const info = document.getElementById("info") as HTMLDivElement;
@@ -19,16 +27,18 @@ const RUN_MULT = 5; // hold-to-run
 const FLY_SPEED = 60; // crossing the void on foot is an 80-min walk by design
 const FLY_RUN_MULT = 6;
 
-// tier -> (book height, colour). Majors stand tall and hot so they read as
-// reference points from across the disc; ordinary books are low and sandy.
-const TIER_HEIGHT = [2, 6, 16]; // ordinary, minor, major
+// tier -> (overall size, colour). Books lie flat on the sand, so prominence is
+// no longer height: a major is a larger, hotter volume, an ordinary a small
+// sandy one. (Cross-disc legibility of majors is now a beacon-VFX problem, not a
+// tall-pillar one; the field reads as scattered books, not a skyline.)
+const TIER_SCALE = [1.0, 1.4, 2.2]; // ordinary, minor, major
 const TIER_COLOR = [0xb89b6e, 0xdcab4c, 0xff5a2c].map((c) => new THREE.Color(c));
 
 // Per-instance variety to break up the uniform-grid read. Rotation/tilt/footprint
 // are decorative (seeded, don't move the book). SCATTER does move it: a render-only
 // experiment — if it earns its keep it belongs in stage6's jitter, not here.
-const TILT_MAX = 0.1; // random lean, radians
-const FOOT_VAR = 0.3; // +/- fraction on footprint width
+const TILT_MAX = 0.05; // random lean off the ground normal, radians; small so a flat book keeps full contact
+const FOOT_VAR = 0.25; // +/- fraction on cover dimensions
 const SCATTER = 0; // spacing is now stage6's job (relaxation pass); renderer draws placement as-is
 
 // mulberry32: cheap deterministic PRNG so the variety is stable across reloads.
@@ -40,12 +50,6 @@ function mulberry32(seed: number) {
     t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   };
-}
-
-// Terrain seam: the only thing movement needs from the (future) heightmap is the
-// ground height under a point. Flat for now; the heightmap sampler slots in here.
-function getGroundHeight(_x: number, _z: number): number {
-  return 0;
 }
 
 async function loadPositions(url: string) {
@@ -67,11 +71,17 @@ async function loadPositions(url: string) {
 
 function buildField(field: Awaited<ReturnType<typeof loadPositions>>) {
   const { n, x, y, tier, geo } = field;
-  // book footprint ~0.35 x 0.5u: a closed book lying on the sand, deliberately
-  // smaller than the modern spacing (~0.9u) so neighbours read as distinct
-  // objects rather than an overlapping mass. Height comes from TIER_HEIGHT.
-  const box = new THREE.BoxGeometry(0.35, 1, 0.5);
+  // a closed book lying flat on the sand: broad cover (x, z), slim spine (y, the
+  // up axis). ~0.42 x 0.58u at tier 1, smaller than the modern spacing (~0.9u) so
+  // neighbours read as distinct dropped objects rather than an overlapping mass.
+  // The spine is the up extent, so seating offsets by half of it along the normal.
+  const SPINE = 0.12; // book thickness at tier 1, world units
+  const box = new THREE.BoxGeometry(0.42, SPINE, 0.58); // width, thickness, length
   const mat = new THREE.MeshLambertMaterial();
+  // books dissolve with the ground: same camera-distance fade, so the field
+  // thins into the sky at the horizon rather than leaving sharp specks floating
+  // over ground that has already gone transparent.
+  applyDistanceFade(mat);
   const mesh = new THREE.InstancedMesh(box, mat, n);
   mesh.instanceMatrix.setUsage(THREE.StaticDrawUsage);
 
@@ -86,20 +96,44 @@ function buildField(field: Awaited<ReturnType<typeof loadPositions>>) {
   const ADRIFT = new THREE.Color(0xb7b0a2);
   const dummy = new THREE.Object3D();
   const col = new THREE.Color();
+  const UP = new THREE.Vector3(0, 1, 0);
+  const normal = new THREE.Vector3();
+  const qAlign = new THREE.Quaternion();
+  const qLocal = new THREE.Quaternion();
+  const eul = new THREE.Euler();
   const rnd = mulberry32(0x1234abcd);
   for (let i = 0; i < n; i++) {
-    const h = TIER_HEIGHT[tier[i]];
-    const foot = 1 + (rnd() * 2 - 1) * FOOT_VAR;
+    const s = TIER_SCALE[tier[i]];
+    const fw = 1 + (rnd() * 2 - 1) * FOOT_VAR;
+    const fl = 1 + (rnd() * 2 - 1) * FOOT_VAR;
     // pipeline (x, y) is the ground plane; map to world (x, z), y is up.
     px[i] = x[i] + (rnd() * 2 - 1) * SCATTER;
     pz[i] = y[i] + (rnd() * 2 - 1) * SCATTER;
-    dummy.position.set(px[i], h / 2, pz[i]);
-    dummy.rotation.set(
+    const gy = getGroundHeight(px[i], pz[i]);
+    // sample the normal across the book's own footprint (half-length ~0.3·s) so a
+    // large book conforms to the slope it spans instead of one 0.5u patch.
+    getGroundNormal(px[i], pz[i], normal, 0.3 * s);
+    // lay the book flat on the slope: its spine (+y) aligns to the ground normal,
+    // a random spin about that axis gives it a dropped heading, and a small lean
+    // off the normal keeps it from looking neatly placed.
+    qAlign.setFromUnitVectors(UP, normal);
+    eul.set(
       (rnd() * 2 - 1) * TILT_MAX,
       rnd() * Math.PI * 2,
       (rnd() * 2 - 1) * TILT_MAX,
     );
-    dummy.scale.set(foot, h, foot);
+    qLocal.setFromEuler(eul);
+    dummy.quaternion.copy(qAlign).multiply(qLocal);
+    // settle the book INTO the sand: lift the centre by less than half the spine,
+    // so the underside sits a touch below grade and any leaning corner rests in
+    // the surface rather than hovering over it.
+    const lift = (SPINE * s) * 0.3;
+    dummy.position.set(
+      px[i] + normal.x * lift,
+      gy + normal.y * lift,
+      pz[i] + normal.z * lift,
+    );
+    dummy.scale.set(s * fw, s, s * fl);
     dummy.updateMatrix();
     mesh.setMatrixAt(i, dummy.matrix);
     col.copy(TIER_COLOR[tier[i]]);
@@ -143,7 +177,8 @@ function buildTeleporters(list: Teleporter[]) {
   const group = new THREE.Group();
   for (const tp of list) {
     const pillar = new THREE.Mesh(geom, mat);
-    pillar.position.set(tp.x, TP_HEIGHT / 2, tp.y);
+    // stands plumb on its flattened plaza (terrain levels a disc here).
+    pillar.position.set(tp.x, getGroundHeight(tp.x, tp.y) + TP_HEIGHT / 2, tp.y);
     group.add(pillar);
   }
   return group;
@@ -223,9 +258,9 @@ function createPicker(
   // wider cone than a precise crosshair: once you're standing at a book, facing
   // its general direction should read it without pixel-perfect aim.
   const COS_CONE = Math.cos((11 * Math.PI) / 180);
-  // every book aims at the same low target height regardless of tier, so a tall
-  // major doesn't force you to look up at the one book you've walked right up to.
-  const PICK_HEIGHT = 1;
+  // books lie flat on the sand, so the pick point sits just above the ground;
+  // you read a book by walking up and looking down at it.
+  const PICK_HEIGHT = 0.2;
   const n = px.length;
   const fwd = new THREE.Vector3();
 
@@ -234,7 +269,9 @@ function createPicker(
     const cx = camera.position.x;
     const cy = camera.position.y;
     const cz = camera.position.z;
-    const dyAll = PICK_HEIGHT - cy; // book pick-point vs eye, uniform across tiers
+    // books within reach share the player's local ground, so aim a fixed height
+    // above it rather than y=0 (which the hill makes wrong by hundreds of units).
+    const dyAll = getGroundHeight(cx, cz) + PICK_HEIGHT - cy;
     let best = -1;
     let bestDist2 = Infinity;
     for (let i = 0; i < n; i++) {
@@ -467,10 +504,27 @@ function createController(camera: THREE.PerspectiveCamera, dom: HTMLElement) {
 
 async function main() {
   const scene = new THREE.Scene();
-  scene.background = new THREE.Color(0xd9c9a8);
-  // world radius ~7100u (linear time); fog tuned so the far frontier hazes
-  // out rather than popping at the draw edge.
-  scene.fog = new THREE.FogExp2(0xd9c9a8, 0.00016);
+  // Sky and fog share one warm-grey horizon colour so the ground dissolves into
+  // the sky at distance rather than ending on a visible square edge. The density
+  // lets the present read crisp up close while the deep past hazes into grey:
+  // the colour narrative finished by the atmosphere, not just the ground. A
+  // single fog colour can't be warm over the present AND cold over the void
+  // (that needs position-based fog); this greige is the honest middle.
+  // No distance fog: colour fog can only tint distant surfaces toward one flat
+  // colour, which either brightens the grey void or darkens the present. Instead
+  // the ground and books fade to TRANSPARENT at distance (see applyDistanceFade)
+  // and dissolve into the sky dome, so the distance always reads as exactly the
+  // sky behind it, never tinted. HORIZON is the tone the land dissolves into: it
+  // is handed to the dome as its ground-haze colour so land and sky meet without
+  // a colour step.
+  const HORIZON = new THREE.Color(0x847b6d);
+  scene.background = HORIZON;
+
+  // gradient sky dome, horizon band pinned to the fog colour so distant ground
+  // dissolves into it. It recentres on the camera each frame (see the loop), so
+  // it reads as infinitely far and the world never shows an edge against it.
+  const sky = buildSky(HORIZON);
+  scene.add(sky);
 
   const camera = new THREE.PerspectiveCamera(
     70,
@@ -487,25 +541,19 @@ async function main() {
   const { controls, update } = createController(camera, renderer.domElement);
   scene.add(controls.object);
 
-  // spawn dead centre (0,0), facing outward across the empty plaza. The first
-  // view is the whole uneven ring at once: a dense wall of books toward the
-  // Western longitudes, near-empty ground toward the gaps. Survey, then travel.
-  camera.position.set(0, EYE_HEIGHT, 0);
-  camera.lookAt(0, EYE_HEIGHT, 8000);
+  // spawn dead centre (0,0), on the summit of the present, facing outward across
+  // the empty plaza. The first view is the whole uneven ring at once: a dense
+  // wall of books toward the Western longitudes, near-empty ground toward the
+  // gaps. The gaze runs down the slope to the distant desert floor, so the land
+  // visibly falls away into the past. Survey, then travel.
+  camera.position.set(0, getGroundHeight(0, 0) + EYE_HEIGHT, 0);
+  camera.lookAt(0, 0, 8000);
 
   // low sun for long shadows-of-mood later; flat lambert for now.
   scene.add(new THREE.HemisphereLight(0xfff1d0, 0x8a7350, 1.1));
   const sun = new THREE.DirectionalLight(0xffe8c0, 1.4);
   sun.position.set(-400, 300, 200);
   scene.add(sun);
-
-  // ground large enough to cover the full disc (radius ~7100 + scatter tail).
-  const ground = new THREE.Mesh(
-    new THREE.PlaneGeometry(18000, 18000),
-    new THREE.MeshLambertMaterial({ color: 0xcdbd99 }),
-  );
-  ground.rotation.x = -Math.PI / 2;
-  scene.add(ground);
 
   info.innerHTML = "loading positions…";
   const [field, teleporters, meta, world] = await Promise.all([
@@ -514,6 +562,10 @@ async function main() {
     loadMeta("meta.bin"),
     loadWorld("world.json"),
   ]);
+  // the plazas flatten around the teleporters, so terrain needs them before the
+  // ground mesh, books or pillars are seated.
+  initTerrain(teleporters);
+  scene.add(buildGroundMesh());
   const built = buildField(field);
   scene.add(built.mesh);
   scene.add(buildTeleporters(teleporters));
@@ -525,7 +577,9 @@ async function main() {
     new THREE.MeshBasicMaterial({ color: 0x7a6038, side: THREE.DoubleSide }),
   );
   pad.rotation.x = -Math.PI / 2;
-  pad.position.y = 0.1;
+  // the ring sits on the flat summit plateau (R_INNER is inside it), so a single
+  // height for the whole ring is exact; lift it just clear of the ground.
+  pad.position.y = getGroundHeight(world.R_INNER, 0) + 0.1;
   scene.add(pad);
 
   // --- look-at glance + inspect overlay -------------------------------------
@@ -640,6 +694,7 @@ async function main() {
     }
 
     compass.update();
+    sky.position.copy(camera.position); // keep the dome centred on the viewer
     renderer.render(scene, camera);
   });
 }
