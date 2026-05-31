@@ -1,10 +1,10 @@
 import * as THREE from "three";
 
 // --- terrain ----------------------------------------------------------------
-// The world is a broad radial hill. The present (origin) is a flat summit
-// plateau; walking back in time runs downhill, and the deep-past void settles
-// onto a flat desert floor at the rim. Height is the volume of the record made
-// topographic: a mountain at the recently-dead, flat emptiness for antiquity.
+// The world is a near-flat desert and the dunes are its relief, not a texture
+// laid over a hill. The present (origin) stays calm and level where the books
+// are densest; only a whisper of a central rise gives spawn a faint vantage
+// before it eases to the desert floor and a transverse dune field takes over.
 //
 // This lives in the renderer, not the pipeline. The vertical axis carries no
 // data (time and longitude are the horizontal x/z), so terrain is decoration by
@@ -13,9 +13,9 @@ import * as THREE from "three";
 // is the single source of truth: the ground mesh, book seating, teleporter bases
 // and the player's walk height all sample it, so they agree by construction.
 
-const PEAK_HEIGHT = 400; // summit elevation at the origin, world units
-const PLATEAU_R = 700; // flat summit out to here (spawn + plaza + the year-2000 ring)
-const BASE_R = 5200; // settled onto the desert floor (0) by here, flat beyond
+const PEAK_HEIGHT = 60; // a whisper of a central rise, not a summit, world units
+const PLATEAU_R = 700; // calm and level here (spawn + plaza + the year-2000 ring)
+const BASE_R = 5200; // the rise has eased to the desert floor (0) by here
 
 // Teleporter plazas: each monument stands on a level disc carved into the slope
 // at its own elevation, so the pillar sits plumb and the future stone-circle
@@ -26,16 +26,29 @@ const BASE_R = 5200; // settled onto the desert floor (0) by here, flat beyond
 const FLATTEN_R = 14;
 const FLATTEN_FALLOFF = 50;
 
-// Dune field: fractal noise laid over the hill so the slope reads as rolling
-// desert rather than a CGI cone. It fades in beyond the summit plateau (the
-// present stays calm where the books are densest) and runs at full strength
-// across the descent and the void. Wavelength is long and amplitude modest so
-// the macro hill still dominates and books tilt with the dunes, not against them.
-const DUNE_AMP = 32; // peak undulation added to the hill, world units
-const DUNE_WAVELENGTH = 520; // base dune spacing; finer octaves ride on top
+// Dune field. The terrain is essentially flat desert, so the dunes ARE the
+// relief, not an undulation on a hill. A prevailing wind packs them into
+// transverse ridges: long crests running crosswind, closely spaced along the
+// wind. Sampling the noise anisotropically (short along-wind, long crosswind)
+// elongates the ridges, a domain warp lets them meander off straight, and a
+// ridged fold sharpens the crest into a crease rather than a soft bump. They
+// fade in past the calm present plateau and run at full height across the rest.
+//
+// Slip-face asymmetry (gentle windward, steep lee) is deferred on purpose:
+// clamping a lee slope to the sand's angle of repose wants neighbour info, which
+// is natural on a baked raster and awkward pointwise, so it is the first thing
+// that will earn the heightmap bake.
+const DUNE_AMP = 70; // crest height above the trough, world units
+const DUNE_SPACE = 260; // along-wind dune spacing (close)
+const DUNE_LEN = 900; // crosswind ridge length scale (long)
 const DUNE_OCTAVES = 3;
-const NOISE_INNER = PLATEAU_R; // dunes start where the hill begins to fall away
-const NOISE_FULL = 1700; // ... reaching full amplitude by here
+const WARP_AMP = 120; // how far the crest lines meander off straight
+const WARP_SCALE = 1100; // wavelength of that meander
+const WIND_ANGLE = 0.7; // prevailing wind bearing, radians
+const WIND_X = Math.cos(WIND_ANGLE);
+const WIND_Z = Math.sin(WIND_ANGLE);
+const NOISE_INNER = PLATEAU_R; // dunes start past the calm present plateau
+const NOISE_FULL = 1400; // ... at full height by here
 
 let plazas: { x: number; z: number; h: number }[] = [];
 
@@ -97,10 +110,12 @@ function perlin(x: number, y: number): number {
   return (1 - v) * x1 + v * x2; // roughly [-1, 1]
 }
 
-// fractal sum (fBm) of a few octaves, normalized back to ~[-1, 1].
-function fbm(x: number, y: number): number {
+// fractal sum (fBm) of a few octaves in UNIT coordinate space (the caller
+// pre-scales), normalized back to ~[-1, 1]. Unit space lets the dune sampler
+// stretch the coordinates anisotropically before calling in.
+function fbmUnit(x: number, y: number): number {
   let amp = 1;
-  let freq = 1 / DUNE_WAVELENGTH;
+  let freq = 1;
   let sum = 0;
   let norm = 0;
   for (let o = 0; o < DUNE_OCTAVES; o++) {
@@ -144,11 +159,22 @@ const COLOR_WAVELENGTH = 900; // patch-noise scale for the painted wobble
 const FADE_START = 3000; // fully opaque within this distance of the camera
 const FADE_END = 6500; // fully gone (sky shows through) beyond this
 
-// the dune offset at a point: fractal noise, faded in past the summit plateau.
+// the dune offset at a point: anisotropic ridged noise, faded in past the
+// present plateau. See the dune-field note above for the construction.
 function dune(x: number, z: number, r: number): number {
   const env = smootherstep((r - NOISE_INNER) / (NOISE_FULL - NOISE_INNER));
   if (env <= 0) return 0;
-  return env * DUNE_AMP * fbm(x, z);
+  // meander the crest lines so they aren't ruled straight
+  const wx = x + WARP_AMP * perlin(x / WARP_SCALE, z / WARP_SCALE);
+  const wz = z + WARP_AMP * perlin(x / WARP_SCALE + 41.3, z / WARP_SCALE + 17.9);
+  // rotate into wind-aligned axes and sample anisotropically: dunes pack along
+  // the wind (short scale), ridges run crosswind (long scale).
+  const s = (wx * WIND_X + wz * WIND_Z) / DUNE_SPACE;
+  const t = (-wx * WIND_Z + wz * WIND_X) / DUNE_LEN;
+  // ridged fold: a crease at the crest. Squaring tightens the crest and pools
+  // the sand flat in the troughs.
+  const ridge = 1 - Math.abs(fbmUnit(s, t)); // [0, 1], peaked at the crest
+  return env * DUNE_AMP * ridge * ridge;
 }
 
 // the bare radial hill, before dunes and plaza flattening.
@@ -215,17 +241,21 @@ export function peakHeight(): number {
 
 // A displaced disc covering the full world (radius ~7100 + scatter tail), built
 // once by sampling getGroundHeight per vertex so it matches everything standing
-// on it. Resolution is tuned to the dune wavelength (~520u and its octaves down
-// to ~130u): 768 segments over 18000u gives ~23u quads, enough that books seated
-// on the true height don't float above a smoothed mesh. The ~30u plazas now span
-// a couple of facets thanks to the wider plaza falloff.
+// on it. While we evaluate the dune shape the segment count is raised (see SEG
+// below) so the crests resolve instead of smoothing into bumps; the final
+// resolution is the bake's call. Books seated on the true height don't float
+// above the mesh because the mesh samples that same height. The ~30u plazas
+// span a couple of facets thanks to the wider plaza falloff.
 //
 // Flat-shaded and vertex-coloured for a low-poly, hand-painted look (Vane): the
 // grid is jittered in-plane so facets read as organic triangles, and the
 // material derives a per-face normal so each facet catches the sun distinctly.
 export function buildGroundMesh(): THREE.Mesh {
   const SIZE = 18000;
-  const SEG = 768;
+  // TEMP: raised from 768 to ~12u quads so the dune crests are actually visible
+  // for shape evaluation. This density would smooth away the low-poly facets in
+  // the final look; the heightmap bake will set the real resolution.
+  const SEG = 1536;
   const quad = SIZE / SEG;
   const JIT = quad * 0.33; // max in-plane displacement, as a fraction of a quad
   const geom = new THREE.PlaneGeometry(SIZE, SIZE, SEG, SEG);
