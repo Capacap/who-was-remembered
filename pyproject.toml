@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Preprocessing pipeline for the Wikipedia exploration art project"
 requires-python = ">=3.11"
 dependencies = [
+    "fast-simplification>=0.1.7",
     "matplotlib>=3.9",
     "mwparserfromhell>=0.6",
     "numpy>=2",

@@ -78,29 +78,62 @@ Still open in Step 1:
 
 Output: `cache/heightmap.npz`.
 
-## Step 2 — Mesh (decimation)
+## Step 2 — Mesh (decimation)  [bench + decimator landed; budget/topology/format open]
 
 Build a dense grid mesh from the heightmap, then decimate to a low-poly mesh
 whose triangulation follows features: big facets on the flats (the Vane look),
 tight facets on the crests (the resolution dunes need). One pass serves both the
 aesthetic and the fidelity, which a uniform grid can't.
 
+Done: the inspection bench (`stage9_mesh.py`). It builds a mesh from
+`heightmap.npz` (uniform-grid baseline, or quadric-decimated), rasterizes its
+exact chord back onto the heightmap grid by barycentric interpolation, and
+renders source-vs-chord-vs-signed-deviation plus an oblique facet crop and an
+along-wind source/chord profile. Deviation (chord minus source) is the artifact
+we tune by, so it is measured (rms / p95 / p99 / max, split by radius band), not
+eyeballed. The builder functions return `(verts, faces)` in memory, so the real
+decimator flows through the same render; a `ground.bin` loader comes with the
+format decision below.
+
+Done: `fast-simplification` wired in as the decimator (`--target-tris`). It beats
+the uniform-grid baseline at equal tri budget by stripping the flats and spending
+the budget on curvature: ~2x lower deviation rms at 20k tris (4.4u vs 8.8u), ~3.3x
+at 81k (1.6u vs 5.2u); the gain widens with budget because there is more flat to
+reclaim. Triangle quality is healthy (anisotropic stretch along straight ridges,
+no needle slivers), the plateau collapses to near-flat (band rms < 0.4u), and the
+bold 20k facets still read as dunes. So quadric output is good enough for the
+faceted look; the Blender fallback is not needed.
+
+Done: `--bake` writes `cache/ground.bin` (unindexed triangle soup, layout below)
+and round-trips it back as a self-check. The provisional mesh is 30k tris / 90k
+verts / 1.08 MB.
+
 Decisions:
-- **Tool / dependency.** Start with `fast-simplification` (small, quadric edge
-  collapse, returns an indexed mesh, preserves features). Fall back to headless
-  Blender's decimate (planar mode, edge-angle control) if quadric output reads
-  too noisy for the faceted look.
-- **Budget.** Target a tri count, not a fixed ratio; tune against how the facets
-  read. Clip the mesh to a disc of radius ~R_MAX + fade margin (~8000u) rather
-  than the full 18000 square; the corners are pure void and always faded out.
-- **Topology.** Indexed-smooth vs unindexed-flat. The low-poly look wants flat
-  per-face shading, and per-*face* colour (every facet one tone) needs unwelded
-  triangles. Lean unindexed-flat with baked per-face normals. Re-evaluate the
-  facet character after the first decimation; it won't match the current
-  jitter-driven look.
-- **Format.** Custom `ground.bin` (Float32 positions, Uint32 index or unindexed,
-  colour buffer) to match the project's existing `.bin` idiom and avoid a
-  GLTF/Draco runtime dependency. GLB only if we want the tooling.
+- **Tool / dependency.** CONFIRMED `fast-simplification` (quadric edge collapse,
+  indexed output, feature-preserving). Beats uniform 2-3.3x and the facets read
+  clean, so the headless-Blender fallback is dropped.
+- **Budget.** PROVISIONAL 30k tris (`DEFAULT_BAKE_TRIS`). 15k starts merging
+  adjacent crests, 60k softens to near-smooth; 30k keeps the transverse dunes
+  distinct while reading bold-faceted. Performance is not the constraint (a static
+  30k-tri ground is trivial), so this is a pure aesthetic dial the runtime gets
+  the final say on; expect to come back and regenerate. Clip is a disc of radius
+  ~R_MAX + fade margin (8000u), not the 18000 square (corners are faded void).
+- **Topology.** CONFIRMED unindexed-flat. Flat per-face shading + Step 3's
+  per-face colour both want unwelded triangles, and smooth shading would need a
+  normal/detail texture to not read as flat plastic, which costs more per-fragment
+  than the ~3x vertex count of unwelding does in geometry. No baked normals:
+  the runtime's `flatShading` derives the per-face normal from position
+  derivatives in-shader, so positions alone suffice.
+- **Format.** CONFIRMED custom `ground.bin`, matching the positions.bin idiom
+  (little-endian, Uint32 count header + Float32 payload), no GLTF/Draco dep:
+    `uint32 vertexCount` (= 3 x tris; unindexed)
+    `float32 positions[vertexCount * 3]`  (x, y, z, triangle soup)
+  No index, no normals, no colour yet (the runtime still computes the radial tint
+  from position; Step 3 adds a baked colour buffer here).
+- **Open / deferred.** The quadric collapse treats the clip edge like any other,
+  so the disc boundary is slightly ragged; it sits in faded territory, revisit if
+  it reads. A crest-weighting pre-pass (bias the collapse to keep ridge lines
+  without raising the global budget) is the lever for the curvature-param tweak.
 
 ## Step 3 — Colouring
 
@@ -166,6 +199,35 @@ change now and expensive to re-derive once a mesh and seated books depend on it.
 Lock resolution and the shared world dimensions before Step 4. Colour and seating
 both run on the final mesh, so they come after decimation, not before.
 
-Resume point: Step 1 dune shape is in good shape (slip-face asymmetry landed).
-Next is Step 2 (mesh decimation), unless we want to revisit the open Step 1 items
-above once the dunes are seen as a meshed surface rather than a heightmap render.
+Runtime pivot (landed): the runtime ground is NOT the decimated `ground.bin`. It
+is a 5-level geometry clipmap tessellated live from the served heightmap
+(`runtime/src/terrain.ts: createGround`): camera-centred square levels, cell size
+doubling outward, each snapped to its own cell so facets never swim. Seams are
+handled by geomorphing the outer band of each level to the coarser level's exact
+chord (C0), a depth bias to break the coplanar tie, and an explicit renderOrder
+(finest first) so the transparent levels never double-blend. Distance dissolves to
+the dome via the camera-distance opacity fade (every level), which keeps the world
+circular so no square footprint shows. `ground.bin` and the analytic dune field in
+terrain.ts are both retired from the live path (the analytic functions remain only
+as the pre-heightmap-load fallback). Book/pillar/ring/player heights now sample the
+heightmap (sampleHeight/sampleNormal), so props seat on the drawn surface. Steps 3
+(baked colour) and a pipeline-baked seat height (Step 4, for the 576k books at load)
+remain open but are not blocking.
+
+Resume point: Step 2 is functionally complete. `stage9_mesh.py --bake` writes
+`cache/ground.bin` (30k-tri unindexed-flat soup), with the inspection bench and a
+confirmed decimator behind it. The decimated mesh is now superseded by the clipmap
+above; the bench is kept as the heightmap inspection tool and the `--serve-heightmap`
+exporter.
+
+Next is the runtime path, which is Steps 4 + 5 together (Step 3 colour can wait;
+the runtime already tints the ground radially from position):
+- Step 4 (seat heights). The baked surface diverges hard from analytic
+  `getGroundHeight` (shear + avalanche aren't in terrain.ts), so books/pillars
+  must take heights sampled from the baked mesh, not the function. 576k book
+  raycasts can't run at load, so bake the heights in the pipeline (sample the
+  final mesh per book/teleporter) and add them to the export.
+- Step 5 (runtime load). Load `ground.bin` and build the flat-shaded mesh in
+  place of `buildGroundMesh`; player walk height becomes a single mesh raycast
+  per frame; books/pillars/ring/picker read baked heights; retire the analytic
+  terrain. Move world dims into `world.json` so both sides share one source.

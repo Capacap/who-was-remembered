@@ -8,10 +8,10 @@ import * as THREE from "three";
 // sky above, easing from a pale skyline to a dusty-blue zenith. The ground tone
 // is never mixed into the sky, so it cannot brown it.
 //
-// The land has no opaque edge any more (it fades to transparent into this
-// dome), so the dome itself supplies the horizon the geometry no longer does.
-// It is a single inward-facing sphere recentred on the camera each frame, so it
-// sits at a fixed apparent distance and never clips. Fog does not apply.
+// The land has no opaque edge (it fades to transparent into this dome), so the
+// dome itself supplies the horizon the geometry no longer does. It is a single
+// inward-facing sphere recentred on the camera each frame, so it sits at a fixed
+// apparent distance and never clips. Fog does not apply.
 
 // The sky is the dome's own aesthetic; the ground tone is passed in (= the
 // colour the land fades into) so land and sky agree at the line.

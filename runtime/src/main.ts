@@ -2,9 +2,10 @@ import * as THREE from "three";
 import { PointerLockControls } from "three/examples/jsm/controls/PointerLockControls.js";
 import {
   initTerrain,
-  getGroundHeight,
-  getGroundNormal,
-  buildGroundMesh,
+  initHeightmap,
+  sampleHeight,
+  sampleNormal,
+  createGround,
   applyDistanceFade,
 } from "./terrain";
 import { buildSky } from "./sky";
@@ -78,9 +79,9 @@ function buildField(field: Awaited<ReturnType<typeof loadPositions>>) {
   const SPINE = 0.12; // book thickness at tier 1, world units
   const box = new THREE.BoxGeometry(0.42, SPINE, 0.58); // width, thickness, length
   const mat = new THREE.MeshLambertMaterial();
-  // books dissolve with the ground: same camera-distance fade, so the field
-  // thins into the sky at the horizon rather than leaving sharp specks floating
-  // over ground that has already gone transparent.
+  // books dissolve with the ground: the same camera-distance fade to transparent,
+  // so the field thins into the dome at the horizon rather than leaving sharp specks
+  // floating over ground that has already faded out.
   applyDistanceFade(mat);
   const mesh = new THREE.InstancedMesh(box, mat, n);
   mesh.instanceMatrix.setUsage(THREE.StaticDrawUsage);
@@ -109,10 +110,10 @@ function buildField(field: Awaited<ReturnType<typeof loadPositions>>) {
     // pipeline (x, y) is the ground plane; map to world (x, z), y is up.
     px[i] = x[i] + (rnd() * 2 - 1) * SCATTER;
     pz[i] = y[i] + (rnd() * 2 - 1) * SCATTER;
-    const gy = getGroundHeight(px[i], pz[i]);
+    const gy = sampleHeight(px[i], pz[i]);
     // sample the normal across the book's own footprint (half-length ~0.3·s) so a
     // large book conforms to the slope it spans instead of one 0.5u patch.
-    getGroundNormal(px[i], pz[i], normal, 0.3 * s);
+    sampleNormal(px[i], pz[i], normal, 0.3 * s);
     // lay the book flat on the slope: its spine (+y) aligns to the ground normal,
     // a random spin about that axis gives it a dropped heading, and a small lean
     // off the normal keeps it from looking neatly placed.
@@ -165,10 +166,25 @@ async function loadTeleporters(url: string): Promise<Teleporter[]> {
   return (await fetch(url)).json();
 }
 
+// Baked heightmap (stage9 heightmap.bin): uint32 resolution, float32 world_size,
+// then float32 height[res*res] row-major. See stage9_mesh.py:write_heightmap_bin.
+async function loadHeightmap(
+  url: string,
+): Promise<{ res: number; worldSize: number; data: Float32Array }> {
+  const buf = await (await fetch(url)).arrayBuffer();
+  const dv = new DataView(buf);
+  const res = dv.getUint32(0, true);
+  const worldSize = dv.getFloat32(4, true);
+  const data = new Float32Array(buf, 8, res * res);
+  return { res, worldSize, data };
+}
+
 function buildTeleporters(list: Teleporter[]) {
   const geom = new THREE.BoxGeometry(TP_FOOT, TP_HEIGHT, TP_FOOT);
   // emissive so it reads as a lit beacon at distance rather than a shaded box
   // that the fog swallows; a touch of lambert keeps some form on the near ones.
+  // Opaque and unfaded (no applyDistanceFade), so the beacons punch through the
+  // haze that dissolves the books and ground: the point of one you steer toward.
   const mat = new THREE.MeshLambertMaterial({
     color: 0x1c3a8c,
     emissive: 0x2f6cff,
@@ -178,7 +194,7 @@ function buildTeleporters(list: Teleporter[]) {
   for (const tp of list) {
     const pillar = new THREE.Mesh(geom, mat);
     // stands plumb on its flattened plaza (terrain levels a disc here).
-    pillar.position.set(tp.x, getGroundHeight(tp.x, tp.y) + TP_HEIGHT / 2, tp.y);
+    pillar.position.set(tp.x, sampleHeight(tp.x, tp.y) + TP_HEIGHT / 2, tp.y);
     group.add(pillar);
   }
   return group;
@@ -271,7 +287,7 @@ function createPicker(
     const cz = camera.position.z;
     // books within reach share the player's local ground, so aim a fixed height
     // above it rather than y=0 (which the hill makes wrong by hundreds of units).
-    const dyAll = getGroundHeight(cx, cz) + PICK_HEIGHT - cy;
+    const dyAll = sampleHeight(cx, cz) + PICK_HEIGHT - cy;
     let best = -1;
     let bestDist2 = Infinity;
     for (let i = 0; i < n; i++) {
@@ -492,9 +508,11 @@ function createController(camera: THREE.PerspectiveCamera, dom: HTMLElement) {
       camera.position.add(move);
     }
     // walk mode keeps the eye a fixed height above the ground every frame;
-    // fly mode leaves Y wherever the player flew it.
+    // fly mode leaves Y wherever the player flew it. The walk height reads the
+    // baked heightmap (the same field the near patch tessellates), so the feet
+    // sit on the visible near ground rather than the analytic surface.
     if (!flying) {
-      camera.position.y = getGroundHeight(camera.position.x, camera.position.z) + EYE_HEIGHT;
+      camera.position.y = sampleHeight(camera.position.x, camera.position.z) + EYE_HEIGHT;
     }
     return flying;
   }
@@ -504,19 +522,14 @@ function createController(camera: THREE.PerspectiveCamera, dom: HTMLElement) {
 
 async function main() {
   const scene = new THREE.Scene();
-  // Sky and fog share one warm-grey horizon colour so the ground dissolves into
-  // the sky at distance rather than ending on a visible square edge. The density
-  // lets the present read crisp up close while the deep past hazes into grey:
-  // the colour narrative finished by the atmosphere, not just the ground. A
-  // single fog colour can't be warm over the present AND cold over the void
-  // (that needs position-based fog); this greige is the honest middle.
-  // No distance fog: colour fog can only tint distant surfaces toward one flat
-  // colour, which either brightens the grey void or darkens the present. Instead
-  // the ground and books fade to TRANSPARENT at distance (see applyDistanceFade)
+  // The ground and books fade to TRANSPARENT at distance (see applyDistanceFade)
   // and dissolve into the sky dome, so the distance always reads as exactly the
-  // sky behind it, never tinted. HORIZON is the tone the land dissolves into: it
-  // is handed to the dome as its ground-haze colour so land and sky meet without
-  // a colour step.
+  // sky behind it, never tinted, and no footprint edge is ever left to see. A
+  // single fog colour was the alternative but it can only tint distant surfaces
+  // toward one flat colour (brightening the grey void or darkening the present)
+  // and, worse, leaves opaque geometry whose square footprint shows from a height.
+  // HORIZON is the tone the land dissolves into: it is handed to the dome as its
+  // ground-haze colour so land and sky meet without a colour step.
   const HORIZON = new THREE.Color(0x847b6d);
   scene.background = HORIZON;
 
@@ -546,7 +559,7 @@ async function main() {
   // wall of books toward the Western longitudes, near-empty ground toward the
   // gaps. The gaze runs down the slope to the distant desert floor, so the land
   // visibly falls away into the past. Survey, then travel.
-  camera.position.set(0, getGroundHeight(0, 0) + EYE_HEIGHT, 0);
+  camera.position.set(0, sampleHeight(0, 0) + EYE_HEIGHT, 0);
   camera.lookAt(0, 0, 8000);
 
   // low sun for long shadows-of-mood later; flat lambert for now.
@@ -556,16 +569,29 @@ async function main() {
   scene.add(sun);
 
   info.innerHTML = "loading positions…";
-  const [field, teleporters, meta, world] = await Promise.all([
+  const [field, teleporters, meta, world, heightmap] = await Promise.all([
     loadPositions("positions.bin"),
     loadTeleporters("teleporters.json"),
     loadMeta("meta.bin"),
     loadWorld("world.json"),
+    loadHeightmap("heightmap.bin"),
   ]);
+  // the heightmap is the ground-height source for the clipmap and the player's
+  // feet; init it before anything samples it.
+  initHeightmap(heightmap.res, heightmap.worldSize, heightmap.data);
   // the plazas flatten around the teleporters, so terrain needs them before the
-  // ground mesh, books or pillars are seated.
+  // books or pillars are seated. Books, pillars, the picker and the ring all read
+  // sampleHeight/sampleNormal now, so they seat on the same baked surface the
+  // clipmap draws (no float-off; the analytic field is only the heightmap fallback).
   initTerrain(teleporters);
-  scene.add(buildGroundMesh());
+  // the ground is a camera-following clipmap tessellated from the heightmap (see
+  // terrain.createGround); no static mesh ships any more.
+  const ground = createGround();
+  ground.update(camera.position.x, camera.position.z);
+  scene.add(ground.group);
+  // settle the eye onto the baked surface now the heightmap is loaded (spawn was
+  // placed on the analytic fallback before the fetch resolved).
+  camera.position.y = sampleHeight(camera.position.x, camera.position.z) + EYE_HEIGHT;
   const built = buildField(field);
   scene.add(built.mesh);
   scene.add(buildTeleporters(teleporters));
@@ -579,7 +605,7 @@ async function main() {
   pad.rotation.x = -Math.PI / 2;
   // the ring sits on the flat summit plateau (R_INNER is inside it), so a single
   // height for the whole ring is exact; lift it just clear of the ground.
-  pad.position.y = getGroundHeight(world.R_INNER, 0) + 0.1;
+  pad.position.y = sampleHeight(world.R_INNER, 0) + 0.1;
   scene.add(pad);
 
   // --- look-at glance + inspect overlay -------------------------------------
@@ -692,6 +718,10 @@ async function main() {
       glance.style.display = "none";
       target = -1;
     }
+
+    // keep the clipmap centred on the camera: each level re-tessellates only when
+    // it crosses one of its own cells, and the discard holes follow every frame.
+    ground.update(camera.position.x, camera.position.z);
 
     compass.update();
     sky.position.copy(camera.position); // keep the dome centred on the viewer
