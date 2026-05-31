@@ -227,7 +227,7 @@ export function buildGroundMesh(): THREE.Mesh {
   const SIZE = 18000;
   const SEG = 768;
   const quad = SIZE / SEG;
-  const JIT = quad * 0.42; // in-plane jitter; under half a quad, so facets stay valid
+  const JIT = quad * 0.33; // max in-plane displacement, as a fraction of a quad
   const geom = new THREE.PlaneGeometry(SIZE, SIZE, SEG, SEG);
   geom.rotateX(-Math.PI / 2); // into the XZ plane, +y up
   const pos = geom.attributes.position;
@@ -239,10 +239,18 @@ export function buildGroundMesh(): THREE.Mesh {
     const row = (v / stride) | 0;
     let x = pos.getX(v);
     let z = pos.getZ(v);
-    // jitter interior vertices only, so the mesh edge stays gap-free.
+    // jitter interior vertices only, so the mesh edge stays gap-free. Displace
+    // within a DISK (radius JIT), not a square: a square's diagonal reaches
+    // ~1.4x further than its sides, so two neighbours could both lunge along it
+    // and collapse the edge between them into a sliver, which flat-shading turns
+    // into a garbage-normal streak. A disk caps the reach equally in every
+    // direction. sqrt() on the radius keeps the points area-uniform, not bunched
+    // at the centre.
     if (col > 0 && col < SEG && row > 0 && row < SEG) {
-      x += (hash2(col, row) - 0.5) * 2 * JIT;
-      z += (hash2(col + 7919, row + 104729) - 0.5) * 2 * JIT;
+      const rr = JIT * Math.sqrt(hash2(col, row));
+      const th = hash2(col + 7919, row + 104729) * Math.PI * 2;
+      x += rr * Math.cos(th);
+      z += rr * Math.sin(th);
     }
     const y = getGroundHeight(x, z);
     pos.setXYZ(v, x, y, z);
