@@ -1,26 +1,34 @@
-# Terrain bake plan
+# Terrain plan
 
-Moving the ground from a runtime analytic function to a baked pipeline asset.
-This is the living plan for that work; update status markers as steps land.
+The ground started as a runtime analytic function and is now a baked **heightmap**
+that the runtime tessellates live as a geometry clipmap. This is the living plan
+for that work; update status markers as steps land.
 
-## Why
+The big change from the original version of this plan: we are **not** baking a
+low-poly mesh any more. The pipeline bakes the height *field* (a raster); the
+runtime builds the visible surface from it every frame (`runtime/src/terrain.ts:
+createGround`). That single decision upends the parts of the old plan that assumed
+a static `ground.bin` to seat props on, which is most of it. What survives is the
+heightmap generation (Step 1) and the colour intent (Step 3); what changes is that
+there is no longer one rendered surface to bake against, which is the heart of the
+open seating problem (Step 4).
 
-The runtime today generates terrain from `getGroundHeight` (analytic Perlin
-dunes) and seats books, the player and teleporter bases on that same function,
-so they agree by construction. Two things break that:
+## Why a baked field at all
 
-1. We want generation that a pointwise function can't express (slip-face
-   asymmetry needs neighbour info; later, erosion-class passes).
-2. We want a low-poly mesh, and a low-poly mesh deviates from any continuous
-   surface *on purpose*. A book seated on the function then floats above the
-   chord mesh, worst exactly where the facets are biggest, which is the look we
-   want. The float gets worse as the mesh gets more stylised, not better.
+The analytic `getGroundHeight` (pointwise Perlin dunes) can't express generation
+that needs neighbour info: slip-face asymmetry, and later erosion-class passes. So
+the height field becomes a baked artifact produced by the pipeline, where a raster
+pass has every neighbour to hand. The runtime ships and reads that raster.
 
-So the height field becomes a **baked artifact** and everything that sits on the
-ground seats on the **rendered mesh**, not on the function. The function retires
-to being the generator that feeds the bake.
+Why a runtime clipmap instead of a baked mesh (the old plan): a static low-poly
+mesh has to choose one triangle budget for the whole disc, which is either coarse
+underfoot or ruinous to ship, and a decimated disc is coarsest exactly where you
+stand. A camera-following clipmap keeps on-screen facet size bounded everywhere for
+a trivial vertex count, and it tessellates the same shipped raster the player walks
+on, so the walk height and the visible ground agree by construction. The decimated
+mesh (Step 2 below) was built and benched before this pivot and is retired.
 
-This stays a decoration concern (the vertical axis carries no data), so it lives
+This whole concern stays decoration (the vertical axis carries no data): it lives
 downstream of the data-truth and legibility stages and never feeds back into
 placement. It reads the layout, it does not change it.
 
@@ -28,206 +36,178 @@ placement. It reads the layout, it does not change it.
 
 ```
 stage7 teleporters.parquet ─┐
-stage8 layout.parquet ──────┼─> stage9 heightmap.npz ─> mesh (ground.bin)
-                            │                          ├─> per-vertex colours
-                            │                          └─> seated book y+normal
-                            └────────────────────────────> (into the export)
+stage8 layout.parquet ──────┼─> stage9 heightmap.npz ─> heightmap.bin (SHIPPED)
+                            │                          └─> colour raster (Step 3, TBD)
+                            └─> (book/teleporter x,z into the export)
+
+runtime: heightmap.bin ─> geometry clipmap (terrain.ts) ─> visible ground
+                       └─> sampleHeight ─> player feet + prop seating
 ```
 
-Runtime loads the mesh; books read their baked height; the player raycasts the
-mesh for walk height. No analytic terrain and no heightmap ship to the browser.
+The heightmap is the one elevation source: the clipmap tessellates it and the
+player's feet and props read it, so they agree. No mesh ships. Colour is still
+computed in-shader from world position today; Step 3 may add a baked colour raster
+beside the heightmap.
 
-## Step 1 — Heightmap (`stage9_heightmap.py`)  [dune shape done; resolution lock deferred to Step 2]
+## Step 1 — Heightmap (`stage9_mesh.py`, `--serve-heightmap`)  [shape done; resolution open]
 
-A faithful numpy port of the runtime dune field, sampled to a raster, with a
-shaded-relief + high-res-crop inspection render so we stop guessing.
+A numpy port of the dune field sampled to a raster, with a shaded-relief +
+high-res-crop inspection render so we tune by sight and number, not by guessing.
 
-Done: port matches the approved runtime shape; uniform wind-aligned transverse
-field; calm centre plateau; plazas carved at the 26 teleporters; `heightmap.npz`
-holds the float32 field plus its world mapping (size + resolution).
+Done: uniform wind-aligned transverse field; calm centre plateau; plazas carved at
+the 26 teleporters; `heightmap.npz` holds the float32 field plus its world mapping
+(size + resolution); `--serve-heightmap` writes `runtime/public/heightmap.bin`
+(uint32 res, float32 world_size, float32 height[res*res] row-major).
 
-Done: slip-face asymmetry. The symmetric ridged field now goes through two
-raster passes (see `lee_shear`, `avalanche`) that the pointwise runtime can't:
+Done: slip-face asymmetry, two raster passes the pointwise runtime can't do:
 - `lee_shear`: a downwind warp p -> p + L*D(p)*wind, every sand column sliding
-  downwind in proportion to its height so crests migrate over the lee. Applied
-  as the gap-free inverse map (fixed-point solve, LEE_SHEAR_ITERS >= 4; a single
-  pass stays symmetric, which is the trap the first attempt fell into). At
-  LEE_SHEAR=0.7 the dunes read windward ~24deg, lee ~45deg, slip-face-angle
-  terrain over ~20% of lee area vs ~2% windward. The forward scatter gives the
-  same shape but is a Python loop, too slow for the full raster.
+  downwind in proportion to its height so crests migrate over the lee. Applied as
+  the gap-free inverse map (fixed-point solve, LEE_SHEAR_ITERS >= 4; a single pass
+  stays symmetric, the trap the first attempt fell into). At LEE_SHEAR=0.7 dunes
+  read windward ~24deg, lee ~45deg, slip-face terrain over ~20% of lee area vs ~2%
+  windward.
 - `avalanche`: a mass-conserving thermal sand-slide. It does NOT clamp uniform
-  over-steep faces to repose (material passes straight through a constant
-  slope); it bites at curvature, rounding the knife-edge crest, filling the toe,
-  capping fold cliffs. A naturalising pass, not a repose clamp. (`report_asymmetry`
-  in the script measures windward/lee slope tails so this is tuned by number,
-  not by eye; the render now also draws an along-wind profile transect.)
+  over-steep faces to repose (material passes straight through a constant slope);
+  it bites at curvature, rounding the knife-edge crest, filling the toe, capping
+  fold cliffs. A naturalising pass, not a repose clamp. (`report_asymmetry` measures
+  the windward/lee slope tails so this is tuned by number.)
 
-This is the deliberate divergence from terrain.ts: the runtime keeps its
-symmetric analytic dunes until it loads the baked mesh; it does not mirror these
-two passes. The asymmetry is the first thing the bake buys that the runtime
-couldn't express.
+Still open:
+- [ ] Ridge continuity / scale variation if the crests feel too uniform.
+- [ ] Trough floor (bottoms at ~8u, reads fine) and the raised ring at r~700-1400
+  where the hill and dune envelopes stack.
+- [ ] Lock the raster resolution. Currently 2048 (8.8u/texel). The fidelity bound is
+  no longer "what the decimator needs"; it is the finest clipmap cell (8u, ~1 texel)
+  and the heightmap-curvature term that drives prop float (Step 4). 2048 means the
+  finest facet is about one texel, so up-close chord error is already small;
+  4096 would halve it. Decide against the Step 4 float, not against a mesh budget.
 
-Still open in Step 1:
-- [ ] Ridge continuity / scale variation if the crests feel too uniform (they
-  currently read varied enough; revisit after seeing them meshed).
-- [ ] Decide the trough floor (bottoms at ~8u, not 0; reads fine as uneven sand)
-  and the raised ring at r~700-1400 where the hill and dune envelopes stack.
-- [ ] Lock the final raster resolution (currently 2048 = 8.8u/texel; the mesh
-  fidelity is bounded by this, so it likely wants 4096+). Defer to Step 2: the
-  right resolution is the one the decimation needs, judged against facet reads.
+Output: `cache/heightmap.npz`, `runtime/public/heightmap.bin`.
 
-Output: `cache/heightmap.npz`.
+## Step 2 — Decimated mesh  [RETIRED — superseded by the runtime clipmap]
 
-## Step 2 — Mesh (decimation)  [bench + decimator landed; budget/topology/format open]
+The original plan built a dense grid from the heightmap and quadric-decimated it to
+a feature-following low-poly mesh (`fast-simplification`, ~30k tris, unindexed-flat
+`ground.bin`). It worked and benched well (~2-3x lower deviation than a uniform grid
+at equal budget), but the clipmap replaces it: same faceted look, bounded facet size
+at every distance, no ship cost, and it seats the player on the surface it draws.
 
-Build a dense grid mesh from the heightmap, then decimate to a low-poly mesh
-whose triangulation follows features: big facets on the flats (the Vane look),
-tight facets on the crests (the resolution dunes need). One pass serves both the
-aesthetic and the fidelity, which a uniform grid can't.
+`ground.bin` is no longer fetched and is git-ignored. The bench in `stage9_mesh.py`
+(builder + chord-deviation render + `fast-simplification` wiring) is kept only as the
+heightmap inspection tool and the host of the `--serve-heightmap` exporter; the
+`--bake`/`--target-tris` mesh path is dead for production but left as a measuring
+instrument.
 
-Done: the inspection bench (`stage9_mesh.py`). It builds a mesh from
-`heightmap.npz` (uniform-grid baseline, or quadric-decimated), rasterizes its
-exact chord back onto the heightmap grid by barycentric interpolation, and
-renders source-vs-chord-vs-signed-deviation plus an oblique facet crop and an
-along-wind source/chord profile. Deviation (chord minus source) is the artifact
-we tune by, so it is measured (rms / p95 / p99 / max, split by radius band), not
-eyeballed. The builder functions return `(verts, faces)` in memory, so the real
-decimator flows through the same render; a `ground.bin` loader comes with the
-format decision below.
+## Step 3 — Colouring  [intent stands; delivery reframed]
 
-Done: `fast-simplification` wired in as the decimator (`--target-tris`). It beats
-the uniform-grid baseline at equal tri budget by stripping the flats and spending
-the budget on curvature: ~2x lower deviation rms at 20k tris (4.4u vs 8.8u), ~3.3x
-at 81k (1.6u vs 5.2u); the gain widens with budget because there is more flat to
-reclaim. Triangle quality is healthy (anisotropic stretch along straight ridges,
-no needle slivers), the plateau collapses to near-flat (band rms < 0.4u), and the
-bold 20k facets still read as dunes. So quadric output is good enough for the
-faceted look; the Blender fallback is not needed.
+Colour is a composite of three layers, dominant to subtle. The runtime currently
+does layer 1 only, in-shader from world position (`groundColor`). With no mesh,
+"bake per-vertex colour" no longer applies; the two delivery options are:
+- compute all three layers in the clipmap shader from world position (cheap, no new
+  asset, but form/biome both want data the shader doesn't have handy), or
+- bake a low-res **colour raster** beside the heightmap and sample it in the shader
+  (the natural parallel to the height raster; form and biome are pipeline-side data,
+  so this is the likely path).
 
-Done: `--bake` writes `cache/ground.bin` (unindexed triangle soup, layout below)
-and round-trips it back as a self-check. The provisional mesh is 30k tris / 90k
-verts / 1.08 MB.
-
-Decisions:
-- **Tool / dependency.** CONFIRMED `fast-simplification` (quadric edge collapse,
-  indexed output, feature-preserving). Beats uniform 2-3.3x and the facets read
-  clean, so the headless-Blender fallback is dropped.
-- **Budget.** PROVISIONAL 30k tris (`DEFAULT_BAKE_TRIS`). 15k starts merging
-  adjacent crests, 60k softens to near-smooth; 30k keeps the transverse dunes
-  distinct while reading bold-faceted. Performance is not the constraint (a static
-  30k-tri ground is trivial), so this is a pure aesthetic dial the runtime gets
-  the final say on; expect to come back and regenerate. Clip is a disc of radius
-  ~R_MAX + fade margin (8000u), not the 18000 square (corners are faded void).
-- **Topology.** CONFIRMED unindexed-flat. Flat per-face shading + Step 3's
-  per-face colour both want unwelded triangles, and smooth shading would need a
-  normal/detail texture to not read as flat plastic, which costs more per-fragment
-  than the ~3x vertex count of unwelding does in geometry. No baked normals:
-  the runtime's `flatShading` derives the per-face normal from position
-  derivatives in-shader, so positions alone suffice.
-- **Format.** CONFIRMED custom `ground.bin`, matching the positions.bin idiom
-  (little-endian, Uint32 count header + Float32 payload), no GLTF/Draco dep:
-    `uint32 vertexCount` (= 3 x tris; unindexed)
-    `float32 positions[vertexCount * 3]`  (x, y, z, triangle soup)
-  No index, no normals, no colour yet (the runtime still computes the radial tint
-  from position; Step 3 adds a baked colour buffer here).
-- **Open / deferred.** The quadric collapse treats the clip edge like any other,
-  so the disc boundary is slightly ragged; it sits in faded territory, revisit if
-  it reads. A crest-weighting pre-pass (bias the collapse to keep ridge lines
-  without raising the global budget) is the lever for the curvature-param tweak.
-
-## Step 3 — Colouring
-
-Colour is baked per vertex/face on the *final* decimated mesh, as a composite of
-three layers, dominant to subtle. The current radial gradient is layer 1 only.
-
-1. **Time (radial). Keep.** Pale present -> sand -> grey deep-past void. This is
-   the meaningful axis (recency lighting the map) and must stay the dominant
-   read.
-2. **Form (height / aspect). New.** Give the dunes material variation: wind-
-   scoured pale crests, darker cooler troughs, a tint on the lee face. Driven by
-   height relative to the local mean (works at any radius) and slope/aspect.
-   **Bake material, not lighting.** The runtime already shades facets
-   directionally (Lambert + flat normals + sun). If we bake directional shading
-   into the colour we double-shade and it breaks when the light changes. So the
-   baked tint says what the sand *is*, not where the sun hits.
-3. **Biome (layout-driven). New.** Each teleporter region gets a gentle, distinct
-   hue/saturation shift so parts of the world are identifiable without breaking
-   the desert. Drive it as a smooth low-frequency hue field with the 26 anchors
-   as control points (soft-blended), *not* 26 hard Voronoi cells, and *not* 26
-   separate hues (they would collide and read garish). Open: whether to group
-   anchors into ~5-7 biome families and what drives the hue offset (arbitrary
-   palette, longitude, era). Keep saturation low so time + desert still dominate.
+The three layers, unchanged in intent:
+1. **Time (radial). Keep.** Pale present -> sand -> grey deep-past void. The
+   meaningful axis (recency lighting the map); stays the dominant read.
+2. **Form (height / aspect). New.** Wind-scoured pale crests, darker cooler troughs,
+   a tint on the lee face. Driven by height relative to the local mean and
+   slope/aspect, both already computed in the heightmap passes. **Bake material, not
+   lighting:** the runtime already shades facets directionally (Lambert + flat
+   normals + sun), so the baked tint says what the sand *is*, not where the sun hits,
+   or it double-shades and breaks when the light moves.
+3. **Biome (layout-driven). New.** Each teleporter region a gentle, distinct
+   hue/sat shift, as a smooth low-frequency hue field with the 26 anchors as
+   soft-blended control points (not 26 hard Voronoi cells, not 26 separate hues which
+   would read garish). Open: group anchors into ~5-7 families, and what drives the
+   offset (palette, longitude, era). Keep saturation low so time + desert dominate.
 
 Composite: time base, hue/sat nudged by biome, lightness modulated by form.
 
-## Step 4 — Seating (books, props, player)
+## Step 4 — Seating (books, props, player)  [OPEN — the float-on-convex problem]
 
-The consistency fix. Sample the **final decimated mesh** (the rendered surface,
-not the heightmap, which the decimation deviates from) at each book's (x, y),
-and bake the resulting height and seating normal.
+This is the unresolved one, and the clipmap is what makes it hard. The old plan
+seated everything on the baked mesh so props and ground agreed by construction. The
+clipmap removes that anchor: **there is no single rendered surface.** What the ground
+is at a world point depends on the camera, both which level covers it (cell 8..128 by
+distance) and the camera-relative morph in each level's outer band. A prop baked to
+one height cannot match a surface that changes as you move.
 
-- Books / static props: ray-cast straight down onto the mesh; write `y` (and a
-  seating normal, or a least-squares plane over the footprint so a book spanning
-  several facets doesn't see-saw). Tool: `trimesh` + embree, or a 2D triangle
-  grid index. Land it as columns on the export (or a sidecar the export reads).
-- Player walk height: the runtime raycasts the loaded ground mesh under the
-  player each frame (one ray, trivial), so the feet agree with the visible
-  ground and nothing needs the heightmap at runtime.
+The float itself: a flat facet chords the smooth height field. On convex curvature
+(crests) the chord sits *below* `sampleHeight`, so a book seated at `sampleHeight`
+floats; on concave (troughs) it sinks. The deviation grows with facet_size^2 x
+curvature, so it is worst on tight crests and big (far) facets. Books seat on
+`sampleHeight` today, so they float over convex curvature, which is what we are
+trying to fix.
 
-## Step 5 — Runtime integration
+What is fixed vs camera-relative, which decides what is even seatable:
+- `sampleHeight` (bilinear height field) is fixed. Stable, but it is the smooth
+  surface, not the drawn chord, hence the float.
+- The in-plane jitter is **world-anchored** (keyed to the world cell hash, not the
+  camera), and the finest level carries **no morph** within ~450u of the camera. So
+  the finest level's facets near the player are a deterministic function of world
+  position: jitter the cell corners, sample height there, split the quad on the
+  fixed diagonal. That triangle is computable without knowing the camera.
+- The morph and the choice of level are camera-relative, so the far-field surface
+  under a fixed point breathes as the camera moves.
 
-- Load `ground.bin` (mesh + colours) instead of `buildGroundMesh`; retire the
-  analytic generation. Keep the distance-fade material injection.
-- Books instance at their baked `y`; teleporter bases likewise.
-- Player height from a mesh raycast.
-- Move the world dimensions (currently `SIZE = 18000` duplicated in `terrain.ts`
-  and `WORLD_SIZE` in `stage9`) into `world.json` so both sides read one source.
+So the float has a static part (faceting; present on any low-poly surface and partly
+the intended "settled into the sand" look) and a dynamic part (the surface under a
+distant point shifts with the camera, so far books breathe/pop). The dynamic part
+only shows when flying; on foot, the books you are near are on the finest,
+un-morphed, world-anchored facets, which is the only surface worth seating to.
 
-## Cross-cutting decisions still open
+Candidate approaches, none committed:
+1. **Seat on the finest-level facet, at runtime load.** The runtime already owns the
+   jitter hash and `sampleHeight`, so for each book it can find the cell-8 triangle
+   the book lands in and drop it onto that plane (height + a seating normal, or a
+   least-squares plane over the footprint so a book spanning facets doesn't see-saw).
+   O(1) per book, so 576k at load is a few ms, not the heavy mesh-raycast the old
+   plan feared (there is no mesh to raycast). Exact for the close-up view, which is
+   the view that matters. Residual: distant books still breathe across level handoffs
+   (small, faded, flight-only). **Leaning toward this:** it needs no pipeline change,
+   no exported columns, and no pipeline/runtime jitter-constant coupling, because the
+   runtime that draws the facet is the one that seats on it.
+2. **Bake the same seat in the pipeline.** Replicate the finest-level tessellation in
+   numpy and write per-book height/normal columns on the export. Same result as (1),
+   but couples the pipeline to the runtime's jitter constants and grid (a coupling to
+   police on every change). Only worth it if load-time cost ever bites, which (1)
+   suggests it won't.
+3. **Curvature-biased bilinear seat.** Keep `sampleHeight`, subtract an offset
+   proportional to local convexity (the heightmap Laplacian) x cell^2 so crests sink
+   the book onto roughly where the chord sits. Cheap, no jitter at all, approximate
+   (one facet scale, ignores the jitter displacement). A single global lever to tune
+   by eye; a fallback if (1) is fiddly.
+4. **Accept the static float as aesthetic** and only treat the dynamic pop if it
+   bothers (today it only shows when flying). The current `lift` (settle the book
+   into the sand by part of its spine) is the crude version of this.
 
-- Single mesh vs tiles. Start single (disc-clipped); tile only if load/frame
-  budget demands it. The memory expects tiling eventually.
-- Mesh format: custom bin (recommended) vs GLB.
-- Topology: unindexed-flat (recommended) vs indexed-smooth.
-- Biome hue source and count (Step 3).
-- Final heightmap resolution and mesh tri budget.
+Player walk height is already `sampleHeight` per frame: cheap, and the player is a
+point so faceting float does not apply to the feet. Leave it.
+
+## Step 5 — Runtime integration  [LANDED]
+
+The clipmap is in (`terrain.ts: createGround`, committed):
+- 5 levels, cells 8/16/32/64/128u, each a 128-cell grid snapped to its own cell so
+  facets never swim; built entirely from `heightmap.bin`.
+- Seams: geomorph each level's outer band to the coarser level's exact triangulated
+  chord (C0), jitter relaxed to zero at the rim and around the hole so both sides
+  meet on a plain lattice; a per-level depth bias breaks the coplanar tie; an
+  explicit `renderOrder` (finest first) keeps the transparent levels from
+  double-blending their overlap rings (the band/flicker fix).
+- Distance dissolve: per-level camera-distance opacity fade to the dome, so the world
+  dissolves circularly and no square footprint edge ever shows.
+- Props (books, pillars, ring) and player feet read `sampleHeight`/`sampleNormal`.
+  The analytic dune field stays only as the pre-heightmap-load fallback.
+
+Remaining runtime work: Step 3 colour (raster or in-shader) and Step 4 seating.
+World dims already live in `world.json`, shared by both sides.
 
 ## Sequencing
 
-Iterate the field cheaply (Step 1) before meshing, because the field is free to
-change now and expensive to re-derive once a mesh and seated books depend on it.
-Lock resolution and the shared world dimensions before Step 4. Colour and seating
-both run on the final mesh, so they come after decimation, not before.
-
-Runtime pivot (landed): the runtime ground is NOT the decimated `ground.bin`. It
-is a 5-level geometry clipmap tessellated live from the served heightmap
-(`runtime/src/terrain.ts: createGround`): camera-centred square levels, cell size
-doubling outward, each snapped to its own cell so facets never swim. Seams are
-handled by geomorphing the outer band of each level to the coarser level's exact
-chord (C0), a depth bias to break the coplanar tie, and an explicit renderOrder
-(finest first) so the transparent levels never double-blend. Distance dissolves to
-the dome via the camera-distance opacity fade (every level), which keeps the world
-circular so no square footprint shows. `ground.bin` and the analytic dune field in
-terrain.ts are both retired from the live path (the analytic functions remain only
-as the pre-heightmap-load fallback). Book/pillar/ring/player heights now sample the
-heightmap (sampleHeight/sampleNormal), so props seat on the drawn surface. Steps 3
-(baked colour) and a pipeline-baked seat height (Step 4, for the 576k books at load)
-remain open but are not blocking.
-
-Resume point: Step 2 is functionally complete. `stage9_mesh.py --bake` writes
-`cache/ground.bin` (30k-tri unindexed-flat soup), with the inspection bench and a
-confirmed decimator behind it. The decimated mesh is now superseded by the clipmap
-above; the bench is kept as the heightmap inspection tool and the `--serve-heightmap`
-exporter.
-
-Next is the runtime path, which is Steps 4 + 5 together (Step 3 colour can wait;
-the runtime already tints the ground radially from position):
-- Step 4 (seat heights). The baked surface diverges hard from analytic
-  `getGroundHeight` (shear + avalanche aren't in terrain.ts), so books/pillars
-  must take heights sampled from the baked mesh, not the function. 576k book
-  raycasts can't run at load, so bake the heights in the pipeline (sample the
-  final mesh per book/teleporter) and add them to the export.
-- Step 5 (runtime load). Load `ground.bin` and build the flat-shaded mesh in
-  place of `buildGroundMesh`; player walk height becomes a single mesh raycast
-  per frame; books/pillars/ring/picker read baked heights; retire the analytic
-  terrain. Move world dims into `world.json` so both sides share one source.
+Lock the heightmap resolution (Step 1) against the Step 4 float and the finest cell,
+not against a mesh budget. Step 3 (colour) and Step 4 (seating) are independent and
+can land in either order; both read the final field. Step 4 is the one with an open
+design question, so it is the next real decision.
