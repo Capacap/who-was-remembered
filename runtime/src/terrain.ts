@@ -149,6 +149,18 @@ const GREY_START_R = 3400; // grey begins creeping in beyond the mid field
 const GREY_FULL_R = 6400; // fully grey by here, out in the void
 const COLOR_WAVELENGTH = 900; // patch-noise scale for the painted wobble
 
+// Crest/trough relief tint, layered on the radial base: crests read scoured pale
+// and a touch warm, troughs cooler and darker, so the dunes carry colour and not
+// just shading. The signal is sampled from each clipmap level's OWN grid (the
+// neighbour offset scales with the cell), so the colour tracks the relief that
+// level actually draws and degrades with it instead of aliasing into noise at the
+// coarse LODs. All four are eyeball knobs.
+const RELIEF_CELLS = 3; // neighbour offset in cells: the relief's read wavelength
+const RELIEF_SCALE = 0.25; // slope-difference that reaches the full crest/trough tint
+const CREST_LIGHT = 0.1; // crest lightens / trough darkens (the dominant read)
+const CREST_SAT = 0.05; // crest bleaches / trough deepens
+const CREST_HUE = 0.012; // crest warms / trough cools
+
 // Distance fade: every clipmap level's opacity falls to zero between these radii
 // from the CAMERA, so the whole landscape dissolves into the sky dome before it
 // reaches any footprint edge. The fade is circular (camera distance), so unlike a
@@ -290,18 +302,29 @@ export function peakHeight(): number {
   return PEAK_HEIGHT;
 }
 
-// Radial ground colour at a world point: the pale-summit -> sand -> grey-void
-// narrative plus a low-frequency painted wobble. The clipmap tints its vertices
-// with this from world position on each rebuild. Step 3 of the terrain plan may
-// move it to a baked colour raster or fold it into the clipmap shader; until then
-// it runs per-vertex on the CPU.
-export function groundColor(x: number, z: number, out: THREE.Color): THREE.Color {
+// Ground colour at a world point: the radial pale-summit -> sand -> grey-void
+// narrative, a low-frequency painted wobble, and a crest/trough relief tint. The
+// clipmap tints its vertices with this from world position on each rebuild; it
+// stays per-vertex on the CPU by design (no texture, no baked raster), so the
+// low-poly vertex-colour look survives across the LOD levels. `relief` is the
+// signed, already-normalised local relief (+ on crests, - in hollows) the caller
+// reads from that level's grid; 0 leaves the base untouched.
+export function groundColor(
+  x: number,
+  z: number,
+  out: THREE.Color,
+  relief = 0,
+): THREE.Color {
   const r = Math.hypot(x, z);
   const pale = 1 - smootherstep(r / PALE_FADE_R);
   const grey = smootherstep((r - GREY_START_R) / (GREY_FULL_R - GREY_START_R));
   out.copy(COLOR_SAND).lerp(COLOR_PALE, pale).lerp(COLOR_GREY, grey);
   const tone = perlin(x / COLOR_WAVELENGTH, z / COLOR_WAVELENGTH); // [-1, 1]
   out.offsetHSL(tone * 0.01, tone * 0.03, tone * 0.04);
+  // crests (k > 0) warm, bleach and lighten; troughs (k < 0) cool, deepen and
+  // darken. Hue/sat shift against k's sign, lightness with it.
+  const k = relief < -1 ? -1 : relief > 1 ? 1 : relief;
+  out.offsetHSL(-k * CREST_HUE, -k * CREST_SAT, k * CREST_LIGHT);
   return out;
 }
 
@@ -707,6 +730,20 @@ function buildGroundLevel(
         const wx = lx + sx;
         const wz = lz + sz;
         let y = sampleHeight(wx, wz);
+        // crest/trough relief from this level's own grid: the raw height minus
+        // its four neighbours at RELIEF_CELLS cells out, normalised to a signed
+        // ~[-1, 1]. Offset scales with the cell, so the read wavelength tracks the
+        // LOD and the tint matches the relief this level draws. Uses the raw y,
+        // before the morph lerp below.
+        const ro = RELIEF_CELLS * cell;
+        const relief =
+          (y -
+            0.25 *
+              (sampleHeight(wx - ro, wz) +
+                sampleHeight(wx + ro, wz) +
+                sampleHeight(wx, wz - ro) +
+                sampleHeight(wx, wz + ro))) /
+          (RELIEF_SCALE * ro);
         if (alpha > 0) {
           // geomorph: lerp toward the coarser level's chord at this point
           const tgt = chordHeight(wx, wz, coarseCell);
@@ -715,7 +752,7 @@ function buildGroundLevel(
         positions[v * 3] = lx;
         positions[v * 3 + 1] = y;
         positions[v * 3 + 2] = lz;
-        groundColor(wx, wz, c);
+        groundColor(wx, wz, c, relief);
         colors[v * 3] = c.r;
         colors[v * 3 + 1] = c.g;
         colors[v * 3 + 2] = c.b;
