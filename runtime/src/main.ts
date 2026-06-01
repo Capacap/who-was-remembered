@@ -36,6 +36,17 @@ const FLY_RUN_MULT = 6;
 const TIER_SCALE = [1.0, 1.4, 2.2]; // ordinary, minor, major
 const TIER_COLOR = [0xb89b6e, 0xdcab4c, 0xff5a2c].map((c) => new THREE.Color(c));
 
+// Geo-navigation colour. Ordinary books (the mass you walk through) are hued by
+// their canonical longitude: the PRE-jitter angle baked as the lon byte, so a book
+// keeps its home region's hue wherever scatter flung it, and the field's overall
+// colour tells you which region lies which way ("redder ahead -> heading east").
+// Landmark tiers keep their beacon colours; this only repaints tier 0. A per-book
+// lightness jitter stops dense clusters merging into a single slab. Eyeball knobs.
+const GEO_SAT = 0.35; // hue vividness (low = desert-muted, high = map-key loud)
+const GEO_LIGHT = 0.55; // base lightness of an ordinary book
+const GEO_LIGHT_VAR = 0.12; // +/- per-book lightness scatter (the anti-merge speckle)
+const HUE_OFFSET = 0.0; // rotate the wheel so a chosen region lands on a chosen hue
+
 // Per-instance variety to break up the uniform-grid read. Rotation/tilt/footprint
 // are decorative (seeded, don't move the book). SCATTER does move it: a render-only
 // experiment — if it earns its keep it belongs in stage6's jitter, not here.
@@ -68,11 +79,15 @@ async function loadPositions(url: string) {
   // geo source / placement confidence: 0 birth, 1 death, 2 citizenship,
   // 3 gazetteer, 4 residue (no recorded location -> placed adrift).
   const geo = new Uint8Array(buf, off, n);
-  return { n, x, y, tier, geo };
+  off += n;
+  // canonical longitude angle, 0..255 around the disc (stage6 base_angle, pre-
+  // jitter). Drives the per-book geo-navigation hue.
+  const lon = new Uint8Array(buf, off, n);
+  return { n, x, y, tier, geo, lon };
 }
 
 function buildField(field: Awaited<ReturnType<typeof loadPositions>>) {
-  const { n, x, y, tier, geo } = field;
+  const { n, x, y, tier, geo, lon } = field;
   // a closed book lying flat on the sand: broad cover (x, z), slim spine (y, the
   // up axis). ~0.42 x 0.58u at tier 1, smaller than the modern spacing (~0.9u) so
   // neighbours read as distinct dropped objects rather than an overlapping mass.
@@ -104,6 +119,9 @@ function buildField(field: Awaited<ReturnType<typeof loadPositions>>) {
   const qLocal = new THREE.Quaternion();
   const eul = new THREE.Euler();
   const rnd = mulberry32(0x1234abcd);
+  // separate stream for the lightness jitter so adding it doesn't perturb the
+  // shape/tilt variety the main rnd stream already drives.
+  const rndL = mulberry32(0x9e3779b9);
   for (let i = 0; i < n; i++) {
     const s = TIER_SCALE[tier[i]];
     const fw = 1 + (rnd() * 2 - 1) * FOOT_VAR;
@@ -143,7 +161,16 @@ function buildField(field: Awaited<ReturnType<typeof loadPositions>>) {
     dummy.scale.set(s * fw, s, s * fl);
     dummy.updateMatrix();
     mesh.setMatrixAt(i, dummy.matrix);
-    col.copy(TIER_COLOR[tier[i]]);
+    // ordinary books carry the geo-navigation hue (+ lightness speckle); minor
+    // and major keep their beacon colours. Residue is washed toward adrift on top
+    // of either, so a place-less book never reads as confidently regional.
+    if (tier[i] === 0) {
+      const hue = ((lon[i] / 256) + HUE_OFFSET) % 1;
+      const lj = (rndL() * 2 - 1) * GEO_LIGHT_VAR;
+      col.setHSL(hue, GEO_SAT, GEO_LIGHT + lj);
+    } else {
+      col.copy(TIER_COLOR[tier[i]]);
+    }
     if (geo[i] === 4) col.lerp(ADRIFT, 0.75);
     mesh.setColorAt(i, col);
   }

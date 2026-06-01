@@ -378,6 +378,13 @@ def main() -> None:
 
     out = figures.append_column("radius", pa.array(radii, type=pa.float64()))
     out = out.append_column("angle", pa.array(angle, type=pa.float64()))
+    # the canonical pre-jitter angle (raw longitude on the disc, before the
+    # angular scatter above). The renderer colours books by this, not by their
+    # jittered angle, so a book keeps its home region's hue even when scatter
+    # flings it among neighbours: the field reads as mixed regional colour, not a
+    # razor gradient. Residue rows carry their hash angle here, but geo_source
+    # flags them so the renderer can desaturate rather than trust it.
+    out = out.append_column("base_angle", pa.array(base, type=pa.float64()))
     out = out.append_column("x", pa.array(x, type=pa.float64()))
     out = out.append_column("y", pa.array(y_coord, type=pa.float64()))
     out = out.append_column("geo_source", pa.array(geo_source.tolist(), type=pa.string()))
