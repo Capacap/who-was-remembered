@@ -322,6 +322,7 @@ export function peakHeight(): number {
 // low-poly vertex-colour look survives across the LOD levels. `relief` is the
 // signed, already-normalised local relief (+ on crests, - in hollows) the caller
 // reads from that level's grid; 0 leaves the base untouched.
+const _hsl = { h: 0, s: 0, l: 0 }; // scratch for groundColor's single HSL roundtrip
 export function groundColor(
   x: number,
   z: number,
@@ -334,14 +335,19 @@ export function groundColor(
   if (t < 0.5) out.copy(COLOR_PALE).lerp(COLOR_SAND, t * 2);
   else out.copy(COLOR_SAND).lerp(COLOR_GREY, (t - 0.5) * 2);
   const tone = perlin(x / COLOR_WAVELENGTH, z / COLOR_WAVELENGTH); // [-1, 1]
-  out.offsetHSL(tone * 0.01, tone * 0.03, tone * 0.04);
   // time rings: a smooth ripple, one cycle per RING_SPACING of radius.
   const ring = Math.cos((r / RING_SPACING) * Math.PI * 2);
-  out.offsetHSL(ring * RING_HUE, 0, ring * RING_LIGHT);
   // crests (k > 0) warm, bleach and lighten; troughs (k < 0) cool, deepen and
   // darken. Hue/sat shift against k's sign, lightness with it.
   const k = relief < -1 ? -1 : relief > 1 ? 1 : relief;
-  out.offsetHSL(-k * CREST_HUE, -k * CREST_SAT, k * CREST_LIGHT);
+  // The painted wobble, the time rings and the relief tint are three HSL offsets;
+  // fold them into one getHSL/setHSL roundtrip rather than three (this runs per
+  // vertex on every clipmap rebuild, so the two saved RGB<->HSL conversions matter).
+  out.getHSL(_hsl);
+  _hsl.h += tone * 0.01 + ring * RING_HUE - k * CREST_HUE;
+  _hsl.s += tone * 0.03 - k * CREST_SAT;
+  _hsl.l += tone * 0.04 + ring * RING_LIGHT + k * CREST_LIGHT;
+  out.setHSL(_hsl.h, _hsl.s, _hsl.l);
   return out;
 }
 
@@ -610,14 +616,24 @@ export function facetHeight(x: number, z: number): number {
 // morphs to the coarser level (geomorphing) and a depth bias picks the winner at
 // the seam; see the clipmap note above. hasCoarser
 // is false for the outermost level (nothing to morph to; its rim fades into void).
-// update() is cheap and idempotent within a cell, safe to call every frame.
+//
+// The work is split three ways so the caller can bound the per-frame cost: track()
+// re-points the discard-hole uniform at the camera (cheap, every frame); pending()
+// reports whether the camera has left this level's snapped cell; rebuild() does the
+// heavy 16641-vertex resample. A fast camera can cross several levels' cells in one
+// frame, so createGround caps rebuilds at one level per frame (round-robin) to stop
+// the spikes from stacking. Deferring a coarse rebuild is safe: the geomorph target
+// is recomputed analytically (chordHeight, not the neighbour mesh's state) and the
+// hole follows the camera via track(), so a frame-stale mesh position opens no crack.
 function buildGroundLevel(
   level: GroundLevel,
   index: number,
   hasCoarser: boolean,
 ): {
   mesh: THREE.Mesh;
-  update: (camX: number, camZ: number) => void;
+  track: (camX: number, camZ: number) => void;
+  pending: (camX: number, camZ: number) => boolean;
+  rebuild: (camX: number, camZ: number) => void;
 } {
   const { cell, half, hole, holeCell } = level;
   const N = Math.round((2 * half) / cell);
@@ -690,19 +706,32 @@ function buildGroundLevel(
   let snapX = NaN;
   let snapZ = NaN;
 
-  function update(camX: number, camZ: number): void {
-    // snap the hole to the FINER level's cell (holeCell), the same snap that level
-    // uses, so the hole edge and the finer level's real-surface edge never drift
-    // apart and open a gap along the boundary.
+  // Re-point the discard-hole at the camera. Snap the hole to the FINER level's
+  // cell (holeCell), the same snap that level uses, so the hole edge and the finer
+  // level's real-surface edge never drift apart and open a gap along the boundary.
+  // Cheap and a no-op for the finest level; safe to run every frame regardless of
+  // whether this level rebuilds.
+  function track(camX: number, camZ: number): void {
     if (holeCenter) {
       holeCenter.value.set(
         Math.round(camX / holeCell) * holeCell,
         Math.round(camZ / holeCell) * holeCell,
       );
     }
+  }
+
+  // Has the camera left the cell this level last snapped to? If not, rebuild()
+  // would be a no-op, so the caller skips it.
+  function pending(camX: number, camZ: number): boolean {
+    return (
+      Math.round(camX / cell) * cell !== snapX ||
+      Math.round(camZ / cell) * cell !== snapZ
+    );
+  }
+
+  function rebuild(camX: number, camZ: number): void {
     const sx = Math.round(camX / cell) * cell;
     const sz = Math.round(camZ / cell) * cell;
-    if (sx === snapX && sz === snapZ) return; // same cell, geometry unchanged
     snapX = sx;
     snapZ = sz;
     mesh.position.set(sx, 0, sz);
@@ -780,7 +809,7 @@ function buildGroundLevel(
     geom.computeBoundingSphere();
   }
 
-  return { mesh, update };
+  return { mesh, track, pending, rebuild };
 }
 
 // The whole ground: every GROUND_LEVELS entry as a camera-following clipmap level,
@@ -796,10 +825,30 @@ export function createGround(): {
     buildGroundLevel(lvl, i, i < GROUND_LEVELS.length - 1),
   );
   for (const l of levels) group.add(l.mesh);
+  let primed = false; // first call builds every level; after that, one per frame
+  let cursor = 0; // round-robin start, so no level starves under sustained flight
   return {
     group,
     update: (camX: number, camZ: number) => {
-      for (const l of levels) l.update(camX, camZ);
+      for (const l of levels) l.track(camX, camZ); // hole tracking, every frame
+      if (!primed) {
+        // initial build: fill every level this frame so nothing flashes flat
+        for (const l of levels) if (l.pending(camX, camZ)) l.rebuild(camX, camZ);
+        primed = true;
+        return;
+      }
+      // A fast camera can leave several levels' cells in one frame; rebuilding all
+      // of them stacks 16641-vertex resamples into a single frame (the flight-speed
+      // stall). Rebuild at most ONE pending level per frame, advancing round-robin
+      // so the coarse levels still catch up within a few frames while distant/faded.
+      for (let k = 0; k < levels.length; k++) {
+        const idx = (cursor + k) % levels.length;
+        if (levels[idx].pending(camX, camZ)) {
+          levels[idx].rebuild(camX, camZ);
+          cursor = (idx + 1) % levels.length;
+          break;
+        }
+      }
     },
   };
 }
