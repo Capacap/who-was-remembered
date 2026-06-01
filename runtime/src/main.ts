@@ -5,6 +5,7 @@ import {
   initHeightmap,
   sampleHeight,
   sampleNormal,
+  facetHeight,
   createGround,
   applyDistanceFade,
 } from "./terrain";
@@ -110,7 +111,12 @@ function buildField(field: Awaited<ReturnType<typeof loadPositions>>) {
     // pipeline (x, y) is the ground plane; map to world (x, z), y is up.
     px[i] = x[i] + (rnd() * 2 - 1) * SCATTER;
     pz[i] = y[i] + (rnd() * 2 - 1) * SCATTER;
-    const gy = sampleHeight(px[i], pz[i]);
+    // seat on the facet the clipmap actually draws underfoot, not the smooth
+    // sampleHeight field it only chords: on a convex crest the facet sits below the
+    // field, so a sampleHeight seat would float. The tilt still follows the smooth
+    // normal (the float is a height problem; the facet's own normal would only add
+    // per-book tilt jumps for no gain on a book this small).
+    const gy = facetHeight(px[i], pz[i]);
     // sample the normal across the book's own footprint (half-length ~0.3·s) so a
     // large book conforms to the slope it spans instead of one 0.5u patch.
     sampleNormal(px[i], pz[i], normal, 0.3 * s);
@@ -568,6 +574,19 @@ async function main() {
   sun.position.set(-400, 300, 200);
   scene.add(sun);
 
+  // --- load profiling -------------------------------------------------------
+  // Phase wall-clock so load cost is measured, not guessed (console: filter
+  // "[load]"). "seat books" is the one to watch: it rebuilds a clipmap facet per
+  // figure. performance.now() is ms since the page opened, so the final total reads
+  // against navigation start and is comparable to the LCP you see in dev tools.
+  const t0 = performance.now();
+  let tMark = t0;
+  const mark = (label: string) => {
+    const now = performance.now();
+    console.log(`[load] ${label.padEnd(13)}${(now - tMark).toFixed(0)}ms`);
+    tMark = now;
+  };
+
   info.innerHTML = "loading positions…";
   const [field, teleporters, meta, world, heightmap] = await Promise.all([
     loadPositions("positions.bin"),
@@ -576,6 +595,7 @@ async function main() {
     loadWorld("world.json"),
     loadHeightmap("heightmap.bin"),
   ]);
+  mark("fetch+decode");
   // the heightmap is the ground-height source for the clipmap and the player's
   // feet; init it before anything samples it.
   initHeightmap(heightmap.res, heightmap.worldSize, heightmap.data);
@@ -592,7 +612,9 @@ async function main() {
   // settle the eye onto the baked surface now the heightmap is loaded (spawn was
   // placed on the analytic fallback before the fetch resolved).
   camera.position.y = sampleHeight(camera.position.x, camera.position.z) + EYE_HEIGHT;
+  mark("terrain");
   const built = buildField(field);
+  mark("seat books");
   scene.add(built.mesh);
   scene.add(buildTeleporters(teleporters));
 
@@ -607,6 +629,7 @@ async function main() {
   // height for the whole ring is exact; lift it just clear of the ground.
   pad.position.y = sampleHeight(world.R_INNER, 0) + 0.1;
   scene.add(pad);
+  mark("props");
 
   // --- look-at glance + inspect overlay -------------------------------------
   const glance = document.getElementById("glance") as HTMLDivElement;
@@ -692,6 +715,9 @@ async function main() {
     camera.updateProjectionMatrix();
     renderer.setSize(window.innerWidth, window.innerHeight);
   });
+
+  mark("wiring");
+  console.log(`[load] total ${(performance.now() - t0).toFixed(0)}ms to first frame`);
 
   const clock = new THREE.Clock();
   let wasFlying = false;

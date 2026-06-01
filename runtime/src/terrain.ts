@@ -436,13 +436,15 @@ function applyGroundMaterial(
   return holeCenter;
 }
 
-// The height the next-coarser level (cell C) draws at (wx, wz): the coarser grid
-// triangulates each C-quad along its (x0,z0)->(x0+C,z0+C) diagonal (matching the
-// index pattern in buildGroundLevel), so reproduce that exact chord rather than a
-// bilinear patch. This is the morph target; because the coarser level is held
-// un-jittered around its hole, its near-boundary vertices sit on this same lattice
-// and the match the morph converges to is C0-exact, not approximate.
-function coarseGroundHeight(wx: number, wz: number, C: number): number {
+// The height a clipmap level of cell C draws at (wx, wz): the grid triangulates
+// each C-quad along its (x0,z0)->(x0+C,z0+C) diagonal (matching the index pattern
+// in buildGroundLevel), so reproduce that exact triangulated chord rather than a
+// bilinear patch. Two callers: the geomorph uses it as the next-coarser level's
+// surface to morph toward (C0-exact, because the coarser level is held un-jittered
+// around its hole so its near-boundary vertices sit on this lattice), and prop
+// seating uses it via facetHeight to drop a book onto the surface the player
+// actually sees, not the smooth field that surface only chords.
+function chordHeight(wx: number, wz: number, C: number): number {
   const x0 = Math.floor(wx / C) * C;
   const z0 = Math.floor(wz / C) * C;
   const fx = (wx - x0) / C;
@@ -455,6 +457,95 @@ function coarseGroundHeight(wx: number, wz: number, C: number): number {
   }
   const h10 = sampleHeight(x0 + C, z0);
   return h00 + fx * (h10 - h00) + fz * (h11 - h10);
+}
+
+// --- prop seating: the exact drawn facet --------------------------------------
+// Books seat on the surface the clipmap actually DRAWS underfoot, not the smooth
+// sampleHeight field that surface only chords. The two diverge two ways on a tight
+// convex crest: the flat facet chords below the field (faceting), and the in-plane
+// jitter shoves the facet's corners up to GROUND_JIT_FRAC*cell sideways, which on a
+// steep face turns into a vertical offset of a couple of units. Seating on
+// sampleHeight floats over both; seating on the un-jittered chord still floats over
+// the second. So reconstruct the finest level's jittered triangle exactly as
+// buildGroundLevel draws it near the camera (full jitter, no morph: the canonical
+// close-up surface, which is the view that matters) and drop the book onto that
+// plane. No bias, so nothing legitimate is ever buried. The far field, where a
+// coarser morphing level is drawn under a static seat, still breathes, but that is
+// flight-only and faded; on foot the book you stand by is exact.
+const FINEST = GROUND_LEVELS[0].cell;
+const FINEST_JIT = FINEST * GROUND_JIT_FRAC;
+const _fv: THREE.Vector3[] = Array.from({ length: 16 }, () => new THREE.Vector3());
+
+// One finest-level vertex as drawn at jitterScale = 1: the disk jitter of
+// buildGroundLevel keyed on the world cell index (gx, gz), height sampled at the
+// jittered position. The un-jittered corner sits at (gx*FINEST, gz*FINEST).
+function finestVertex(gx: number, gz: number, out: THREE.Vector3): THREE.Vector3 {
+  const rr = FINEST_JIT * Math.sqrt(hash2(gx, gz));
+  const th = hash2(gx + 7919, gz + 104729) * Math.PI * 2;
+  const x = gx * FINEST + rr * Math.cos(th);
+  const z = gz * FINEST + rr * Math.sin(th);
+  return out.set(x, sampleHeight(x, z), z);
+}
+
+// Height of the plane through triangle (a, b, c) at the XZ point (px, pz), or null
+// if the point's XZ projection falls outside the triangle. Barycentric in the XZ
+// plane; the small negative tolerance lets a point on a shared edge match so the
+// triangulation has no gaps.
+function baryHeight(
+  a: THREE.Vector3,
+  b: THREE.Vector3,
+  c: THREE.Vector3,
+  px: number,
+  pz: number,
+): number | null {
+  const v0x = b.x - a.x;
+  const v0z = b.z - a.z;
+  const v1x = c.x - a.x;
+  const v1z = c.z - a.z;
+  const v2x = px - a.x;
+  const v2z = pz - a.z;
+  const d00 = v0x * v0x + v0z * v0z;
+  const d01 = v0x * v1x + v0z * v1z;
+  const d11 = v1x * v1x + v1z * v1z;
+  const d20 = v2x * v0x + v2z * v0z;
+  const d21 = v2x * v1x + v2z * v1z;
+  const denom = d00 * d11 - d01 * d01;
+  if (denom === 0) return null;
+  const v = (d11 * d20 - d01 * d21) / denom;
+  const w = (d00 * d21 - d01 * d20) / denom;
+  const u = 1 - v - w;
+  const e = -1e-4;
+  if (u < e || v < e || w < e) return null;
+  return a.y + v * (b.y - a.y) + w * (c.y - a.y);
+}
+
+// Seat height: the height of the finest-level facet drawn at (x, z). The jitter can
+// pull the containing triangle into a neighbouring cell, so build the 4x4 jittered
+// corner lattice spanning the 3x3 cell block around the point (jitter < cell, so one
+// ring is enough), then split each cell on its a->d diagonal exactly as the index
+// buffer does and return the first triangle that contains the point. Falls back to
+// the un-jittered chord if the point slips through every triangle.
+export function facetHeight(x: number, z: number): number {
+  const gx0 = Math.floor(x / FINEST);
+  const gz0 = Math.floor(z / FINEST);
+  for (let j = 0; j < 4; j++) {
+    for (let i = 0; i < 4; i++) {
+      finestVertex(gx0 - 1 + i, gz0 - 1 + j, _fv[j * 4 + i]);
+    }
+  }
+  for (let cj = 0; cj < 3; cj++) {
+    for (let ci = 0; ci < 3; ci++) {
+      const a = _fv[cj * 4 + ci];
+      const b = _fv[cj * 4 + ci + 1];
+      const c = _fv[(cj + 1) * 4 + ci];
+      const d = _fv[(cj + 1) * 4 + ci + 1];
+      const h1 = baryHeight(a, c, d, x, z); // upper-left triangle (a, c, d)
+      if (h1 !== null) return h1;
+      const h2 = baryHeight(a, d, b, x, z); // lower-right triangle (a, d, b)
+      if (h2 !== null) return h2;
+    }
+  }
+  return chordHeight(x, z, FINEST);
 }
 
 // One clipmap level: a 128-cell grid that re-centres on the camera each time it
@@ -606,7 +697,7 @@ function buildGroundLevel(
         let y = sampleHeight(wx, wz);
         if (alpha > 0) {
           // geomorph: lerp toward the coarser level's chord at this point
-          const tgt = coarseGroundHeight(wx, wz, coarseCell);
+          const tgt = chordHeight(wx, wz, coarseCell);
           y += (tgt - y) * alpha;
         }
         positions[v * 3] = lx;
