@@ -9,9 +9,10 @@ low-poly mesh any more. The pipeline bakes the height *field* (a raster); the
 runtime builds the visible surface from it every frame (`runtime/src/terrain.ts:
 createGround`). That single decision upends the parts of the old plan that assumed
 a static `ground.bin` to seat props on, which is most of it. What survives is the
-heightmap generation (Step 1) and the colour intent (Step 3); what changes is that
-there is no longer one rendered surface to bake against, which is the heart of the
-open seating problem (Step 4).
+heightmap generation (Step 1) and the colour intent (Step 3). The seating problem
+that pivot created (Step 4) is now solved: props seat on the facet the clipmap
+actually draws, reconstructed at load, rather than on any baked surface. Colour
+(Step 3) is the remaining open work.
 
 ## Why a baked field at all
 
@@ -41,12 +42,14 @@ stage8 layout.parquet ──────┼─> stage9 heightmap.npz ─> height
                             └─> (book/teleporter x,z into the export)
 
 runtime: heightmap.bin ─> geometry clipmap (terrain.ts) ─> visible ground
-                       └─> sampleHeight ─> player feet + prop seating
+                       ├─> sampleHeight ─> player feet
+                       └─> facetHeight ─> prop seating (the drawn facet)
 ```
 
-The heightmap is the one elevation source: the clipmap tessellates it and the
-player's feet and props read it, so they agree. No mesh ships. Colour is still
-computed in-shader from world position today; Step 3 may add a baked colour raster
+The heightmap is the one elevation source: the clipmap tessellates it, the player's
+feet read it, and props seat on `facetHeight` (the facet the clipmap draws, built
+from the same field), so they agree. No mesh ships. Colour is still computed in-shader
+from world position today; Step 3 may add a baked colour raster
 beside the heightmap.
 
 ## Step 1 — Heightmap (`stage9_mesh.py`, `--serve-heightmap`)  [shape done; resolution open]
@@ -77,10 +80,10 @@ Still open:
 - [ ] Trough floor (bottoms at ~8u, reads fine) and the raised ring at r~700-1400
   where the hill and dune envelopes stack.
 - [ ] Lock the raster resolution. Currently 2048 (8.8u/texel). The fidelity bound is
-  no longer "what the decimator needs"; it is the finest clipmap cell (8u, ~1 texel)
-  and the heightmap-curvature term that drives prop float (Step 4). 2048 means the
-  finest facet is about one texel, so up-close chord error is already small;
-  4096 would halve it. Decide against the Step 4 float, not against a mesh budget.
+  no longer "what the decimator needs", nor the prop float (Step 4 now seats on the
+  drawn facet, so float is handled at any resolution); it is just how crisp the dune
+  crests should read against the finest clipmap cell (8u, ~1 texel). 2048 makes the
+  finest facet about one texel; 4096 would sharpen it. A look-and-decide call.
 
 Output: `cache/heightmap.npz`, `runtime/public/heightmap.bin`.
 
@@ -126,66 +129,48 @@ The three layers, unchanged in intent:
 
 Composite: time base, hue/sat nudged by biome, lightness modulated by form.
 
-## Step 4 — Seating (books, props, player)  [OPEN — the float-on-convex problem]
+## Step 4 — Seating (books, props, player)  [LANDED — seat on the drawn facet]
 
-This is the unresolved one, and the clipmap is what makes it hard. The old plan
-seated everything on the baked mesh so props and ground agreed by construction. The
-clipmap removes that anchor: **there is no single rendered surface.** What the ground
-is at a world point depends on the camera, both which level covers it (cell 8..128 by
-distance) and the camera-relative morph in each level's outer band. A prop baked to
-one height cannot match a surface that changes as you move.
+Solved by candidate 1 below: books seat on the facet the clipmap actually draws,
+reconstructed at runtime load. No pipeline change, no exported columns, no bias.
 
-The float itself: a flat facet chords the smooth height field. On convex curvature
-(crests) the chord sits *below* `sampleHeight`, so a book seated at `sampleHeight`
-floats; on concave (troughs) it sinks. The deviation grows with facet_size^2 x
-curvature, so it is worst on tight crests and big (far) facets. Books seat on
-`sampleHeight` today, so they float over convex curvature, which is what we are
-trying to fix.
+The problem the clipmap created: there is **no single rendered surface** to seat on.
+What the ground is at a world point depends on the camera, both which level covers it
+(cell 8..128 by distance) and the camera-relative morph in each level's outer band.
+And the float itself has two sources on a tight convex crest: the flat facet chords
+*below* the smooth `sampleHeight` field (deviation ~ facet^2 x curvature), and the
+in-plane jitter shoves the drawn corners sideways (up to GROUND_JIT_FRAC*cell), which
+on a steep face becomes a vertical offset of a couple of units. Seating on
+`sampleHeight` floats over both; seating on the un-jittered chord still floats over
+the jitter.
 
-What is fixed vs camera-relative, which decides what is even seatable:
-- `sampleHeight` (bilinear height field) is fixed. Stable, but it is the smooth
-  surface, not the drawn chord, hence the float.
-- The in-plane jitter is **world-anchored** (keyed to the world cell hash, not the
-  camera), and the finest level carries **no morph** within ~450u of the camera. So
-  the finest level's facets near the player are a deterministic function of world
-  position: jitter the cell corners, sample height there, split the quad on the
-  fixed diagonal. That triangle is computable without knowing the camera.
-- The morph and the choice of level are camera-relative, so the far-field surface
-  under a fixed point breathes as the camera moves.
+The key realisation: seat to the drawn chord, not the smooth field. The mesh is what
+the player sees, so it is the seat truth. And the finest level's surface near the
+player is **computable without the camera**: the jitter is world-anchored (keyed to
+the world cell hash) and the finest level carries no morph within ~456u, so its
+facets are a deterministic function of world position. That turns the feared
+mesh-raycast into a closed-form lookup, no mesh and no ray.
 
-So the float has a static part (faceting; present on any low-poly surface and partly
-the intended "settled into the sand" look) and a dynamic part (the surface under a
-distant point shifts with the camera, so far books breathe/pop). The dynamic part
-only shows when flying; on foot, the books you are near are on the finest,
-un-morphed, world-anchored facets, which is the only surface worth seating to.
+What landed (`terrain.ts: facetHeight`, used by `main.ts: buildField`):
+- For each book, find the finest-level (cell 8) jittered triangle its (x,z) lands in
+  and return that triangle's plane height. `finestVertex` reproduces a drawn vertex
+  exactly (the same disk-jitter hash, height sampled at the jittered position);
+  `baryHeight` does the point-in-triangle test and plane interpolation in one pass.
+- Jitter can pull the containing triangle into a neighbour, so the search covers the
+  3x3 cell block around the point (jitter < cell, so one ring suffices). A fast path
+  tests the book's own cell first (4 vertices, no lattice) and only falls back to the
+  full 4x4 lattice on a cross-edge miss. ~540ms for the full 576k field at load.
+- Tilt still follows the smooth `sampleNormal`; the float was a height problem, and
+  the facet's own normal would only add per-book tilt jumps a book this small does
+  not need. The existing `lift` still settles the underside a hair into the sand.
 
-Candidate approaches, none committed:
-1. **Seat on the finest-level facet, at runtime load.** The runtime already owns the
-   jitter hash and `sampleHeight`, so for each book it can find the cell-8 triangle
-   the book lands in and drop it onto that plane (height + a seating normal, or a
-   least-squares plane over the footprint so a book spanning facets doesn't see-saw).
-   O(1) per book, so 576k at load is a few ms, not the heavy mesh-raycast the old
-   plan feared (there is no mesh to raycast). Exact for the close-up view, which is
-   the view that matters. Residual: distant books still breathe across level handoffs
-   (small, faded, flight-only). **Leaning toward this:** it needs no pipeline change,
-   no exported columns, and no pipeline/runtime jitter-constant coupling, because the
-   runtime that draws the facet is the one that seats on it.
-2. **Bake the same seat in the pipeline.** Replicate the finest-level tessellation in
-   numpy and write per-book height/normal columns on the export. Same result as (1),
-   but couples the pipeline to the runtime's jitter constants and grid (a coupling to
-   police on every change). Only worth it if load-time cost ever bites, which (1)
-   suggests it won't.
-3. **Curvature-biased bilinear seat.** Keep `sampleHeight`, subtract an offset
-   proportional to local convexity (the heightmap Laplacian) x cell^2 so crests sink
-   the book onto roughly where the chord sits. Cheap, no jitter at all, approximate
-   (one facet scale, ignores the jitter displacement). A single global lever to tune
-   by eye; a fallback if (1) is fiddly.
-4. **Accept the static float as aesthetic** and only treat the dynamic pop if it
-   bothers (today it only shows when flying). The current `lift` (settle the book
-   into the sand by part of its spine) is the crude version of this.
+Residual, by design: a static seat is exact only where the finest level draws (the
+on-foot view that matters). A distant book under a coarser morphing level breathes as
+the camera moves; that is unavoidable for any fixed seat, shows only when flying, and
+is faded out by distance. Verified clean on foot, including dune crests.
 
-Player walk height is already `sampleHeight` per frame: cheap, and the player is a
-point so faceting float does not apply to the feet. Leave it.
+Player walk height stays `sampleHeight` per frame: the player is a point, so faceting
+float does not apply to the feet.
 
 ## Step 5 — Runtime integration  [LANDED]
 
@@ -199,15 +184,15 @@ The clipmap is in (`terrain.ts: createGround`, committed):
   double-blending their overlap rings (the band/flicker fix).
 - Distance dissolve: per-level camera-distance opacity fade to the dome, so the world
   dissolves circularly and no square footprint edge ever shows.
-- Props (books, pillars, ring) and player feet read `sampleHeight`/`sampleNormal`.
-  The analytic dune field stays only as the pre-heightmap-load fallback.
+- Books seat on `facetHeight` (the drawn facet, Step 4); pillars, ring and player
+  feet read `sampleHeight`/`sampleNormal` (flat plazas and a point, so no faceting
+  float). The analytic dune field stays only as the pre-heightmap-load fallback.
 
-Remaining runtime work: Step 3 colour (raster or in-shader) and Step 4 seating.
-World dims already live in `world.json`, shared by both sides.
+Remaining runtime work: Step 3 colour (raster or in-shader). World dims already live
+in `world.json`, shared by both sides.
 
 ## Sequencing
 
-Lock the heightmap resolution (Step 1) against the Step 4 float and the finest cell,
-not against a mesh budget. Step 3 (colour) and Step 4 (seating) are independent and
-can land in either order; both read the final field. Step 4 is the one with an open
-design question, so it is the next real decision.
+Step 4 (seating) has landed, so Step 3 (colour) is the live frontier. Lock the
+heightmap resolution (Step 1) by eye against dune crispness, not a mesh budget or the
+now-handled prop float. Step 3 reads the final field whenever it lands.

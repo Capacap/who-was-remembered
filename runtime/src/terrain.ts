@@ -6,12 +6,13 @@ import * as THREE from "three";
 // are densest; only a whisper of a central rise gives spawn a faint vantage
 // before it eases to the desert floor and a transverse dune field takes over.
 //
-// This lives in the renderer, not the pipeline. The vertical axis carries no
-// data (time and longitude are the horizontal x/z), so terrain is decoration by
-// the three-tier rule, and the shape is a closed-form radial curve plus local
-// flattening at the teleporter plazas, not a hand-sculpted raster. getGroundHeight
-// is the single source of truth: the ground mesh, book seating, teleporter bases
-// and the player's walk height all sample it, so they agree by construction.
+// This lives in the renderer, not the pipeline. The vertical axis carries no data
+// (time and longitude are the horizontal x/z), so terrain is decoration by the
+// three-tier rule. The shape is a baked heightmap raster (stage9), and sampleHeight
+// is the single elevation source: the clipmap tessellates it, the player's feet
+// read it, and books seat on facetHeight (the facet the clipmap actually draws), so
+// the visible ground and everything on it agree. The analytic getGroundHeight below
+// is now only the pre-heightmap-load fallback.
 
 const PEAK_HEIGHT = 60; // a whisper of a central rise, not a summit, world units
 const PLATEAU_R = 700; // calm and level here (spawn + plaza + the year-2000 ring)
@@ -268,11 +269,10 @@ export function getGroundHeight(x: number, z: number): number {
 
 const NORMAL_EPS = 0.5; // default central-difference step for the normal, world units
 
-// Surface normal via central differences of getGroundHeight, so it stays correct
-// through the plaza blend without anyone deriving the gradient by hand. Books
-// sample this once at build to lie along the slope; it is never needed per frame.
-// eps is the half-span the difference is taken over: pass the book's footprint so
-// a large flat book conforms to the slope it actually spans rather than a point.
+// Surface normal via central differences of getGroundHeight, the analytic
+// counterpart of sampleNormal. Now unused (props read sampleNormal off the baked
+// field); kept beside getGroundHeight as its fallback companion until the analytic
+// path is retired. eps is the half-span the difference is taken over.
 export function getGroundNormal(
   x: number,
   z: number,
@@ -291,10 +291,10 @@ export function peakHeight(): number {
 }
 
 // Radial ground colour at a world point: the pale-summit -> sand -> grey-void
-// narrative plus a low-frequency painted wobble. Shared by the analytic mesh and
-// the baked mesh so both tell the same story. Step 3 of the terrain bake will
-// move this into a baked per-face colour buffer; until then the runtime tints
-// the loaded geometry from position, exactly as the analytic mesh did.
+// narrative plus a low-frequency painted wobble. The clipmap tints its vertices
+// with this from world position on each rebuild. Step 3 of the terrain plan may
+// move it to a baked colour raster or fold it into the clipmap shader; until then
+// it runs per-vertex on the CPU.
 export function groundColor(x: number, z: number, out: THREE.Color): THREE.Color {
   const r = Math.hypot(x, z);
   const pale = 1 - smootherstep(r / PALE_FADE_R);
