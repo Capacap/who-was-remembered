@@ -144,9 +144,12 @@ function hash2(i: number, j: number): number {
 const COLOR_PALE = new THREE.Color(0xefe8d2); // bright dry summit (the present)
 const COLOR_SAND = new THREE.Color(0xcabb95); // mid desert
 const COLOR_GREY = new THREE.Color(0x6e6860); // faded deep-past floor
-const PALE_FADE_R = 1800; // pale is concentrated on the summit, gone by here
-const GREY_START_R = 3400; // grey begins creeping in beyond the mid field
-const GREY_FULL_R = 6400; // fully grey by here, out in the void
+// One smooth era ramp across the whole map: pale summit (the present, at the
+// centre) -> sand at the midpoint -> grey deep-past floor at the outer edge.
+// Spans [0, ERA_GRADIENT_R]; recency literally lighting the map, now a single
+// continuous gradient rather than a pale core with a flat sand band and a
+// separate grey rim. Mirrors world.json R_MAX (the deep-past edge).
+const ERA_GRADIENT_R = 7100;
 const COLOR_WAVELENGTH = 900; // patch-noise scale for the painted wobble
 
 // Crest/trough relief tint, layered on the radial base: crests read scoured pale
@@ -160,6 +163,16 @@ const RELIEF_SCALE = 0.25; // slope-difference that reaches the full crest/troug
 const CREST_LIGHT = 0.1; // crest lightens / trough darkens (the dominant read)
 const CREST_SAT = 0.05; // crest bleaches / trough deepens
 const CREST_HUE = 0.012; // crest warms / trough cools
+
+// Time rings: radius is time, so a gentle ripple in lightness (and a hair of
+// warm/cool) keyed to radius makes the map read as concentric growth rings /
+// strata, a tree- or mountain-cross-section of deep time. Keyed straight off
+// radius, not the exact year mapping: the bands are decoration for the narrative,
+// not a readable century scale, so even spacing is enough (with RADIUS_ALPHA = 1
+// it lands on centuries anyway). Eyeball knobs.
+const RING_SPACING = 512; // world units between rings (~a century at alpha = 1)
+const RING_LIGHT = 0.03; // lightness swing across a ring (the dominant read)
+const RING_HUE = 0.004; // warm/cool swing across a ring (subtle)
 
 // Distance fade: every clipmap level's opacity falls to zero between these radii
 // from the CAMERA, so the whole landscape dissolves into the sky dome before it
@@ -315,12 +328,16 @@ export function groundColor(
   out: THREE.Color,
   relief = 0,
 ): THREE.Color {
+  // one continuous ramp: pale -> sand at the midpoint -> grey across [0, edge].
   const r = Math.hypot(x, z);
-  const pale = 1 - smootherstep(r / PALE_FADE_R);
-  const grey = smootherstep((r - GREY_START_R) / (GREY_FULL_R - GREY_START_R));
-  out.copy(COLOR_SAND).lerp(COLOR_PALE, pale).lerp(COLOR_GREY, grey);
+  const t = Math.min(1, r / ERA_GRADIENT_R);
+  if (t < 0.5) out.copy(COLOR_PALE).lerp(COLOR_SAND, t * 2);
+  else out.copy(COLOR_SAND).lerp(COLOR_GREY, (t - 0.5) * 2);
   const tone = perlin(x / COLOR_WAVELENGTH, z / COLOR_WAVELENGTH); // [-1, 1]
   out.offsetHSL(tone * 0.01, tone * 0.03, tone * 0.04);
+  // time rings: a smooth ripple, one cycle per RING_SPACING of radius.
+  const ring = Math.cos((r / RING_SPACING) * Math.PI * 2);
+  out.offsetHSL(ring * RING_HUE, 0, ring * RING_LIGHT);
   // crests (k > 0) warm, bleach and lighten; troughs (k < 0) cool, deepen and
   // darken. Hue/sat shift against k's sign, lightness with it.
   const k = relief < -1 ? -1 : relief > 1 ? 1 : relief;

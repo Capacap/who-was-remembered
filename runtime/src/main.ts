@@ -618,17 +618,6 @@ async function main() {
   scene.add(built.mesh);
   scene.add(buildTeleporters(teleporters));
 
-  // a thin ring marking the modern edge (R_INNER), where year 2000 sits and the
-  // books begin. Read from world.json so it tracks the placement, never drifts.
-  const pad = new THREE.Mesh(
-    new THREE.RingGeometry(world.R_INNER - 2, world.R_INNER + 2, 256),
-    new THREE.MeshBasicMaterial({ color: 0x7a6038, side: THREE.DoubleSide }),
-  );
-  pad.rotation.x = -Math.PI / 2;
-  // the ring sits on the flat summit plateau (R_INNER is inside it), so a single
-  // height for the whole ring is exact; lift it just clear of the ground.
-  pad.position.y = sampleHeight(world.R_INNER, 0) + 0.1;
-  scene.add(pad);
   mark("props");
 
   // --- look-at glance + inspect overlay -------------------------------------
