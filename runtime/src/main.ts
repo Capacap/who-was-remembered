@@ -1,6 +1,7 @@
 import * as THREE from "three";
 import { PointerLockControls } from "three/examples/jsm/controls/PointerLockControls.js";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
+import { DRACOLoader } from "three/examples/jsm/loaders/DRACOLoader.js";
 import Stats from "three/examples/jsm/libs/stats.module.js";
 import {
   initTerrain,
@@ -74,6 +75,20 @@ function mulberry32(seed: number) {
   };
 }
 
+// One shared glTF loader, Draco-equipped. The Blender exporter compresses meshes
+// with KHR_draco_mesh_compression, so the loader needs a Draco decoder or
+// loadAsync rejects ("No DRACOLoader instance provided"). The decoder is three's
+// own copy, self-hosted under public/draco/ rather than a CDN so the piece loads
+// offline; the worker pool spins up lazily on the first compressed mesh. With this
+// in place an uncompressed export loads fine too, so the export setting is moot.
+const gltfLoader = (() => {
+  const draco = new DRACOLoader();
+  draco.setDecoderPath("draco/");
+  const loader = new GLTFLoader();
+  loader.setDRACOLoader(draco);
+  return loader;
+})();
+
 async function loadPositions(url: string) {
   const buf = await (await fetch(url)).arrayBuffer();
   const view = new DataView(buf);
@@ -100,8 +115,8 @@ async function loadPositions(url: string) {
 // the per-book footprint jitter multiply it as before.
 const BOOK_LENGTH = 0.58;
 
-// Pull the authored `book` mesh from the glb and bake it into the orientation,
-// scale, and attribute layout the field wants:
+// Bake one authored book node into the orientation, scale, and attribute layout
+// the field wants:
 //   - lay it flat (Blender models it upright, thin axis = z) so the cover faces
 //     +y and the player looks down onto it;
 //   - uniform-scale so the cover length is BOOK_LENGTH, then recentre on origin
@@ -109,12 +124,10 @@ const BOOK_LENGTH = 0.58;
 //   - convert the COLOR_0 mask (white cover, black pages) to a float aPage
 //     attribute (1 = page) and drop the raw colour, so vertexColors stays off and
 //     the per-instance geo hue is delivered cleanly through instanceColor.
-async function loadBookGeometry(url: string): Promise<THREE.BufferGeometry> {
-  const gltf = await new GLTFLoader().loadAsync(url);
-  const src = gltf.scene.getObjectByName("book") as THREE.Mesh | undefined;
-  if (!src?.isMesh) throw new Error(`no 'book' mesh in ${url}`);
+// Every LOD is baked identically (same long-axis length, same recentre), so the
+// distance tiers in buildField share an origin and a book doesn't shift on a swap.
+function bakeBook(src: THREE.Mesh): THREE.BufferGeometry {
   const g = (src.geometry as THREE.BufferGeometry).clone();
-
   // mesh z is the thin axis; rotate it up so the broad cover lies in the x/z plane.
   g.rotateX(Math.PI / 2);
   g.computeBoundingBox();
@@ -129,7 +142,6 @@ async function loadBookGeometry(url: string): Promise<THREE.BufferGeometry> {
     -(bb.min.y + bb.max.y) / 2,
     -(bb.min.z + bb.max.z) / 2,
   );
-
   // COLOR_0 -> aPage. GLTFLoader maps COLOR_0 to attributes.color (vec4, uint16
   // normalized). Pages were painted black, so a low red channel marks a page vertex.
   const color = g.getAttribute("color");
@@ -138,6 +150,22 @@ async function loadBookGeometry(url: string): Promise<THREE.BufferGeometry> {
   g.setAttribute("aPage", new THREE.BufferAttribute(aPage, 1));
   g.deleteAttribute("color");
   return g;
+}
+
+// Load the named book LODs from book.glb (one fetch, in ladder order) and bake each.
+// book.glb carries book_LOD00 (full), book_LOD01 (mid) and book_LOD02 (an authored
+// box); the field uses the first two and synthesises its own box proxy, so LOD02
+// isn't requested here.
+async function loadBookLods(
+  url: string,
+  nodes: string[],
+): Promise<THREE.BufferGeometry[]> {
+  const gltf = await gltfLoader.loadAsync(url);
+  return nodes.map((node) => {
+    const src = gltf.scene.getObjectByName(node) as THREE.Mesh | undefined;
+    if (!src?.isMesh) throw new Error(`no '${node}' mesh in ${url}`);
+    return bakeBook(src);
+  });
 }
 
 // Keep pages cream while the cover takes the per-instance geo hue. Chains onto
@@ -170,46 +198,140 @@ function applyPageMask(mat: THREE.Material): void {
   };
 }
 
+// --- decorative heads (temporary placement) ---------------------------------
+// The three head variants from heads.glb, dropped near spawn as oversized stone
+// monuments so we can judge them rendered in-engine, and to see the LOD swap on a
+// large object where it's most visible. This is a look-see, not the final placement
+// (those scatter half-submerged facing the sky across the field, later). Plain
+// stone material; the basemesh ships no material and its COLOR_n/TEXCOORD_n layers
+// are ignored.
+const HEAD_HEIGHT = 10; // world units tall; surreal monument scale, eyeball knob
+// each variant's three LODs (full, mid, coarse), the same ladder the books use.
+const HEAD_VARIANTS = [
+  ["head01_LOD00", "head01_LOD01", "head01_LOD02"],
+  ["head02_LOD00", "head02_LOD01", "head02_LOD02"],
+  ["head03_LOD00", "head03_LOD01", "head03_LOD02"],
+];
+// camera-distance thresholds for the LOD swap and a hysteresis band (fraction of
+// the threshold) so a head straddling a boundary doesn't flicker. Far larger than
+// the books' because a head is far bigger on screen and there are only a handful, so
+// holding full detail out to a long range costs nothing: full out to HEAD_LOD[1],
+// mid to HEAD_LOD[2], coarse beyond. Eyeball knobs.
+const HEAD_LOD = [0, 150, 400];
+const HEAD_LOD_HYST = 0.1;
+
+// Each LOD normalised the way the books are: uniform-scaled to HEAD_HEIGHT and
+// recentred in x/z, but with the BASE dropped to y = 0 (not centred) so the head
+// seats on the ground at its feet. Scaling each LOD to the same height and centring
+// each keeps the ladder aligned so a swap doesn't shift the head.
+function normalizeHead(src: THREE.Mesh): THREE.BufferGeometry {
+  const g = (src.geometry as THREE.BufferGeometry).clone();
+  g.computeBoundingBox();
+  let bb = g.boundingBox!;
+  const s = HEAD_HEIGHT / (bb.max.y - bb.min.y);
+  g.scale(s, s, s);
+  g.computeBoundingBox();
+  bb = g.boundingBox!;
+  g.translate(-(bb.min.x + bb.max.x) / 2, -bb.min.y, -(bb.min.z + bb.max.z) / 2);
+  return g;
+}
+
+// returns, per variant, its three baked LOD geometries.
+async function loadHeadLods(url: string): Promise<THREE.BufferGeometry[][]> {
+  const gltf = await gltfLoader.loadAsync(url);
+  return HEAD_VARIANTS.map((lods) =>
+    lods.map((name) => {
+      const src = gltf.scene.getObjectByName(name) as THREE.Mesh | undefined;
+      if (!src?.isMesh) throw new Error(`no '${name}' mesh in ${url}`);
+      return normalizeHead(src);
+    }),
+  );
+}
+
+// Place the heads in a row just in front of spawn (spawn looks toward +z), seated
+// on the terrain. Each is a THREE.LOD that swaps its mesh by camera distance (the
+// same tuned-radii approach as the books, but discrete per object since there are
+// only a handful); update() must be driven each frame. Opaque and unfaded like the
+// teleporter beacons so they stay solid while we look at them.
+function buildHeads(variants: THREE.BufferGeometry[][]): {
+  group: THREE.Group;
+  update: (camera: THREE.Camera) => void;
+} {
+  const mat = new THREE.MeshLambertMaterial({ color: 0xcbbfa8 }); // sandstone
+  const group = new THREE.Group();
+  const lods: THREE.LOD[] = [];
+  const SPACING = 14;
+  const Z = 40;
+  variants.forEach((geos, i) => {
+    const lod = new THREE.LOD();
+    geos.forEach((g, lvl) =>
+      lod.addLevel(new THREE.Mesh(g, mat), HEAD_LOD[lvl], HEAD_LOD_HYST),
+    );
+    const hx = (i - 1) * SPACING; // -14, 0, +14
+    lod.position.set(hx, sampleHeight(hx, Z), Z);
+    group.add(lod);
+    lods.push(lod);
+  });
+  return {
+    group,
+    update: (camera) => {
+      for (const l of lods) l.update(camera);
+    },
+  };
+}
+
 function buildField(
   field: Awaited<ReturnType<typeof loadPositions>>,
-  bookGeo: THREE.BufferGeometry,
+  bookNear: THREE.BufferGeometry, // LOD00, full detail, drawn closest
+  bookMid: THREE.BufferGeometry, // LOD01, drawn across the mid band
 ) {
   const { n, x, y, tier, geo, lon } = field;
   // the authored book mesh, laid flat: broad cover (x, z), slim spine (y, the up
-  // axis). Scaled in loadBookGeometry to ~0.58u long at tier 1, smaller than the
-  // modern spacing (~0.9u) so neighbours read as distinct dropped objects rather
-  // than an overlapping mass. The spine is the up extent, so seating offsets by
+  // axis). Baked in loadBookLods to ~0.58u long at tier 1, smaller than the modern
+  // spacing (~0.9u) so neighbours read as distinct dropped objects. Both LODs share
+  // the same baked size/origin, so the box dims (and the seat lift) come from the
+  // full mesh and the tiers agree. The spine is the up extent, so seating offsets by
   // half of the mesh's own thickness along the normal.
-  bookGeo.computeBoundingBox();
-  const bb = bookGeo.boundingBox!;
+  bookNear.computeBoundingBox();
+  const bb = bookNear.boundingBox!;
   const SPINE = bb.max.y - bb.min.y;
 
-  // Distance LOD. A 230-tri book instanced 574k times and drawn mostly sub-pixel
-  // is hopeless (132M tris/frame); a book is only a legible shape within tens of
-  // units anyway. So the far field draws a 12-tri box proxy (the colour, not the
-  // shape, is what reads at distance) and only books near the camera get the real
-  // mesh. The proxy is shrunk to PROXY so it hides INSIDE the opaque detailed book
-  // up close: where both draw, the box is fully occluded, no z-fight; far away only
-  // the box exists. NEAR_CAP bounds the detailed draw; update() refills it on move.
+  // Three-tier distance LOD. A 230-tri book instanced 574k times and drawn mostly
+  // sub-pixel is hopeless; a book is only a legible shape within tens of units and
+  // only READABLE within 6u (the picker's reach), so detail past that is wasted.
+  // Each book is drawn by exactly ONE detail tier over an always-present box base:
+  // full LOD00 within R_FULL, LOD01 out to R_MID, the bare box beyond. The box is
+  // shrunk to PROXY so it hides INSIDE whichever detailed mesh covers it (no z-fight);
+  // the two detailed tiers never cover the same book, so they can't fight each other.
+  // Splitting the old single detailed tier in two keeps each swap small on screen:
+  // full->mid lands where a book is already a few px, mid->box smaller still. A
+  // per-book dither on the inner boundary scatters that swap so it isn't a clean ring
+  // sweeping the field as the camera moves.
   const PROXY = 0.85;
   const boxGeo = new THREE.BoxGeometry(
     (bb.max.x - bb.min.x) * PROXY,
     SPINE * PROXY,
     (bb.max.z - bb.min.z) * PROXY,
   );
-  const R_NEAR = 120; // max detailed-mesh radius; books are box-indistinguishable past it
-  const NEAR_CAP = 24000; // detailed instances drawn at once. The recent-era band packs
-  // >100k books into R_NEAR, so this WILL overflow there; update() fills nearest-first
-  // so overflow drops the farthest (least legible) books, never the ones at your feet.
-  const REBUILD_DIST = 25; // refill the near set only after the camera moves this far
+  const R_FULL = 30; // LOD00 within this radius (a book is still >~8px here)
+  const R_MID = 120; // LOD01 out to here; books are box-indistinguishable past it
+  const BOUND_DITHER = 12; // per-book spread (world units) on the full->mid boundary
+  const NEAR_CAP = 6000; // LOD00 instances; the R_FULL disc holds far fewer than this
+  const MID_CAP = 24000; // LOD01 instances; overflow in the dense band drops the
+  //   farthest-in-band to box (a shorter, still sub-pixel mid radius there), the same
+  //   graceful degradation the single tier had.
+  const REBUILD_DIST = 25; // refill the near/mid sets only after the camera moves this far
 
   // books dissolve with the ground: the same camera-distance fade to transparent,
   // so the field thins into the dome at the horizon rather than leaving sharp specks
   // floating over ground that has already faded out. The page mask chains on after
-  // the fade so cover vertices keep the geo hue and page edges stay cream; only the
-  // detailed mesh carries it (the box has no pages).
+  // the fade so cover vertices keep the geo hue and page edges stay cream; both
+  // detailed tiers carry it (both have aPage), the box has no pages so it only fades.
   const farMat = new THREE.MeshLambertMaterial();
   applyDistanceFade(farMat);
+  const midMat = new THREE.MeshLambertMaterial();
+  applyDistanceFade(midMat);
+  applyPageMask(midMat);
   const nearMat = new THREE.MeshLambertMaterial();
   applyDistanceFade(nearMat);
   applyPageMask(nearMat);
@@ -217,9 +339,13 @@ function buildField(
   const farMesh = new THREE.InstancedMesh(boxGeo, farMat, n);
   farMesh.instanceMatrix.setUsage(THREE.StaticDrawUsage);
   farMesh.frustumCulled = false; // spans the whole disc; never wholly off-screen
-  const nearMesh = new THREE.InstancedMesh(bookGeo, nearMat, NEAR_CAP);
+  const midMesh = new THREE.InstancedMesh(bookMid, midMat, MID_CAP);
+  midMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+  midMesh.frustumCulled = false; // rebuilt around the camera, bounds don't apply
+  midMesh.count = 0;
+  const nearMesh = new THREE.InstancedMesh(bookNear, nearMat, NEAR_CAP);
   nearMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-  nearMesh.frustumCulled = false; // rebuilt around the camera, bounds don't apply
+  nearMesh.frustumCulled = false;
   nearMesh.count = 0;
 
   // keep the rendered (jittered) ground positions so the look-at picker aims at
@@ -331,9 +457,9 @@ function buildField(
   const cursor = cellStart.slice(0, gw * gh);
   for (let i = 0; i < n; i++) cellItems[cursor[cellOf(i)]++] = i;
 
-  const R2 = R_NEAR * R_NEAR;
+  const RMID2 = R_MID * R_MID;
   const RB2 = REBUILD_DIST * REBUILD_DIST;
-  const maxRing = Math.ceil(R_NEAR / CELL) + 1; // cells beyond this are wholly out of range
+  const maxRing = Math.ceil(R_MID / CELL) + 1; // cells beyond this are wholly out of range
   const m = new THREE.Matrix4();
   const c = new THREE.Color();
   let lastX = Infinity;
@@ -346,46 +472,67 @@ function buildField(
     lastZ = camZ;
     const cgx = Math.floor((camX - minX) / CELL);
     const cgz = Math.floor((camZ - minZ) / CELL);
-    let k = 0;
+    let kNear = 0;
+    let kMid = 0;
     const addCell = (gx: number, gz: number): void => {
       if (gx < 0 || gz < 0 || gx >= gw || gz >= gh) return;
       const cI = gz * gw + gx;
       const end = cellStart[cI + 1];
-      for (let p = cellStart[cI]; p < end && k < NEAR_CAP; p++) {
+      for (let p = cellStart[cI]; p < end; p++) {
         const i = cellItems[p];
         const dx = px[i] - camX;
         const dz = pz[i] - camZ;
-        if (dx * dx + dz * dz > R2) continue;
-        nearMesh.setMatrixAt(k, m.fromArray(fullMat, i * 16));
-        nearMesh.setColorAt(k, c.fromArray(fullCol, i * 3));
-        k++;
+        const d2 = dx * dx + dz * dz;
+        if (d2 > RMID2) continue;
+        // per-book dither on the full->mid radius so the swap is a fuzzy band of
+        // individual books rather than a clean ring sweeping the field. Stable hash
+        // of the book index, so a given book's boundary doesn't change frame to frame.
+        const h = (Math.imul(i, 2654435761) >>> 0) / 4294967296; // [0, 1)
+        const rf = R_FULL + (h - 0.5) * BOUND_DITHER;
+        if (d2 < rf * rf && kNear < NEAR_CAP) {
+          nearMesh.setMatrixAt(kNear, m.fromArray(fullMat, i * 16));
+          nearMesh.setColorAt(kNear, c.fromArray(fullCol, i * 3));
+          kNear++;
+        } else if (kMid < MID_CAP) {
+          // mid band, or a near-band book that overflowed NEAR_CAP (still gets detail)
+          midMesh.setMatrixAt(kMid, m.fromArray(fullMat, i * 16));
+          midMesh.setColorAt(kMid, c.fromArray(fullCol, i * 3));
+          kMid++;
+        }
+        // else: both detail caps full, the always-drawn box base covers this book
       }
     };
-    // expand in Chebyshev rings from the camera cell: nearest cells first, so when
-    // the cap is hit mid-walk it's the farthest books that go unbuilt.
-    for (let rr = 0; rr <= maxRing && k < NEAR_CAP; rr++) {
+    // expand in Chebyshev rings from the camera cell: nearest cells first, so the
+    // near tier (innermost) fills before the mid, and when a cap is hit mid-walk it's
+    // the farthest books in that tier that drop to the coarser one.
+    const bothFull = () => kNear >= NEAR_CAP && kMid >= MID_CAP;
+    for (let rr = 0; rr <= maxRing && !bothFull(); rr++) {
       if (rr === 0) {
         addCell(cgx, cgz);
         continue;
       }
-      for (let gx = cgx - rr; gx <= cgx + rr && k < NEAR_CAP; gx++) {
+      for (let gx = cgx - rr; gx <= cgx + rr; gx++) {
         addCell(gx, cgz - rr);
         addCell(gx, cgz + rr);
       }
-      for (let gz = cgz - rr + 1; gz <= cgz + rr - 1 && k < NEAR_CAP; gz++) {
+      for (let gz = cgz - rr + 1; gz <= cgz + rr - 1; gz++) {
         addCell(cgx - rr, gz);
         addCell(cgx + rr, gz);
       }
     }
-    nearMesh.count = k;
+    nearMesh.count = kNear;
     nearMesh.instanceMatrix.needsUpdate = true;
     if (nearMesh.instanceColor) nearMesh.instanceColor.needsUpdate = true;
+    midMesh.count = kMid;
+    midMesh.instanceMatrix.needsUpdate = true;
+    if (midMesh.instanceColor) midMesh.instanceColor.needsUpdate = true;
   }
 
   const group = new THREE.Group();
   group.add(farMesh);
+  group.add(midMesh);
   group.add(nearMesh);
-  return { group, px, pz, tier: tier as Uint8Array, update, nearMesh };
+  return { group, px, pz, tier: tier as Uint8Array, update, nearMesh, midMesh };
 }
 
 // Teleporter monuments (26): tall emissive-blue pillars, the cool complement to
@@ -836,14 +983,16 @@ async function main() {
   };
 
   info.innerHTML = "loading positions…";
-  const [field, teleporters, meta, world, heightmap, bookGeo] = await Promise.all([
-    loadPositions("positions.bin"),
-    loadTeleporters("teleporters.json"),
-    loadMeta("meta.bin"),
-    loadWorld("world.json"),
-    loadHeightmap("heightmap.bin"),
-    loadBookGeometry("models.glb"),
-  ]);
+  const [field, teleporters, meta, world, heightmap, bookLods, headVariants] =
+    await Promise.all([
+      loadPositions("positions.bin"),
+      loadTeleporters("teleporters.json"),
+      loadMeta("meta.bin"),
+      loadWorld("world.json"),
+      loadHeightmap("heightmap.bin"),
+      loadBookLods("book.glb", ["book_LOD00", "book_LOD01"]),
+      loadHeadLods("heads.glb"),
+    ]);
   mark("fetch+decode");
   // the heightmap is the ground-height source for the clipmap and the player's
   // feet; init it before anything samples it.
@@ -862,11 +1011,13 @@ async function main() {
   // placed on the analytic fallback before the fetch resolved).
   camera.position.y = sampleHeight(camera.position.x, camera.position.z) + EYE_HEIGHT;
   mark("terrain");
-  const built = buildField(field, bookGeo);
+  const built = buildField(field, bookLods[0], bookLods[1]);
   mark("seat books");
   built.update(camera.position.x, camera.position.z);
   scene.add(built.group);
   scene.add(buildTeleporters(teleporters));
+  const heads = buildHeads(headVariants); // temporary: the head variants near spawn
+  scene.add(heads.group);
 
   mark("props");
 
@@ -999,6 +1150,7 @@ async function main() {
     built.update(camera.position.x, camera.position.z);
     const bm = performance.now() - tA;
     if (bm > booksMs) booksMs = bm;
+    heads.update(camera); // pick each head's LOD by camera distance (a handful)
 
     compass.update();
     sky.position.copy(camera.position); // keep the dome centred on the viewer
@@ -1015,7 +1167,7 @@ async function main() {
       perf.textContent =
         `calls  ${r.calls}\n` +
         `tris   ${(r.triangles / 1e6).toFixed(2)}M\n` +
-        `books  ${built.nearMesh.count.toLocaleString()} mesh / ${field.n.toLocaleString()} box\n` +
+        `books  ${built.nearMesh.count.toLocaleString()} full + ${built.midMesh.count.toLocaleString()} mid / ${field.n.toLocaleString()} box\n` +
         `ground ${groundMs.toFixed(1)}ms (peak)\n` +
         `bookfl ${booksMs.toFixed(1)}ms (peak)`;
       groundMs = 0;
@@ -1024,4 +1176,10 @@ async function main() {
   });
 }
 
-main();
+// surface a load failure in the HUD instead of freezing on "loading positions…":
+// every asset is awaited in one Promise.all, so any rejection (a missing file, a
+// glb the loader can't decode) leaves the page stuck with no visible reason.
+main().catch((e) => {
+  info.innerHTML = `load failed: ${escapeHtml(String(e?.message ?? e))}`;
+  console.error(e);
+});
