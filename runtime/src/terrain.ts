@@ -519,15 +519,27 @@ function baryHeight(
   return a.y + v * (b.y - a.y) + w * (c.y - a.y);
 }
 
-// Seat height: the height of the finest-level facet drawn at (x, z). The jitter can
-// pull the containing triangle into a neighbouring cell, so build the 4x4 jittered
-// corner lattice spanning the 3x3 cell block around the point (jitter < cell, so one
-// ring is enough), then split each cell on its a->d diagonal exactly as the index
-// buffer does and return the first triangle that contains the point. Falls back to
-// the un-jittered chord if the point slips through every triangle.
+// Seat height: the height of the finest-level facet drawn at (x, z). Split on the
+// a->d diagonal exactly as the index buffer does. The point almost always lands in
+// one of its OWN cell's two triangles, so test those four corners first (the hit
+// path: 4 jittered vertices, no lattice). Only when jitter has pulled the point
+// across a cell edge does the slow path build the full 4x4 lattice over the 3x3
+// cell block (jitter < cell, so one ring of neighbours is guaranteed to hold the
+// triangle) and search it. Falls back to the un-jittered chord if the point slips
+// through every triangle.
 export function facetHeight(x: number, z: number): number {
   const gx0 = Math.floor(x / FINEST);
   const gz0 = Math.floor(z / FINEST);
+  // fast path: the book's own cell.
+  const a = finestVertex(gx0, gz0, _fv[0]);
+  const b = finestVertex(gx0 + 1, gz0, _fv[1]);
+  const c = finestVertex(gx0, gz0 + 1, _fv[2]);
+  const d = finestVertex(gx0 + 1, gz0 + 1, _fv[3]);
+  const h1 = baryHeight(a, c, d, x, z); // upper-left triangle (a, c, d)
+  if (h1 !== null) return h1;
+  const h2 = baryHeight(a, d, b, x, z); // lower-right triangle (a, d, b)
+  if (h2 !== null) return h2;
+  // slow path: jitter moved the containing triangle into a neighbouring cell.
   for (let j = 0; j < 4; j++) {
     for (let i = 0; i < 4; i++) {
       finestVertex(gx0 - 1 + i, gz0 - 1 + j, _fv[j * 4 + i]);
@@ -535,14 +547,14 @@ export function facetHeight(x: number, z: number): number {
   }
   for (let cj = 0; cj < 3; cj++) {
     for (let ci = 0; ci < 3; ci++) {
-      const a = _fv[cj * 4 + ci];
-      const b = _fv[cj * 4 + ci + 1];
-      const c = _fv[(cj + 1) * 4 + ci];
-      const d = _fv[(cj + 1) * 4 + ci + 1];
-      const h1 = baryHeight(a, c, d, x, z); // upper-left triangle (a, c, d)
-      if (h1 !== null) return h1;
-      const h2 = baryHeight(a, d, b, x, z); // lower-right triangle (a, d, b)
-      if (h2 !== null) return h2;
+      const na = _fv[cj * 4 + ci];
+      const nb = _fv[cj * 4 + ci + 1];
+      const nc = _fv[(cj + 1) * 4 + ci];
+      const nd = _fv[(cj + 1) * 4 + ci + 1];
+      const u1 = baryHeight(na, nc, nd, x, z);
+      if (u1 !== null) return u1;
+      const u2 = baryHeight(na, nd, nb, x, z);
+      if (u2 !== null) return u2;
     }
   }
   return chordHeight(x, z, FINEST);
