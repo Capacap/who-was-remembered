@@ -216,6 +216,36 @@ function applyPageMask(mat: THREE.Material): void {
   };
 }
 
+// Target footprint diameter of the stone circle in world units. The authored
+// model is ~4.9u across; scaled up to this so the player can walk inside the ring
+// rather than step over it, while still sitting well within the 28u flat plaza
+// core the terrain levels around each monument (terrain FLATTEN_R = 14).
+const STONE_CIRCLE_DIAMETER = 9;
+
+// Bake the authored stone circle (stone_circle_LOD00) into a ground-ready geometry:
+// uniform-scale so its widest footprint axis is STONE_CIRCLE_DIAMETER, recentre x/z
+// on the origin, and drop its base to y = 0 so it rests on the plaza when placed at
+// ground height. The model has 643 tris and only 26 are ever drawn, so the finer
+// LODs aren't worth the swap bookkeeping; LOD00 is used at every distance.
+async function loadStoneCircle(url: string): Promise<THREE.BufferGeometry> {
+  const gltf = await gltfLoader.loadAsync(url);
+  const src = gltf.scene.getObjectByName("stone_circle_LOD00") as
+    | THREE.Mesh
+    | undefined;
+  if (!src?.isMesh) throw new Error(`no 'stone_circle_LOD00' mesh in ${url}`);
+  const g = (src.geometry as THREE.BufferGeometry).clone();
+  g.computeBoundingBox();
+  let bb = g.boundingBox!;
+  const k = STONE_CIRCLE_DIAMETER / Math.max(bb.max.x - bb.min.x, bb.max.z - bb.min.z);
+  g.scale(k, k, k);
+  g.computeBoundingBox();
+  bb = g.boundingBox!;
+  // recentre the footprint on the origin; sink the base to y = 0 so the stones
+  // stand on the ground rather than half-buried or floating when seated.
+  g.translate(-(bb.min.x + bb.max.x) / 2, -bb.min.y, -(bb.min.z + bb.max.z) / 2);
+  return g;
+}
+
 // --- decorative heads --------------------------------------------------------
 // Three sculpted head variants from heads.glb, scattered half-buried in the sand
 // with faces to the sky (Stage 10 finds the clear spots; decorations.json carries
@@ -669,12 +699,30 @@ function buildField(
   return { group, px, pz, tier: tier as Uint8Array, update, nearMesh, midMesh };
 }
 
-// Teleporter monuments (26): tall emissive-blue pillars, the cool complement to
-// the hot-orange landmark books. They beacon through the fog so the player can
-// steer toward a known place from across the disc. Far taller than the 16u major
-// books because they're rare and meant to be seen from a long way off.
-const TP_HEIGHT = 60;
-const TP_FOOT = 5;
+// Teleporter monuments (26): a ring of standing stones on the ground that the
+// player walks into, with a tall emissive-blue light shaft rising from its centre,
+// the cool complement to the hot-orange landmark books. The shaft is occluded by
+// the dunes like everything else, so it isn't a cross-disc beacon (the compass
+// does the long-range wayfinding); it's the reward you crest a ridge to find,
+// marking a known place once you're near enough to see it.
+const TP_BEAM_HEIGHT = 80; // visible shaft height above the ground
+const TP_BEAM_RADIUS = 0.6;
+const TP_BEAM_COLOR = new THREE.Color(0x2f6cff);
+// A round tube crossing the ground plane reveals its tube shape at the waterline
+// (curved bottom rim, the far wall seen through the near one), which breaks the
+// flat-pillar illusion up close. So the beam fades out by horizontal camera
+// distance: a clean shaft from afar, gone before you are near enough to see the
+// intersection. Full strength beyond FAR, gone within NEAR (≈ at the stones).
+const TP_BEAM_FADE_NEAR = 18;
+const TP_BEAM_FADE_FAR = 50;
+// The ground clipmap is transparent and assigns each of its levels renderOrder
+// 0..4 (terrain.GROUND_LEVELS). A default-renderOrder beam would draw before the
+// coarser levels, which then paint their opaque-near sand straight over it (the
+// beam writes no depth, so it can't defend those pixels). Drawing the beam after
+// every ground level fixes that; the depth TEST against the ground (which does
+// write depth) still occludes the beam behind nearer dunes, so physical occlusion
+// is preserved. Must stay above the highest ground renderOrder (4).
+const TP_BEAM_RENDER_ORDER = 10;
 
 interface Teleporter {
   label: string;
@@ -702,23 +750,88 @@ async function loadHeightmap(
   return { res, worldSize, data };
 }
 
-function buildTeleporters(list: Teleporter[]) {
-  const geom = new THREE.BoxGeometry(TP_FOOT, TP_HEIGHT, TP_FOOT);
-  // emissive so it reads as a lit beacon at distance rather than a shaded box
-  // that the fog swallows; a touch of lambert keeps some form on the near ones.
-  // Opaque and unfaded (no applyDistanceFade), so the beacons punch through the
-  // haze that dissolves the books and ground: the point of one you steer toward.
-  const mat = new THREE.MeshLambertMaterial({
-    color: 0x1c3a8c,
-    emissive: 0x2f6cff,
-    emissiveIntensity: 0.9,
+function buildTeleporters(list: Teleporter[], circleGeom: THREE.BufferGeometry) {
+  // The stones take the same sandstone as the heads and props, so the monument
+  // reads as carved from the desert rather than dropped onto it. Opaque and
+  // unfaded (no applyDistanceFade) like the other props, though being flat it is
+  // lost to the haze at distance: the beam, not the ring, is the far beacon.
+  const stoneMat = new THREE.MeshLambertMaterial({ color: 0xcbbfa8 }); // sandstone
+  // The beam is an open-ended cylinder shaded as a volumetric light shaft. Two
+  // gradients shape it: a silhouette-edge term (alpha ~ |view·normal|) that makes
+  // a view ray glowing brightest where it passes through the most of the column
+  // and dissolving to nothing at the rounded edges, so there is no hard outline;
+  // and a vertical fade that thins the shaft to transparent toward the top, as if
+  // the light dissipates as it rises. Additive with no depth write so the layers
+  // accumulate into a bright core, but depth TEST stays on: dunes occlude it, and
+  // the player crests a ridge to find the light waiting (the compass, not the
+  // beam, does the long-range wayfinding).
+  const beamGeom = new THREE.CylinderGeometry(
+    TP_BEAM_RADIUS,
+    TP_BEAM_RADIUS,
+    TP_BEAM_HEIGHT,
+    16,
+    1,
+    true, // open-ended: no caps to flare as flat discs when seen from above
+  );
+  const beamMat = new THREE.ShaderMaterial({
+    uniforms: {
+      uColor: { value: TP_BEAM_COLOR },
+      uOpacity: { value: 0.4 },
+      uHeight: { value: TP_BEAM_HEIGHT },
+      uFadeNear: { value: TP_BEAM_FADE_NEAR },
+      uFadeFar: { value: TP_BEAM_FADE_FAR },
+    },
+    transparent: true,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+    side: THREE.DoubleSide,
+    vertexShader: /* glsl */ `
+      uniform float uHeight;
+      varying vec3 vWorldPos;
+      varying vec3 vWorldNormal;
+      varying float vT;
+      void main() {
+        vec4 wp = modelMatrix * vec4(position, 1.0);
+        vWorldPos = wp.xyz;
+        vWorldNormal = normalize(mat3(modelMatrix) * normal);
+        vT = (position.y + uHeight * 0.5) / uHeight; // 0 at base, 1 at top
+        gl_Position = projectionMatrix * viewMatrix * wp;
+      }
+    `,
+    fragmentShader: /* glsl */ `
+      uniform vec3 uColor;
+      uniform float uOpacity;
+      uniform float uFadeNear;
+      uniform float uFadeFar;
+      varying vec3 vWorldPos;
+      varying vec3 vWorldNormal;
+      varying float vT;
+      void main() {
+        vec3 viewDir = normalize(cameraPosition - vWorldPos);
+        float edge = abs(dot(viewDir, vWorldNormal));   // 1 through the core, 0 at the silhouette
+        float vert = pow(1.0 - clamp(vT, 0.0, 1.0), 1.5); // dissipates toward the top
+        // horizontal camera distance (xz only, so looking up the tall shaft doesn't
+        // trigger it): fade the whole beam out as you approach, hiding the waterline.
+        float camDist = distance(cameraPosition.xz, vWorldPos.xz);
+        float camFade = smoothstep(uFadeNear, uFadeFar, camDist);
+        gl_FragColor = vec4(uColor, uOpacity * edge * vert * camFade);
+      }
+    `,
   });
   const group = new THREE.Group();
   for (const tp of list) {
-    const pillar = new THREE.Mesh(geom, mat);
-    // stands plumb on its flattened plaza (terrain levels a disc here).
-    pillar.position.set(tp.x, sampleHeight(tp.x, tp.y) + TP_HEIGHT / 2, tp.y);
-    group.add(pillar);
+    const h = sampleHeight(tp.x, tp.y);
+    // ring of stones resting on the flattened plaza (terrain levels a disc here).
+    const circle = new THREE.Mesh(circleGeom, stoneMat);
+    circle.position.set(tp.x, h, tp.y);
+    group.add(circle);
+    // beam rising from the circle's centre, base at the ground. Drawn after the
+    // transparent ground levels (see TP_BEAM_RENDER_ORDER) so they can't overpaint
+    // it; it fades out by camera distance (shader) before the waterline shows.
+    const beam = new THREE.Mesh(beamGeom, beamMat);
+    beam.position.set(tp.x, h + TP_BEAM_HEIGHT / 2, tp.y);
+    beam.renderOrder = TP_BEAM_RENDER_ORDER;
+    group.add(beam);
   }
   return group;
 }
@@ -1119,7 +1232,7 @@ async function main() {
   };
 
   info.innerHTML = "loading positions…";
-  const [field, teleporters, meta, world, heightmap, bookLods, headVariants, decorations] =
+  const [field, teleporters, meta, world, heightmap, bookLods, headVariants, decorations, stoneCircle] =
     await Promise.all([
       loadPositions("positions.bin"),
       loadTeleporters("teleporters.json"),
@@ -1129,13 +1242,14 @@ async function main() {
       loadBookLods("book.glb", ["book_LOD00", "book_LOD01"]),
       loadHeadLods("heads.glb"),
       loadDecorations("decorations.json"),
+      loadStoneCircle("stone_circle.glb"),
     ]);
   mark("fetch+decode");
   // the heightmap is the ground-height source for the clipmap and the player's
   // feet; init it before anything samples it.
   initHeightmap(heightmap.res, heightmap.worldSize, heightmap.data);
   // the plazas flatten around the teleporters, so terrain needs them before the
-  // books or pillars are seated. Books, pillars, the picker and the ring all read
+  // books or monuments are seated. Books, monuments, the picker and the ring all read
   // sampleHeight/sampleNormal now, so they seat on the same baked surface the
   // clipmap draws (no float-off; the analytic field is only the heightmap fallback).
   initTerrain(teleporters);
@@ -1152,7 +1266,7 @@ async function main() {
   mark("seat books");
   built.update(camera.position.x, camera.position.z);
   scene.add(built.group);
-  scene.add(buildTeleporters(teleporters));
+  scene.add(buildTeleporters(teleporters, stoneCircle));
   const heads = buildHeads(headVariants, decorations); // half-buried scatter (Stage 10)
   scene.add(heads.group);
 
