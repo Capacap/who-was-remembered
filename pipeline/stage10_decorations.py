@@ -52,9 +52,13 @@ OUT_PATH = ROOT.parent / "runtime" / "public" / "decorations.json"
 # HEAD_RADIUS is that half-extent at scale 1, plus a margin so books never touch
 # even the largest head. Candidates are also kept HEAD_SPACING apart so the heads
 # never clump into a pile. All eyeball knobs; the stage runs in seconds.
-N_HEADS = 400
-HEAD_RADIUS = 6.0       # world units: open-sand radius a scale-1 head needs
-HEAD_SPACING = 60.0     # world units: minimum gap between two heads
+N_HEADS = 10000
+HEAD_RADIUS = 1.2       # world units: open-sand radius a scale-1 head needs (~half
+                        # HEAD_HEIGHT=2.0, the laid head's ground half-length)
+HEAD_SPACING = 35.0     # world units: minimum gap between two heads. Small heads
+                        # (~2u) read as findable company only at high density; this
+                        # is well above their own size, so they never pile, but the
+                        # disc is vast (area-uniform NN ~60u at this count).
 MARGIN = 1.0            # extra clearance from book footprints
 
 # Per-head jitter ranges (uniform). Scale spreads the apparent size; yaw is a free
@@ -101,12 +105,17 @@ def main() -> None:
     # those that clear books, teleporters, and already-placed heads.
     target = args.n
     accepted: list[dict] = []
-    accepted_pts: list[tuple[float, float]] = []
+    # accepted head coords in preallocated arrays, so the inter-head spacing test is
+    # a vectorized O(count) min over a slice rather than rebuilding an array from a
+    # python list each candidate (that O(n^2) rebuild is the bottleneck at N=2000).
+    acc_x = np.empty(target, dtype=np.float64)
+    acc_y = np.empty(target, dtype=np.float64)
+    count = 0
     max_head_r = HEAD_RADIUS * SCALE_MAX
     book_cull = max_head_r + BOOK_R_MAX_GUESS + MARGIN
 
     batches = 0
-    while len(accepted) < target and batches < 200:
+    while count < target and batches < 400:
         batches += 1
         m = max(target * 8, 20000)
         rr = np.sqrt(rng.uniform(R_INNER**2, R_MAX**2, size=m))
@@ -115,7 +124,7 @@ def main() -> None:
         cy = rr * np.sin(th)
         cs = rng.uniform(SCALE_MIN, SCALE_MAX, size=m)
         for k in range(m):
-            if len(accepted) >= target:
+            if count >= target:
                 break
             hx, hy, hs = cx[k], cy[k], cs[k]
             hr = HEAD_RADIUS * hs
@@ -131,11 +140,13 @@ def main() -> None:
                 if td < TP_CLEAR_RADIUS + hr:
                     continue
             # other heads: keep them HEAD_SPACING apart so they never pile up.
-            if accepted_pts:
-                ax = np.array([p[0] for p in accepted_pts])
-                ay = np.array([p[1] for p in accepted_pts])
-                if np.min(np.hypot(ax - hx, ay - hy)) < HEAD_SPACING:
-                    continue
+            if count and np.min(
+                np.hypot(acc_x[:count] - hx, acc_y[:count] - hy)
+            ) < HEAD_SPACING:
+                continue
+            acc_x[count] = hx
+            acc_y[count] = hy
+            count += 1
             accepted.append(
                 {
                     "x": round(float(hx), 1),
@@ -146,7 +157,6 @@ def main() -> None:
                     "sink": round(float(rng.uniform(SINK_MIN, SINK_MAX)), 3),
                 }
             )
-            accepted_pts.append((hx, hy))
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(accepted, ensure_ascii=False, indent=0))

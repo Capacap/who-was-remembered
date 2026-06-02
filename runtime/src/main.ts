@@ -222,7 +222,15 @@ function applyPageMask(mat: THREE.Material): void {
 // per-head position and jitter). Pure decoration, no data; they thicken the
 // dream-logic without disturbing a single book. Plain stone material; the basemesh
 // ships no material and its COLOR_n/TEXCOORD_n layers are ignored.
-const HEAD_HEIGHT = 10; // world units along the sculpted up axis; eyeball knob.
+// World units along the sculpted up axis (crown to chin). Bounded by the camera,
+// not taste: there is no collision, so a head tall enough to reach eye height
+// (EYE_HEIGHT ~2.4u) means the player walks INTO the face and the view fills with
+// the inside of the skull. The heads are nearly as deep as tall (measured z/y
+// ~0.93), so laid on their back the crown rises ~0.93*HEAD_HEIGHT*scale*(1-sink).
+// At 2.0 the tallest possible head (scale 1.4, sink 0.30) tops out ~1.8u, below the
+// eye, so the camera always glides over the crown instead of into it. A head then
+// reads as a boulder among the books (~3-7 book-lengths), never a colossus.
+const HEAD_HEIGHT = 2.0;
 //   Stage 10's HEAD_RADIUS (the open-sand a head needs) tracks ~half of this.
 // each variant's three LODs (full, mid, coarse), the same ladder the books use.
 const HEAD_VARIANTS = [
@@ -230,13 +238,18 @@ const HEAD_VARIANTS = [
   ["head02_LOD00", "head02_LOD01", "head02_LOD02"],
   ["head03_LOD00", "head03_LOD01", "head03_LOD02"],
 ];
-// camera-distance thresholds for the LOD swap and a hysteresis band (fraction of
-// the threshold) so a head straddling a boundary doesn't flicker. Far larger than
-// the books' because a head is far bigger on screen: full out to HEAD_LOD[1], mid
-// to HEAD_LOD[2], coarse beyond. Off-screen heads frustum-cull, so the hundreds
-// scattered across the deep desert only draw when actually in view. Eyeball knobs.
-const HEAD_LOD = [0, 150, 400];
-const HEAD_LOD_HYST = 0.1;
+// Heads are instanced like the books, NOT one THREE.LOD object each: at 10k heads
+// that was 10k scene nodes, 10k update() calls and a draw call per visible head,
+// which tanked the frame. Instead every head draws from a single static coarse
+// InstancedMesh per variant (the bulk, always on, ~104 tris each), and only the
+// handful within HEAD_R_FULL of the camera also draw from a small full-detail pool
+// that hides the coarse mesh inside it. Heads sit ~60-125u apart, so that pool is
+// nearly always near-empty. Coarse is shrunk by HEAD_COARSE_PROXY so the full mesh
+// cleanly occludes it where both draw (the book box uses the same trick).
+const HEAD_R_FULL = 40; // full detail within this radius; coarse (104 tris) beyond
+const HEAD_NEAR_CAP = 48; // full-detail instances per variant (far more than ever in range)
+const HEAD_REBUILD = 20; // refill the near pool only after the camera moves this far
+const HEAD_COARSE_PROXY = 0.9; // shrink coarse so the full mesh occludes it, no z-fight
 
 // Each LOD uniform-scaled to HEAD_HEIGHT on the sculpted up axis (y) and recentred
 // on the origin in all three axes, so a head can be freely laid on its back and
@@ -295,40 +308,103 @@ function buildHeads(
 } {
   const mat = new THREE.MeshLambertMaterial({ color: 0xcbbfa8 }); // sandstone
   const group = new THREE.Group();
-  const lods: THREE.LOD[] = [];
-  // world-vertical extent of each variant once laid face-up: the head's local
-  // z (face depth, which the -90° X rotation swings onto world y) at scale 1.
-  // Used to bury the head by its sink fraction.
+  const nv = variants.length;
+  // world-vertical extent of each variant once laid face-up: the head's local z
+  // (face depth, which the +90° X rotation swings onto world y) at scale 1. Used to
+  // bury the head by its sink fraction.
   const depth = variants.map((geos) => {
     geos[0].computeBoundingBox();
     const b = geos[0].boundingBox!;
     return b.max.z - b.min.z;
   });
+
+  // Bucket heads by variant and bake each one's world transform once. Lay the head
+  // on its back facing the sky (Rx +90, the sculpted face axis ran opposite the
+  // first guess), spin it by its yaw (YXZ -> Ry·Rx), scale, and sink it so its
+  // centre sits at ground + H*(0.5 - sink), burying exactly that fraction of H.
+  const dummy = new THREE.Object3D();
+  const mats: number[][] = Array.from({ length: nv }, () => []);
+  const xs: number[][] = Array.from({ length: nv }, () => []);
+  const zs: number[][] = Array.from({ length: nv }, () => []);
   for (const d of decos) {
-    const geos = variants[d.v] ?? variants[0];
-    const lod = new THREE.LOD();
-    geos.forEach((g, lvl) =>
-      lod.addLevel(new THREE.Mesh(g, mat), HEAD_LOD[lvl], HEAD_LOD_HYST),
-    );
-    // lay the head on its back, face to the sky, then spin it about up: YXZ order
-    // applies Ry(rot) · Rx(+90). (The sculpted face axis ran the opposite way from
-    // the first guess, so the pitch is +90, not -90.)
-    lod.rotation.set(Math.PI / 2, d.rot, 0, "YXZ");
-    lod.scale.setScalar(d.s);
-    // bury `sink` of the laid head: its centre sits at ground + H*(0.5 - sink),
-    // so exactly that fraction of the world-vertical extent H is below grade.
-    const H = depth[d.v] * d.s;
-    const gy = sampleHeight(d.x, d.y) + H * (0.5 - d.sink);
-    lod.position.set(d.x, gy, d.y);
-    group.add(lod);
-    lods.push(lod);
+    const v = d.v < nv ? d.v : 0;
+    const H = depth[v] * d.s;
+    dummy.position.set(d.x, sampleHeight(d.x, d.y) + H * (0.5 - d.sink), d.y);
+    dummy.rotation.set(Math.PI / 2, d.rot, 0, "YXZ");
+    dummy.scale.setScalar(d.s);
+    dummy.updateMatrix();
+    for (let k = 0; k < 16; k++) mats[v].push(dummy.matrix.elements[k]);
+    xs[v].push(d.x);
+    zs[v].push(d.y);
   }
-  return {
-    group,
-    update: (camera) => {
-      for (const l of lods) l.update(camera);
-    },
-  };
+
+  // Per variant: a static coarse InstancedMesh holding ALL its heads (always drawn,
+  // never frustum-culled since it spans the disc), plus a small dynamic full-detail
+  // pool refilled around the camera. The coarse geometry is shrunk so the full mesh
+  // occludes it cleanly where both draw.
+  const matF32: Float32Array[] = [];
+  const posX: Float32Array[] = [];
+  const posZ: Float32Array[] = [];
+  const nearMeshes: THREE.InstancedMesh[] = [];
+  const tmp = new THREE.Matrix4();
+  for (let v = 0; v < nv; v++) {
+    const cnt = xs[v].length;
+    const mf = new Float32Array(mats[v]);
+    matF32.push(mf);
+    posX.push(new Float32Array(xs[v]));
+    posZ.push(new Float32Array(zs[v]));
+
+    const coarseGeo = variants[v][2].clone();
+    coarseGeo.scale(HEAD_COARSE_PROXY, HEAD_COARSE_PROXY, HEAD_COARSE_PROXY);
+    const coarse = new THREE.InstancedMesh(coarseGeo, mat, Math.max(cnt, 1));
+    coarse.frustumCulled = false;
+    for (let i = 0; i < cnt; i++) coarse.setMatrixAt(i, tmp.fromArray(mf, i * 16));
+    coarse.count = cnt;
+    coarse.instanceMatrix.needsUpdate = true;
+    group.add(coarse);
+
+    const near = new THREE.InstancedMesh(variants[v][0], mat, HEAD_NEAR_CAP);
+    near.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    near.frustumCulled = false;
+    near.count = 0;
+    nearMeshes.push(near);
+    group.add(near);
+  }
+
+  // Refill the full-detail pools only when the camera has moved HEAD_REBUILD. With
+  // ~10k heads total a brute scan is trivial (it fires rarely, not per frame).
+  const RF2 = HEAD_R_FULL * HEAD_R_FULL;
+  const RB2 = HEAD_REBUILD * HEAD_REBUILD;
+  const m = new THREE.Matrix4();
+  let lastX = Infinity;
+  let lastZ = Infinity;
+  function update(camera: THREE.Camera): void {
+    const cx = camera.position.x;
+    const cz = camera.position.z;
+    const dx = cx - lastX;
+    const dz = cz - lastZ;
+    if (dx * dx + dz * dz < RB2) return;
+    lastX = cx;
+    lastZ = cz;
+    for (let v = 0; v < nv; v++) {
+      const x = posX[v];
+      const z = posZ[v];
+      const mf = matF32[v];
+      const near = nearMeshes[v];
+      let k = 0;
+      for (let i = 0; i < x.length && k < HEAD_NEAR_CAP; i++) {
+        const ex = x[i] - cx;
+        const ez = z[i] - cz;
+        if (ex * ex + ez * ez < RF2) {
+          near.setMatrixAt(k, m.fromArray(mf, i * 16));
+          k++;
+        }
+      }
+      near.count = k;
+      near.instanceMatrix.needsUpdate = true;
+    }
+  }
+  return { group, update };
 }
 
 function buildField(
