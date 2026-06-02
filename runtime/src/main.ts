@@ -32,11 +32,12 @@ const RUN_MULT = 5; // hold-to-run
 const FLY_SPEED = 60; // crossing the void on foot is an 80-min walk by design
 const FLY_RUN_MULT = 6;
 
-// tier -> (overall size, colour). Books lie flat on the sand, so prominence is
-// no longer height: a major is a larger, hotter volume, an ordinary a small
-// sandy one. (Cross-disc legibility of majors is now a beacon-VFX problem, not a
-// tall-pillar one; the field reads as scattered books, not a skyline.)
-const TIER_SCALE = [1.0, 1.4, 2.2]; // ordinary, minor, major
+// tier -> beacon colour only. Size is now a separate axis (book_scale, from
+// article length; see loadPositions/buildField), so tier no longer touches it:
+// a major is a hotter hue, not a bigger book. A long article about an unknown
+// figure is a big plain book; a famous stub is a small hot one. (Cross-disc
+// legibility of majors is a beacon-VFX problem, not a size one; the field reads
+// as scattered books, not a skyline.)
 const TIER_COLOR = [0xb89b6e, 0xdcab4c, 0xff5a2c].map((c) => new THREE.Color(c));
 
 // Geo-navigation colour. Ordinary books (the mass you walk through) are hued by
@@ -61,7 +62,19 @@ const PAGE_CREAM = new THREE.Color(0xece2cc);
 // are decorative (seeded, don't move the book). SCATTER does move it: a render-only
 // experiment — if it earns its keep it belongs in stage6's jitter, not here.
 const TILT_MAX = 0.05; // random lean off the ground normal, radians; small so a flat book keeps full contact
-const FOOT_VAR = 0.25; // +/- fraction on cover dimensions
+const FOOT_VAR = 0.2; // +/- fraction per cover axis (0.8..1.2): size/aspect variety, footprint stays small
+
+// Article length reads as THICKNESS, not ground area. The diagnostic settled this:
+// the packed centres are spaced for roughly one small-book-width, so any book that
+// consumes more ground than BOOK_FOOTPRINT sits on its neighbours (the modern wedge
+// is genuinely that dense; radius is era and can't be spread). So every book keeps a
+// near-uniform footprint and a long article instead becomes a FATTER book: the
+// book_scale byte drives the spine (vertical) extent, which lives on the empty axis
+// and never competes for ground. THICK_MIN/MAX map the scale byte to a spine
+// multiplier; the field stays legible and a tome still reads bigger than a pamphlet.
+const BOOK_FOOTPRINT = 0.7; // uniform ground footprint scale (the clean diagnostic value)
+const THICK_MIN = 0.5;      // spine multiplier at the shortest article (thin pamphlet)
+const THICK_MAX = 1.6;      // spine multiplier at the longest (thick hardcover, not a loaf)
 const SCATTER = 0; // spacing is now stage6's job (relaxation pass); renderer draws placement as-is
 
 // mulberry32: cheap deterministic PRNG so the variety is stable across reloads.
@@ -107,12 +120,17 @@ async function loadPositions(url: string) {
   // canonical longitude angle, 0..255 around the disc (stage6 base_angle, pre-
   // jitter). Drives the per-book geo-navigation hue.
   const lon = new Uint8Array(buf, off, n);
-  return { n, x, y, tier, geo, lon };
+  off += n;
+  // book_scale quantized over [BOOK_SCALE_MIN, BOOK_SCALE_MAX] (world.json):
+  // the per-book size from article length, decoded in buildField.
+  const scale = new Uint8Array(buf, off, n);
+  return { n, x, y, tier, geo, lon, scale };
 }
 
 // Target cover length in world units: the baked book is uniform-scaled so its
-// long axis matches the old placeholder (~0.58u at tier 1), then TIER_SCALE and
-// the per-book footprint jitter multiply it as before.
+// long axis is this at book_scale 1.0, then the per-book size (from article
+// length) and the footprint jitter multiply it. Must match stage8's BOOK_LEN,
+// which derives each book's packing radius from the same length.
 const BOOK_LENGTH = 0.58;
 
 // Bake one authored book node into the orientation, scale, and attribute layout
@@ -198,14 +216,14 @@ function applyPageMask(mat: THREE.Material): void {
   };
 }
 
-// --- decorative heads (temporary placement) ---------------------------------
-// The three head variants from heads.glb, dropped near spawn as oversized stone
-// monuments so we can judge them rendered in-engine, and to see the LOD swap on a
-// large object where it's most visible. This is a look-see, not the final placement
-// (those scatter half-submerged facing the sky across the field, later). Plain
-// stone material; the basemesh ships no material and its COLOR_n/TEXCOORD_n layers
-// are ignored.
-const HEAD_HEIGHT = 10; // world units tall; surreal monument scale, eyeball knob
+// --- decorative heads --------------------------------------------------------
+// Three sculpted head variants from heads.glb, scattered half-buried in the sand
+// with faces to the sky (Stage 10 finds the clear spots; decorations.json carries
+// per-head position and jitter). Pure decoration, no data; they thicken the
+// dream-logic without disturbing a single book. Plain stone material; the basemesh
+// ships no material and its COLOR_n/TEXCOORD_n layers are ignored.
+const HEAD_HEIGHT = 10; // world units along the sculpted up axis; eyeball knob.
+//   Stage 10's HEAD_RADIUS (the open-sand a head needs) tracks ~half of this.
 // each variant's three LODs (full, mid, coarse), the same ladder the books use.
 const HEAD_VARIANTS = [
   ["head01_LOD00", "head01_LOD01", "head01_LOD02"],
@@ -214,16 +232,15 @@ const HEAD_VARIANTS = [
 ];
 // camera-distance thresholds for the LOD swap and a hysteresis band (fraction of
 // the threshold) so a head straddling a boundary doesn't flicker. Far larger than
-// the books' because a head is far bigger on screen and there are only a handful, so
-// holding full detail out to a long range costs nothing: full out to HEAD_LOD[1],
-// mid to HEAD_LOD[2], coarse beyond. Eyeball knobs.
+// the books' because a head is far bigger on screen: full out to HEAD_LOD[1], mid
+// to HEAD_LOD[2], coarse beyond. Off-screen heads frustum-cull, so the hundreds
+// scattered across the deep desert only draw when actually in view. Eyeball knobs.
 const HEAD_LOD = [0, 150, 400];
 const HEAD_LOD_HYST = 0.1;
 
-// Each LOD normalised the way the books are: uniform-scaled to HEAD_HEIGHT and
-// recentred in x/z, but with the BASE dropped to y = 0 (not centred) so the head
-// seats on the ground at its feet. Scaling each LOD to the same height and centring
-// each keeps the ladder aligned so a swap doesn't shift the head.
+// Each LOD uniform-scaled to HEAD_HEIGHT on the sculpted up axis (y) and recentred
+// on the origin in all three axes, so a head can be freely laid on its back and
+// sunk into the sand by a per-instance transform without the LOD ladder shifting.
 function normalizeHead(src: THREE.Mesh): THREE.BufferGeometry {
   const g = (src.geometry as THREE.BufferGeometry).clone();
   g.computeBoundingBox();
@@ -232,7 +249,11 @@ function normalizeHead(src: THREE.Mesh): THREE.BufferGeometry {
   g.scale(s, s, s);
   g.computeBoundingBox();
   bb = g.boundingBox!;
-  g.translate(-(bb.min.x + bb.max.x) / 2, -bb.min.y, -(bb.min.z + bb.max.z) / 2);
+  g.translate(
+    -(bb.min.x + bb.max.x) / 2,
+    -(bb.min.y + bb.max.y) / 2,
+    -(bb.min.z + bb.max.z) / 2,
+  );
   return g;
 }
 
@@ -248,30 +269,60 @@ async function loadHeadLods(url: string): Promise<THREE.BufferGeometry[][]> {
   );
 }
 
-// Place the heads in a row just in front of spawn (spawn looks toward +z), seated
-// on the terrain. Each is a THREE.LOD that swaps its mesh by camera distance (the
-// same tuned-radii approach as the books, but discrete per object since there are
-// only a handful); update() must be driven each frame. Opaque and unfaded like the
-// teleporter beacons so they stay solid while we look at them.
-function buildHeads(variants: THREE.BufferGeometry[][]): {
+// One head per Stage 10 decoration: laid on its back facing the sky, sunk into
+// the sand by its sink fraction, spun by its yaw, sized by its scale. Each is a
+// THREE.LOD swapping mesh by camera distance (update() driven each frame); opaque
+// and unfaded like the teleporter beacons. Three variants jittered into hundreds.
+interface Decoration {
+  x: number; // pipeline ground x (-> world x)
+  y: number; // pipeline ground y (-> world z)
+  v: number; // variant index 0..2
+  s: number; // scale multiplier
+  rot: number; // yaw, radians
+  sink: number; // fraction of the laid head buried below grade
+}
+
+async function loadDecorations(url: string): Promise<Decoration[]> {
+  return (await fetch(url)).json();
+}
+
+function buildHeads(
+  variants: THREE.BufferGeometry[][],
+  decos: Decoration[],
+): {
   group: THREE.Group;
   update: (camera: THREE.Camera) => void;
 } {
   const mat = new THREE.MeshLambertMaterial({ color: 0xcbbfa8 }); // sandstone
   const group = new THREE.Group();
   const lods: THREE.LOD[] = [];
-  const SPACING = 14;
-  const Z = 40;
-  variants.forEach((geos, i) => {
+  // world-vertical extent of each variant once laid face-up: the head's local
+  // z (face depth, which the -90° X rotation swings onto world y) at scale 1.
+  // Used to bury the head by its sink fraction.
+  const depth = variants.map((geos) => {
+    geos[0].computeBoundingBox();
+    const b = geos[0].boundingBox!;
+    return b.max.z - b.min.z;
+  });
+  for (const d of decos) {
+    const geos = variants[d.v] ?? variants[0];
     const lod = new THREE.LOD();
     geos.forEach((g, lvl) =>
       lod.addLevel(new THREE.Mesh(g, mat), HEAD_LOD[lvl], HEAD_LOD_HYST),
     );
-    const hx = (i - 1) * SPACING; // -14, 0, +14
-    lod.position.set(hx, sampleHeight(hx, Z), Z);
+    // lay the head on its back, face to the sky, then spin it about up: YXZ order
+    // applies Ry(rot) · Rx(+90). (The sculpted face axis ran the opposite way from
+    // the first guess, so the pitch is +90, not -90.)
+    lod.rotation.set(Math.PI / 2, d.rot, 0, "YXZ");
+    lod.scale.setScalar(d.s);
+    // bury `sink` of the laid head: its centre sits at ground + H*(0.5 - sink),
+    // so exactly that fraction of the world-vertical extent H is below grade.
+    const H = depth[d.v] * d.s;
+    const gy = sampleHeight(d.x, d.y) + H * (0.5 - d.sink);
+    lod.position.set(d.x, gy, d.y);
     group.add(lod);
     lods.push(lod);
-  });
+  }
   return {
     group,
     update: (camera) => {
@@ -285,7 +336,10 @@ function buildField(
   bookNear: THREE.BufferGeometry, // LOD00, full detail, drawn closest
   bookMid: THREE.BufferGeometry, // LOD01, drawn across the mid band
 ) {
-  const { n, x, y, tier, geo, lon } = field;
+  const { n, x, y, tier, geo, lon, scale } = field;
+  // the scale byte is the normalized article length (export_runtime quantized the
+  // [BOOK_SCALE_MIN, BOOK_SCALE_MAX] fraction straight to 0..255), so scale[i]/255
+  // is already 0..1; the renderer maps it onto spine THICKNESS, not footprint.
   // the authored book mesh, laid flat: broad cover (x, z), slim spine (y, the up
   // axis). Baked in loadBookLods to ~0.58u long at tier 1, smaller than the modern
   // spacing (~0.9u) so neighbours read as distinct dropped objects. Both LODs share
@@ -373,7 +427,9 @@ function buildField(
   // shape/tilt variety the main rnd stream already drives.
   const rndL = mulberry32(0x9e3779b9);
   for (let i = 0; i < n; i++) {
-    const s = TIER_SCALE[tier[i]];
+    // footprint is near-uniform (ground area is the contested axis); article length
+    // becomes spine thickness instead, on the empty vertical axis.
+    const thick = THICK_MIN + (scale[i] / 255) * (THICK_MAX - THICK_MIN);
     const fw = 1 + (rnd() * 2 - 1) * FOOT_VAR;
     const fl = 1 + (rnd() * 2 - 1) * FOOT_VAR;
     // pipeline (x, y) is the ground plane; map to world (x, z), y is up.
@@ -387,28 +443,30 @@ function buildField(
     const gy = facetHeight(px[i], pz[i]);
     // sample the normal across the book's own footprint (half-length ~0.3·s) so a
     // large book conforms to the slope it spans instead of one 0.5u patch.
-    sampleNormal(px[i], pz[i], normal, 0.3 * s);
+    sampleNormal(px[i], pz[i], normal, 0.3 * BOOK_FOOTPRINT);
     // lay the book flat on the slope: its spine (+y) aligns to the ground normal,
     // a random spin about that axis gives it a dropped heading, and a small lean
     // off the normal keeps it from looking neatly placed.
     qAlign.setFromUnitVectors(UP, normal);
-    eul.set(
-      (rnd() * 2 - 1) * TILT_MAX,
-      rnd() * Math.PI * 2,
-      (rnd() * 2 - 1) * TILT_MAX,
-    );
+    // tilt (x, z) and a random yaw (y) so no two books share a heading.
+    const t1 = (rnd() * 2 - 1) * TILT_MAX;
+    const yaw = rnd() * Math.PI * 2;
+    const t2 = (rnd() * 2 - 1) * TILT_MAX;
+    eul.set(t1, yaw, t2);
     qLocal.setFromEuler(eul);
     dummy.quaternion.copy(qAlign).multiply(qLocal);
     // settle the book INTO the sand: lift the centre by less than half the spine,
     // so the underside sits a touch below grade and any leaning corner rests in
-    // the surface rather than hovering over it.
-    const lift = (SPINE * s) * 0.3;
+    // the surface rather than hovering over it. A thicker (longer-article) book has
+    // a taller spine, so it stands proportionally higher out of the sand.
+    const lift = (SPINE * thick) * 0.3;
     dummy.position.set(
       px[i] + normal.x * lift,
       gy + normal.y * lift,
       pz[i] + normal.z * lift,
     );
-    dummy.scale.set(s * fw, s, s * fl);
+    // x,z = uniform footprint (+ small jitter); y = spine thickness from article length.
+    dummy.scale.set(BOOK_FOOTPRINT * fw, thick, BOOK_FOOTPRINT * fl);
     dummy.updateMatrix();
     farMesh.setMatrixAt(i, dummy.matrix);
     dummy.matrix.toArray(fullMat, i * 16);
@@ -712,6 +770,8 @@ interface World {
   TIME_SPAN: number;
   RADIUS_ALPHA: number;
   REF_YEAR: number;
+  BOOK_SCALE_MIN: number;
+  BOOK_SCALE_MAX: number;
 }
 
 async function loadWorld(url: string): Promise<World> {
@@ -983,7 +1043,7 @@ async function main() {
   };
 
   info.innerHTML = "loading positions…";
-  const [field, teleporters, meta, world, heightmap, bookLods, headVariants] =
+  const [field, teleporters, meta, world, heightmap, bookLods, headVariants, decorations] =
     await Promise.all([
       loadPositions("positions.bin"),
       loadTeleporters("teleporters.json"),
@@ -992,6 +1052,7 @@ async function main() {
       loadHeightmap("heightmap.bin"),
       loadBookLods("book.glb", ["book_LOD00", "book_LOD01"]),
       loadHeadLods("heads.glb"),
+      loadDecorations("decorations.json"),
     ]);
   mark("fetch+decode");
   // the heightmap is the ground-height source for the clipmap and the player's
@@ -1016,7 +1077,7 @@ async function main() {
   built.update(camera.position.x, camera.position.z);
   scene.add(built.group);
   scene.add(buildTeleporters(teleporters));
-  const heads = buildHeads(headVariants); // temporary: the head variants near spawn
+  const heads = buildHeads(headVariants, decorations); // half-buried scatter (Stage 10)
   scene.add(heads.group);
 
   mark("props");

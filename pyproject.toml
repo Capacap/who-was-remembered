@@ -10,5 +10,6 @@ dependencies = [
     "numpy>=2",
     "orjson>=3.10",
     "pyarrow>=18",
+    "scipy>=1.17.1",
     "tqdm>=4.66",
 ]

@@ -11,13 +11,17 @@ runtime/public/positions.bin: just the fields the first visualization needs
     uint8    tier[N]    (0 ordinary, 1 minor, 2 major)
     uint8    geo[N]     (0 birth, 1 death, 2 citizenship, 3 gazetteer, 4 residue)
     uint8    lon[N]     canonical longitude angle, 0..255 around the disc
+    uint8    scale[N]   book_scale quantized over [BOOK_SCALE_MIN, BOOK_SCALE_MAX]
 
 geo lets the renderer express placement confidence: 0-1 are real coordinates,
 2-3 are sampled from a country (coarse), 4 is genuinely place-less and should
 read as adrift rather than confidently positioned. lon is the PRE-jitter angle
 (stage6 base_angle) quantized to a byte: the renderer hues each book by its home
 region, not its scattered position, and desaturates residue (geo==4) whose angle
-is only a hash. ~11 bytes per figure, ~6 MB for the full corpus, one ArrayBuffer.
+is only a hash. scale is the per-book size (article length); the renderer maps
+the byte back through the bounds in world.json and multiplies its baked book
+length, so size is one continuous axis and tier no longer touches it. ~12 bytes
+per figure, ~7 MB for the full corpus, one ArrayBuffer.
 This is deliberately not the shipping format: no titles, no text, no tiling.
 It exists to get the field on screen so we can judge density, the landing pad,
 the antiquity edge, and whether landmarks read as beacons. Regenerate after any
@@ -39,7 +43,14 @@ from pathlib import Path
 import numpy as np
 import pyarrow.parquet as pq
 
-from stage6_place import R_INNER, R_MAX, RADIUS_ALPHA, TIME_SPAN
+from stage6_place import (
+    BOOK_SCALE_MAX,
+    BOOK_SCALE_MIN,
+    R_INNER,
+    R_MAX,
+    RADIUS_ALPHA,
+    TIME_SPAN,
+)
 
 ROOT = Path(__file__).resolve().parent
 # layout.parquet is Stage 8's topology-adjusted placement (relaxed spacing,
@@ -150,6 +161,8 @@ def export_world() -> None:
                 "TIME_SPAN": TIME_SPAN,
                 "RADIUS_ALPHA": RADIUS_ALPHA,
                 "REF_YEAR": REF_YEAR,
+                "BOOK_SCALE_MIN": BOOK_SCALE_MIN,
+                "BOOK_SCALE_MAX": BOOK_SCALE_MAX,
             }
         )
     )
@@ -157,7 +170,8 @@ def export_world() -> None:
 
 def main() -> None:
     t = pq.read_table(
-        PLACEMENT_PATH, columns=["x", "y", "landmark_tier", "geo_source", "base_angle"]
+        PLACEMENT_PATH,
+        columns=["x", "y", "landmark_tier", "geo_source", "base_angle", "book_scale"],
     )
     n = t.num_rows
 
@@ -174,6 +188,11 @@ def main() -> None:
     # than painting a clean gradient (see base_angle in stage6).
     base = np.asarray(t["base_angle"].to_pylist(), dtype=np.float64)
     lon = np.mod(np.round(base / (2 * np.pi) * 256.0), 256.0).astype(np.uint8)
+    # book_scale -> byte over its known bounds; the runtime inverts with the same
+    # bounds shipped in world.json. Already in-range by construction; clip is safety.
+    bs = np.asarray(t["book_scale"].to_pylist(), dtype=np.float64)
+    frac = (bs - BOOK_SCALE_MIN) / (BOOK_SCALE_MAX - BOOK_SCALE_MIN)
+    scale = np.clip(np.round(frac * 255.0), 0, 255).astype(np.uint8)
 
     OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
     with open(OUT_PATH, "wb") as f:
@@ -183,6 +202,7 @@ def main() -> None:
         f.write(tier.tobytes())
         f.write(geo.tobytes())
         f.write(lon.tobytes())
+        f.write(scale.tobytes())
 
     size_mb = OUT_PATH.stat().st_size / 1e6
     majors = int((tier == 2).sum())

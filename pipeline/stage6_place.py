@@ -57,13 +57,20 @@ sampled from an anchored compatriot, so it spreads across that country's true
 arc and onto the same longitude axis as everyone else. What stays unresolved is genuinely
 place-less in the record and keeps the deterministic per-QID random angle, with
 geo_source left None so the runtime can mark it adrift rather than pretend it
-is anchored. Prominence never enters position; it drives book thickness in the
-runtime, a separate axis.
+is anchored. Neither prominence nor size ever enters position; they are separate
+axes the runtime reads off this table.
 
-That thickness axis is captured here as landmark_tier (major / minor /
-ordinary). A landmark exists purely for the PLAYER's benefit: it is a figure
-the player is more likely to recognize, so a taller book gives them a reference
-point to steer by and orient against while crossing the desert. Recognizability
+Two such axes are baked here. The first is book_scale: a book's physical size,
+mapped from its article's word count (see BOOK_SCALE_* below). The book is the
+article, so size honestly reads as depth of record, and because article length
+is era-neutral it does not smuggle the recency skew back in. The second is
+landmark_tier (major / minor / ordinary), the navigation-beacon axis. A landmark
+exists purely for the PLAYER's benefit: it is a figure the player is more likely
+to recognize, so a beacon gives them a reference point to steer by and orient
+against while crossing the desert. Size and tier are independent: size is how
+much was written, tier is how recognizable the figure is, and the two correlate
+only weakly, so a long article about an obscure person is a big plain book while
+a famous one-paragraph stub is a small beacon. Recognizability
 has two independent sources. The GLOBAL one is an absolute sitelink_count floor:
 cross-lingual coverage means real recognizability wherever a figure sits, which
 is what makes every Roman emperor a landmark. The LOCAL one fills directions and
@@ -146,6 +153,23 @@ UNC_MAX_SCATTER = 350.0   # world units: radial sigma at full uncertainty
 NOTABILITY_FLOOR = 80  # sitelink_count >= this => globally recognizable "major"
 TIER_SECTORS = 24      # local-coverage grid: angular sectors
 TIER_RINGS = 14        # local-coverage grid: radial / era rings
+
+# Book size from article length. The book IS the article: a longer article is a
+# physically bigger book, so size honestly reads as depth of record. This is a
+# SEPARATE axis from landmark_tier above. Tier measures recognizability (fame,
+# sitelinks) and marks navigation beacons; size measures how much was written.
+# The two correlate only ~0.33, so neither substitutes for the other, and size
+# is era-neutral (median article length is ~430 words in every era, antiquity
+# included) so it does not re-introduce the recency skew tier carries.
+#
+# Word count spans 100..50k (p50~430, p99~4900). A raw linear map would let one
+# 50k-word doorstop dwarf the field, so we log-map over a capped range. The
+# result is book_scale, a unitless multiplier the runtime applies to its baked
+# book length and stage 8 uses to size each book's footprint for packing.
+WORDS_FLOOR = 100        # stage 4's article cut: the smallest real article
+WORDS_CAP = 5000         # ~p99; longer articles all read as the largest book
+BOOK_SCALE_MIN = 0.8     # size multiplier at WORDS_FLOOR (shortest article)
+BOOK_SCALE_MAX = 2.6     # size multiplier at WORDS_CAP and beyond
 
 
 def hash_qid(qid: str) -> int:
@@ -376,6 +400,22 @@ def main() -> None:
         f"{n - int(is_major.sum()) - minor_n:,} ordinary"
     )
 
+    # --- book size from article length (see BOOK_SCALE_* above) ---
+    # log map of word count over [WORDS_FLOOR, WORDS_CAP] into the scale range.
+    # None article counts (Stage 3 found no body) cannot survive Stage 4's cut,
+    # so they should not appear here; treat any stray as the floor.
+    awc = np.array(
+        [w if w is not None else WORDS_FLOOR for w in figures["article_word_count"].to_pylist()],
+        dtype=np.float64,
+    )
+    awc = np.clip(awc, WORDS_FLOOR, WORDS_CAP)
+    frac = (np.log(awc) - math.log(WORDS_FLOOR)) / (math.log(WORDS_CAP) - math.log(WORDS_FLOOR))
+    book_scale = BOOK_SCALE_MIN + frac * (BOOK_SCALE_MAX - BOOK_SCALE_MIN)
+    print(
+        f"  book_scale from article words: min {book_scale.min():.2f}, "
+        f"median {np.median(book_scale):.2f}, max {book_scale.max():.2f}"
+    )
+
     out = figures.append_column("radius", pa.array(radii, type=pa.float64()))
     out = out.append_column("angle", pa.array(angle, type=pa.float64()))
     # the canonical pre-jitter angle (raw longitude on the disc, before the
@@ -391,6 +431,7 @@ def main() -> None:
     out = out.append_column("country_qid", pa.array(countries.tolist(), type=pa.string()))
     out = out.append_column("landmark_tier", pa.array(tier.tolist(), type=pa.string()))
     out = out.append_column("date_uncertainty", pa.array(uncertainty, type=pa.float64()))
+    out = out.append_column("book_scale", pa.array(book_scale, type=pa.float64()))
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
     pq.write_table(out, args.out, compression="zstd")
