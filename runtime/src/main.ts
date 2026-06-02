@@ -723,6 +723,11 @@ const TP_BEAM_FADE_FAR = 50;
 // write depth) still occludes the beam behind nearer dunes, so physical occlusion
 // is preserved. Must stay above the highest ground renderOrder (4).
 const TP_BEAM_RENDER_ORDER = 10;
+// Horizontal radius around a circle's centre within which the travel prompt
+// arms. The stones span STONE_CIRCLE_DIAMETER (9 -> 4.5 radius) on a flattened
+// plaza; a touch wider than the ring so you trigger while standing among the
+// stones, not only dead centre.
+const TP_ENTER_RADIUS = 7;
 
 interface Teleporter {
   label: string;
@@ -1276,11 +1281,14 @@ async function main() {
   const glance = document.getElementById("glance") as HTMLDivElement;
   const overlay = document.getElementById("overlay") as HTMLDivElement;
   const card = document.getElementById("card") as HTMLDivElement;
+  const tpPrompt = document.getElementById("tp-prompt") as HTMLDivElement;
+  const fade = document.getElementById("fade") as HTMLDivElement;
   const pick = createPicker(camera, built.px, built.pz);
   const compass = createCompass(camera, built.px, built.pz, meta, world);
 
   let target = -1; // instanceId under the reticle, or -1
   let overlayOpen = false;
+  let nearTp = -1; // teleporter circle the player is standing in, or -1
 
   const renderName = (i: number) => escapeHtml(meta.name(i) || "(untitled)");
   const renderDesc = (i: number) => escapeHtml(meta.desc(i));
@@ -1330,6 +1338,60 @@ async function main() {
     overlayOpen = false;
   }
 
+  // --- teleporter travel ----------------------------------------------------
+  // The 26 circles are an any-to-any fast-travel network across a disc too wide
+  // to walk. Standing in a circle arms the prompt (loop below); T opens this
+  // menu of the other anchors, nearest first, and a pick jumps you there.
+  let traveling = false;
+  function travelTo(dest: number) {
+    if (traveling) return;
+    traveling = true;
+    closeOverlay();
+    fade.style.opacity = "1"; // fade to black (CSS transition: 0.3s)
+    // reposition only once the screen is black, so the pop is never seen; the
+    // eye lands on the baked surface at the circle's centre (walk mode re-pins
+    // it each frame anyway, fly mode keeps it where we put it).
+    window.setTimeout(() => {
+      const tp = teleporters[dest];
+      camera.position.set(tp.x, sampleHeight(tp.x, tp.y) + EYE_HEIGHT, tp.y);
+      fade.style.opacity = "0"; // fade back in on the destination
+      window.setTimeout(() => {
+        traveling = false;
+      }, 300);
+    }, 300);
+  }
+  function openTravel(from: number) {
+    const here = teleporters[from];
+    const rows = teleporters
+      .map((tp, i) => ({ i, d: Math.hypot(tp.x - here.x, tp.y - here.y) }))
+      .filter((o) => o.i !== from)
+      .sort((a, b) => a.d - b.d)
+      .map((o) => {
+        const tp = teleporters[o.i];
+        const line = `${escapeHtml(tp.era)} · ${escapeHtml(tp.seat)} · ${Math.round(o.d).toLocaleString()}u`;
+        return (
+          `<button class="tp-dest" data-i="${o.i}">` +
+          `<span class="tp-label">${escapeHtml(tp.label)}</span>` +
+          `<span class="tp-meta">${line}</span>` +
+          `</button>`
+        );
+      })
+      .join("");
+    card.innerHTML =
+      `<div class="name">◎ ${escapeHtml(here.label)}</div>` +
+      `<div class="desc">Step through to another circle.</div>` +
+      `<div class="tp-list">${rows}</div>` +
+      `<div class="hint">Esc or click outside to close</div>`;
+    card.querySelectorAll<HTMLButtonElement>(".tp-dest").forEach((btn) => {
+      btn.addEventListener("click", () => travelTo(Number(btn.dataset.i)));
+    });
+    overlay.style.display = "flex";
+    overlayOpen = true;
+    glance.style.display = "none";
+    tpPrompt.style.display = "none";
+    controls.unlock(); // free the cursor so destinations are clickable
+  }
+
   // click on the backdrop (not the card) closes; clicking the card/link doesn't.
   overlay.addEventListener("click", (e) => {
     if (e.target === overlay) closeOverlay();
@@ -1337,13 +1399,15 @@ async function main() {
   document.addEventListener("keydown", (e) => {
     if (e.code === "KeyE" && !overlayOpen && controls.isLocked && target >= 0) {
       openOverlay(target);
+    } else if (e.code === "KeyT" && !overlayOpen && controls.isLocked && nearTp >= 0) {
+      openTravel(nearTp);
     } else if (e.code === "Escape" && overlayOpen) {
       closeOverlay();
     }
   });
 
   const hint =
-    "click to look · WASD move · Shift run · F fly · Space/C up·down · E inspect · Esc release";
+    "click to look · WASD move · Shift run · F fly · Space/C up·down · E inspect · T travel · Esc release";
   const setHud = (flying: boolean) => {
     info.innerHTML = `${field.n.toLocaleString()} figures · ${
       flying ? "flying" : "walking"
@@ -1389,6 +1453,34 @@ async function main() {
     } else if (glance.style.display !== "none") {
       glance.style.display = "none";
       target = -1;
+    }
+
+    // teleporter proximity: arm the travel prompt when standing in a circle.
+    // xz only (height is irrelevant) and just 26 anchors, so it runs every frame
+    // for an instant prompt. Rebuild the prompt text only when the circle changes.
+    {
+      let found = -1;
+      const cx = camera.position.x;
+      const cz = camera.position.z;
+      for (let i = 0; i < teleporters.length; i++) {
+        const dx = teleporters[i].x - cx;
+        const dz = teleporters[i].y - cz;
+        if (dx * dx + dz * dz <= TP_ENTER_RADIUS * TP_ENTER_RADIUS) {
+          found = i;
+          break;
+        }
+      }
+      if (found !== nearTp) {
+        nearTp = found;
+        if (nearTp >= 0) {
+          const tp = teleporters[nearTp];
+          tpPrompt.innerHTML =
+            `<div class="tp-here">◎ ${escapeHtml(tp.label)}</div>` +
+            `<div class="tp-act">press <kbd>T</kbd> to travel</div>`;
+        }
+      }
+      const armed = nearTp >= 0 && !overlayOpen && controls.isLocked;
+      tpPrompt.style.display = armed ? "block" : "none";
     }
 
     // keep the clipmap centred on the camera: each level re-tessellates only when

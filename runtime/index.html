@@ -206,6 +206,88 @@
         border-radius: 4px;
         display: none;
       }
+      /* teleporter prompt: appears at the foot of the screen when you stand in a
+         stone circle. Cool blue to match the light shaft and set travel apart from
+         the warm book inspect. Never interactive (the T key drives it). */
+      #tp-prompt {
+        position: fixed;
+        left: 50%;
+        bottom: 60px;
+        transform: translateX(-50%);
+        padding: 9px 18px;
+        font: 14px/1.4 system-ui, sans-serif;
+        color: #dfe8ff;
+        background: rgba(31, 52, 110, 0.55);
+        border: 1px solid rgba(47, 108, 255, 0.6);
+        border-radius: 6px;
+        text-align: center;
+        pointer-events: none;
+        user-select: none;
+        display: none;
+      }
+      #tp-prompt .tp-here {
+        font-weight: 600;
+      }
+      #tp-prompt .tp-act {
+        margin-top: 2px;
+        font-size: 13px;
+        opacity: 0.85;
+      }
+      #tp-prompt kbd {
+        font: inherit;
+        font-weight: 600;
+        padding: 1px 6px;
+        border-radius: 4px;
+        background: rgba(47, 108, 255, 0.55);
+        color: #fff;
+      }
+      /* travel menu: the destination list, reusing #overlay/#card. The rows are
+         the 26 anchors (current one omitted), nearest first. */
+      #card .tp-list {
+        margin-top: 16px;
+        max-height: 52vh;
+        overflow-y: auto;
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+      }
+      #card .tp-dest {
+        display: flex;
+        flex-direction: column;
+        align-items: flex-start;
+        width: 100%;
+        padding: 8px 12px;
+        text-align: left;
+        border: none;
+        border-radius: 5px;
+        cursor: pointer;
+        background: #cdbd99;
+        color: #3a2f1f;
+        font: inherit;
+      }
+      #card .tp-dest:hover {
+        background: #2f6cff;
+        color: #fff;
+      }
+      #card .tp-dest .tp-label {
+        font-weight: 600;
+      }
+      #card .tp-dest .tp-meta {
+        font-size: 12px;
+        opacity: 0.7;
+        font-variant-numeric: tabular-nums;
+      }
+      /* fade-to-black for the jump. Sits above everything (HUD included) while the
+         camera repositions, then fades back. */
+      #fade {
+        position: fixed;
+        inset: 0;
+        background: #000;
+        opacity: 0;
+        pointer-events: none;
+        transition: opacity 0.3s ease;
+        z-index: 200;
+      }
     </style>
   </head>
   <body>
@@ -218,9 +300,11 @@
       <div id="compass-era"></div>
       <div id="compass-label"></div>
     </div>
+    <div id="tp-prompt"></div>
     <div id="overlay">
       <div id="card"></div>
     </div>
+    <div id="fade"></div>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>
