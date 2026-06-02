@@ -11,6 +11,7 @@ import {
   facetHeight,
   createGround,
   applyDistanceFade,
+  type PlayerUniform,
 } from "./terrain";
 import { buildSky } from "./sky";
 
@@ -57,6 +58,33 @@ const HUE_OFFSET = 0.0; // rotate the wheel so a chosen region lands on a chosen
 // shader patch). Authored sRGB; THREE.Color stores it linear, matching the
 // linear diffuseColor the patch injects into.
 const PAGE_CREAM = new THREE.Color(0xece2cc);
+
+// Proximity glow: the field rests dark and a book lights up to its full colour
+// (plus a soft additive bloom) as the player comes within range, so walking the
+// disc carries a travelling pool of light with you and the world reads as
+// reactive. The radius is the shared "near the player" notion the terrain
+// lighting can later ride on too. A book is fully lit within GLOW_INNER, dark
+// beyond GLOW_RADIUS, and ramps between. GLOW_REST_DIM is how dark the resting
+// field is (0 = near-black, 1 = full colour always; lower kills the cross-disc
+// geo-hue read in exchange for a starker reveal). GLOW_BOOST is the extra
+// additive glow at the centre of the pool. Eyeball knobs.
+const GLOW_RADIUS = 36; // books dark beyond this horizontal distance from the player
+const GLOW_INNER = 8; // full brightness within this
+const GLOW_REST_DIM = 0.12; // resting brightness of a near book outside the pool (0 = black)
+const GLOW_REST_FAR = 0.4; // resting brightness once distance-faded; higher than REST_DIM
+//   so far books are dim dusty specks, not max-contrast black confetti. The dark
+//   specks on bright sand were the worst of the sub-pixel flicker, so lifting the
+//   far floor trades a little of the stark dark field for a calmer horizon.
+const GLOW_BOOST = 0.6; // additive bloom at the pool centre
+
+interface GlowUniforms {
+  uPlayer: PlayerUniform;
+  uGlowRadius: { value: number };
+  uGlowInner: { value: number };
+  uRestDim: { value: number };
+  uRestFar: { value: number };
+  uGlowBoost: { value: number };
+}
 
 // Per-instance variety to break up the uniform-grid read. Rotation/tilt/footprint
 // are decorative (seeded, don't move the book). SCATTER does move it: a render-only
@@ -212,6 +240,56 @@ function applyPageMask(mat: THREE.Material): void {
       .replace(
         "#include <color_fragment>",
         `#include <color_fragment>\ndiffuseColor.rgb = mix(diffuseColor.rgb, ${cream}, vPage);`,
+      );
+  };
+}
+
+// Light a book up by proximity to the player. Chains onto whatever onBeforeCompile
+// is already set (call AFTER applyDistanceFade / applyPageMask). The book's world
+// xz is carried to the fragment shader; the patch then dims the final lit colour
+// toward uRestDim with distance and adds a soft additive glow inside the pool.
+// Works on the box base, the mid and the near tiers alike (all InstancedMesh, so
+// instanceMatrix is in scope), so a book reveals identically whichever LOD draws
+// it. The dim/glow run on gl_FragColor after lighting (at <opaque_fragment>),
+// before the distance-fade alpha at <dithering_fragment>, so a far book both dims
+// and fades. The shared uniforms object is assigned by reference to every patched
+// material, so updating uPlayer once per frame moves the pool on all of them.
+function applyProximityGlow(mat: THREE.Material, uni: GlowUniforms): void {
+  const prev = mat.onBeforeCompile;
+  mat.onBeforeCompile = (shader, renderer) => {
+    if (prev) prev.call(mat, shader, renderer);
+    shader.uniforms.uPlayer = uni.uPlayer;
+    shader.uniforms.uGlowRadius = uni.uGlowRadius;
+    shader.uniforms.uGlowInner = uni.uGlowInner;
+    shader.uniforms.uRestDim = uni.uRestDim;
+    shader.uniforms.uRestFar = uni.uRestFar;
+    shader.uniforms.uGlowBoost = uni.uGlowBoost;
+    shader.vertexShader = shader.vertexShader
+      .replace(
+        "#include <common>",
+        "#include <common>\nvarying vec2 vGlowXZ;",
+      )
+      .replace(
+        "#include <project_vertex>",
+        "#include <project_vertex>\nvGlowXZ = (modelMatrix * instanceMatrix * vec4(transformed, 1.0)).xz;",
+      );
+    shader.fragmentShader = shader.fragmentShader
+      .replace(
+        "#include <common>",
+        "#include <common>\nvarying vec2 vGlowXZ;\nuniform vec2 uPlayer;\n" +
+          "uniform float uGlowRadius;\nuniform float uGlowInner;\n" +
+          "uniform float uRestDim;\nuniform float uRestFar;\nuniform float uGlowBoost;",
+      )
+      .replace(
+        "#include <opaque_fragment>",
+        `#include <opaque_fragment>
+         float glowD = distance(vGlowXZ, uPlayer);
+         float glow = 1.0 - smoothstep(uGlowInner, uGlowRadius, glowD);
+         // the resting floor lifts toward uRestFar as the book distance-fades (vGroundFade,
+         // set by applyDistanceFade upstream), so far specks lose contrast and stop crawling.
+         float restFloor = mix(uRestDim, uRestFar, vGroundFade);
+         gl_FragColor.rgb *= mix(restFloor, 1.0, glow);
+         gl_FragColor.rgb += gl_FragColor.rgb * glow * uGlowBoost;`,
       );
   };
 }
@@ -441,6 +519,7 @@ function buildField(
   field: Awaited<ReturnType<typeof loadPositions>>,
   bookNear: THREE.BufferGeometry, // LOD00, full detail, drawn closest
   bookMid: THREE.BufferGeometry, // LOD01, drawn across the mid band
+  uPlayer: PlayerUniform, // shared player-position uniform (also drives the ground rake)
 ) {
   const { n, x, y, tier, geo, lon, scale } = field;
   // the scale byte is the normalized article length (export_runtime quantized the
@@ -487,26 +566,65 @@ function buildField(
   // floating over ground that has already faded out. The page mask chains on after
   // the fade so cover vertices keep the geo hue and page edges stay cream; both
   // detailed tiers carry it (both have aPage), the box has no pages so it only fades.
+  // shared proximity-glow uniforms: one object referenced by every book material,
+  // so moving uPlayer once per frame lights the pool on all three LOD tiers.
+  const glow: GlowUniforms = {
+    uPlayer,
+    uGlowRadius: { value: GLOW_RADIUS },
+    uGlowInner: { value: GLOW_INNER },
+    uRestDim: { value: GLOW_REST_DIM },
+    uRestFar: { value: GLOW_REST_FAR },
+    uGlowBoost: { value: GLOW_BOOST },
+  };
   const farMat = new THREE.MeshLambertMaterial();
   applyDistanceFade(farMat);
+  applyProximityGlow(farMat, glow);
   const midMat = new THREE.MeshLambertMaterial();
   applyDistanceFade(midMat);
   applyPageMask(midMat);
+  applyProximityGlow(midMat, glow);
   const nearMat = new THREE.MeshLambertMaterial();
   applyDistanceFade(nearMat);
   applyPageMask(nearMat);
+  applyProximityGlow(nearMat, glow);
+  // All three now share applyProximityGlow as their outermost onBeforeCompile, so
+  // their default program-cache keys (= onBeforeCompile.toString(), closure vars
+  // excluded) collide. far has no page mask while mid/near do, so without a
+  // distinguishing key three would hand all three whichever program compiled
+  // first. Key on the actual patch stack: mid/near are identical (share a program,
+  // correct), far is its own. Same defence the ground material uses for its holes.
+  farMat.customProgramCacheKey = () => "book:fade+glow";
+  midMat.customProgramCacheKey = () => "book:fade+page+glow";
+  nearMat.customProgramCacheKey = () => "book:fade+page+glow";
 
+  // Explicit renderOrder, the same discipline the ground clipmap uses (terrain.ts,
+  // "all transparent and share the camera's centre, so Three's distance sort flips
+  // per frame and double-blends"). The books are transparent too and were all left
+  // at renderOrder 0, tied with each other and with ground level 0, so the sort
+  // flipped and the overlaps strobed: every near/mid book is also drawn by the
+  // always-on box, and the dense wedge keeps swapping books between the mid mesh and
+  // the box as MID_CAP overflows. Fixed by sequencing them deterministically: the
+  // ground levels draw first (renderOrder 0..4, finest first), then the detail
+  // meshes, then the box LAST. With depthWrite on, the detail writes depth at its
+  // larger front surface and the shrunk box behind it fails the test and is never
+  // blended on top, so a book resolves to exactly one layer regardless of camera
+  // motion. Stays below the teleporter beam (renderOrder 10).
+  const RO_DETAIL = 5; // near/mid detail: after the ground, before the box
+  const RO_BOX = 7; // the always-on box base: drawn last so detail occludes it
   const farMesh = new THREE.InstancedMesh(boxGeo, farMat, n);
   farMesh.instanceMatrix.setUsage(THREE.StaticDrawUsage);
   farMesh.frustumCulled = false; // spans the whole disc; never wholly off-screen
+  farMesh.renderOrder = RO_BOX;
   const midMesh = new THREE.InstancedMesh(bookMid, midMat, MID_CAP);
   midMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
   midMesh.frustumCulled = false; // rebuilt around the camera, bounds don't apply
   midMesh.count = 0;
+  midMesh.renderOrder = RO_DETAIL;
   const nearMesh = new THREE.InstancedMesh(bookNear, nearMat, NEAR_CAP);
   nearMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
   nearMesh.frustumCulled = false;
   nearMesh.count = 0;
+  nearMesh.renderOrder = RO_DETAIL;
 
   // keep the rendered (jittered) ground positions so the look-at picker aims at
   // where a book actually stands, not its pre-scatter pipeline coordinate.
@@ -1171,16 +1289,18 @@ async function main() {
   // single fog colour was the alternative but it can only tint distant surfaces
   // toward one flat colour (brightening the grey void or darkening the present)
   // and, worse, leaves opaque geometry whose square footprint shows from a height.
-  // HORIZON is the tone the land dissolves into: it is handed to the dome as its
-  // ground-haze colour so land and sky meet without a colour step.
+  // The land fades to TRANSPARENT (alpha, not a colour step), so the dome supplies
+  // whatever the far desert dissolves into and the two no longer need a matched
+  // tone; HORIZON is only the clear-colour behind the dome, rarely seen.
   const HORIZON = new THREE.Color(0x847b6d);
   scene.background = HORIZON;
 
-  // gradient sky dome, horizon band pinned to the fog colour so distant ground
-  // dissolves into it. It recentres on the camera each frame (see the loop), so
-  // it reads as infinitely far and the world never shows an edge against it.
-  const sky = buildSky(HORIZON);
-  scene.add(sky);
+  // time-encoded sky dome (see sky.ts): a warm present-glow toward the world
+  // origin, cooling and darkening toward the deep-past rim, the dome deepening
+  // with the player's radial depth. It recentres on the camera each frame (see
+  // the loop) so it reads as infinitely far and the world never shows an edge.
+  const sky = buildSky();
+  scene.add(sky.mesh);
 
   const camera = new THREE.PerspectiveCamera(
     70,
@@ -1217,10 +1337,14 @@ async function main() {
   camera.position.set(0, sampleHeight(0, 0) + EYE_HEIGHT, 0);
   camera.lookAt(0, 0, 8000);
 
-  // low sun for long shadows-of-mood later; flat lambert for now.
-  scene.add(new THREE.HemisphereLight(0xfff1d0, 0x8a7350, 1.1));
-  const sun = new THREE.DirectionalLight(0xffe8c0, 1.4);
-  sun.position.set(-400, 300, 200);
+  // Dusk rig matching the time-sky: a low, warm, raking sun so every dune face
+  // shows light/dark contrast (a grazing sun maximises the cosine difference
+  // between slopes, which is what makes the dunes read as 3D), over a dim, cool
+  // hemisphere ambient so the directional term dominates instead of flooding the
+  // slopes flat. The old high sun + strong ambient washed the relief out.
+  scene.add(new THREE.HemisphereLight(0xffd9b3, 0x2b2f47, 0.5));
+  const sun = new THREE.DirectionalLight(0xffb066, 2.3);
+  sun.position.set(-700, 130, 380); // ~9deg elevation: grazing, long tonal gradients
   scene.add(sun);
 
   // --- load profiling -------------------------------------------------------
@@ -1258,16 +1382,20 @@ async function main() {
   // sampleHeight/sampleNormal now, so they seat on the same baked surface the
   // clipmap draws (no float-off; the analytic field is only the heightmap fallback).
   initTerrain(teleporters);
+  // one player-position uniform shared by the ground's raking light and the books'
+  // proximity glow, so both reactive pools track the same centre (the overlapping
+  // light radii). Updated once per frame in the loop.
+  const uPlayer: PlayerUniform = { value: new THREE.Vector2(0, 0) };
   // the ground is a camera-following clipmap tessellated from the heightmap (see
   // terrain.createGround); no static mesh ships any more.
-  const ground = createGround();
+  const ground = createGround(uPlayer);
   ground.update(camera.position.x, camera.position.z);
   scene.add(ground.group);
   // settle the eye onto the baked surface now the heightmap is loaded (spawn was
   // placed on the analytic fallback before the fetch resolved).
   camera.position.y = sampleHeight(camera.position.x, camera.position.z) + EYE_HEIGHT;
   mark("terrain");
-  const built = buildField(field, bookLods[0], bookLods[1]);
+  const built = buildField(field, bookLods[0], bookLods[1], uPlayer);
   mark("seat books");
   built.update(camera.position.x, camera.position.z);
   scene.add(built.group);
@@ -1496,7 +1624,20 @@ async function main() {
     heads.update(camera); // pick each head's LOD by camera distance (a handful)
 
     compass.update();
-    sky.position.copy(camera.position); // keep the dome centred on the viewer
+    // travelling pools of light: move the shared player-position uniform (book
+    // glow + ground rake) to the player every frame. The book LOD refill and the
+    // clipmap rebuild are both gated by their move distance, far too coarse for a
+    // smooth pool, so the uniform is driven here, not in their update()s.
+    uPlayer.value.set(camera.position.x, camera.position.z);
+    // keep the dome centred on the viewer, and steer the time-sky: warm present
+    // toward the origin, the dome deepening with radial depth into the past.
+    sky.mesh.position.copy(camera.position);
+    const depth = clamp(
+      Math.hypot(camera.position.x, camera.position.z) / world.R_MAX,
+      0,
+      1,
+    );
+    sky.update(camera.position.x, camera.position.z, depth);
     renderer.render(scene, camera);
 
     // read renderer.info AFTER render (it resets per frame), throttled to ~4 Hz so

@@ -160,8 +160,8 @@ const COLOR_WAVELENGTH = 900; // patch-noise scale for the painted wobble
 // coarse LODs. All four are eyeball knobs.
 const RELIEF_CELLS = 3; // neighbour offset in cells: the relief's read wavelength
 const RELIEF_SCALE = 0.25; // slope-difference that reaches the full crest/trough tint
-const CREST_LIGHT = 0.1; // crest lightens / trough darkens (the dominant read)
-const CREST_SAT = 0.05; // crest bleaches / trough deepens
+const CREST_LIGHT = 0.15; // crest lightens / trough darkens (the dominant read)
+const CREST_SAT = 0.07; // crest bleaches / trough deepens
 const CREST_HUE = 0.012; // crest warms / trough cools
 
 // Time rings: radius is time, so a gentle ripple in lightness (and a hair of
@@ -187,6 +187,27 @@ const RING_HUE = 0.004; // warm/cool swing across a ring (subtle)
 // (finest first) so each overlap is won by the finer level and blended once.
 export const FADE_START = 3000; // fully opaque within this distance of the camera
 export const FADE_END = 6500; // fully gone (dome shows through) beyond this
+
+// Player raking light: a warm pool that follows the player and rakes across the
+// dune facets near them, so the near ground reads as reactive (the moving
+// gradient on the dunes). It is additive in WORLD space, lit by each facet's own
+// world-derived normal (cross of the position derivatives the flat shading already
+// computes), so it tilts with the dune faces rather than washing them flat. The
+// centre (uPlayer) is shared with the book glow; this radius is its own. Colour is
+// baked into the GLSL as a linear literal, like the distance fade. Eyeball knobs.
+const PLAYER_LIGHT_COLOR = new THREE.Color(0xffc89c); // warm pool
+const PLAYER_LIGHT_RADIUS = 42; // raking fades out by this horizontal distance
+const PLAYER_LIGHT_INNER = 2; // full reach within this
+const PLAYER_LIGHT_STRENGTH = 0.55; // additive intensity at the pool centre
+const PLAYER_LIGHT_HEIGHT = 6; // light's height over the player; lower = more grazing
+const _pl = PLAYER_LIGHT_COLOR.clone().convertSRGBToLinear();
+const PLAYER_LIGHT_RGB = `vec3(${_pl.r.toFixed(4)}, ${_pl.g.toFixed(4)}, ${_pl.b.toFixed(4)})`;
+
+// A live uniform carrying the player's world-xz position, shared between the
+// ground's raking light and the books' proximity glow so both pools share a centre.
+export interface PlayerUniform {
+  value: THREE.Vector2;
+}
 
 // --- camera-following ground LOD (geometry clipmap) -------------------------
 // The ground is built entirely from the shipped heightmap as concentric square
@@ -431,6 +452,7 @@ export function sampleNormal(
 function applyGroundMaterial(
   mat: THREE.MeshLambertMaterial,
   holeHalf: number,
+  uPlayer: PlayerUniform,
 ): { value: THREE.Vector2 } | null {
   mat.transparent = true;
   const holeCenter = holeHalf > 0 ? { value: new THREE.Vector2(0, 0) } : null;
@@ -439,14 +461,16 @@ function applyGroundMaterial(
   // Three's program-cache key (which sees only onBeforeCompile's source text,
   // identical across levels). Without this, all levels would share whichever
   // program compiled first and render wrong. Keying on holeHalf forces a distinct
-  // program per level.
+  // program per level. The raking light's source is identical across levels, so it
+  // needs no part in the key.
   mat.customProgramCacheKey = () => `ground:${holeHalf}`;
   mat.onBeforeCompile = (shader) => {
     if (holeCenter) shader.uniforms.uHoleCenter = holeCenter;
+    shader.uniforms.uPlayer = uPlayer;
     shader.vertexShader = shader.vertexShader
       .replace(
         "#include <common>",
-        "#include <common>\nvarying float vGroundFade;" +
+        "#include <common>\nvarying float vGroundFade;\nvarying vec3 vWorldPos;" +
           (holeCenter ? "\nvarying vec2 vGroundXZ;" : ""),
       )
       .replace(
@@ -454,14 +478,15 @@ function applyGroundMaterial(
         `#include <project_vertex>
          vGroundFade = clamp(
            (length(mvPosition.xyz) - ${FADE_START.toFixed(1)}) / ${fadeSpan},
-           0.0, 1.0);` +
+           0.0, 1.0);
+         vWorldPos = (modelMatrix * vec4(transformed, 1.0)).xyz;` +
           (holeCenter
-            ? `\n         vGroundXZ = (modelMatrix * vec4(transformed, 1.0)).xz;`
+            ? `\n         vGroundXZ = vWorldPos.xz;`
             : ""),
       );
     let frag = shader.fragmentShader.replace(
       "#include <common>",
-      "#include <common>\nvarying float vGroundFade;" +
+      "#include <common>\nvarying float vGroundFade;\nvarying vec3 vWorldPos;\nuniform vec2 uPlayer;" +
         (holeCenter
           ? "\nuniform vec2 uHoleCenter;\nvarying vec2 vGroundXZ;"
           : ""),
@@ -474,6 +499,25 @@ function applyGroundMaterial(
          if (max(holeD.x, holeD.y) < ${holeHalf.toFixed(1)}) discard;`,
       );
     }
+    // Raking pool, additive after lighting (linear space, before the colorspace
+    // encode). The world-space face normal comes from the position derivatives the
+    // flat shading already relies on, oriented upward; the light sits a little above
+    // the player, so facets tilted toward the pool brighten and the gradient sweeps
+    // the dunes as the player moves. Falls to zero past the radius, so distant levels
+    // pay only the derivative + a few ops.
+    frag = frag.replace(
+      "#include <opaque_fragment>",
+      `#include <opaque_fragment>
+       {
+         vec3 wn = normalize(cross(dFdx(vWorldPos), dFdy(vWorldPos)));
+         if (wn.y < 0.0) wn = -wn;
+         vec3 toP = vec3(uPlayer.x - vWorldPos.x, ${PLAYER_LIGHT_HEIGHT.toFixed(1)}, uPlayer.y - vWorldPos.z);
+         float pdist = length(toP.xz);
+         float fall = 1.0 - smoothstep(${PLAYER_LIGHT_INNER.toFixed(1)}, ${PLAYER_LIGHT_RADIUS.toFixed(1)}, pdist);
+         float rake = max(dot(wn, normalize(toP)), 0.0);
+         gl_FragColor.rgb += ${PLAYER_LIGHT_RGB} * (${PLAYER_LIGHT_STRENGTH.toFixed(2)} * fall * rake);
+       }`,
+    );
     shader.fragmentShader = frag.replace(
       "#include <dithering_fragment>",
       "#include <dithering_fragment>\ngl_FragColor.a *= 1.0 - vGroundFade;",
@@ -629,6 +673,7 @@ function buildGroundLevel(
   level: GroundLevel,
   index: number,
   hasCoarser: boolean,
+  uPlayer: PlayerUniform,
 ): {
   mesh: THREE.Mesh;
   track: (camX: number, camZ: number) => void;
@@ -676,7 +721,7 @@ function buildGroundLevel(
     vertexColors: true,
     flatShading: true,
   });
-  const holeCenter = applyGroundMaterial(mat, hole);
+  const holeCenter = applyGroundMaterial(mat, hole, uPlayer);
   // The morph leaves the fine outer ring coplanar with the coarse hole edge they
   // meet at. renderOrder (below) draws finer first, but GL_LESS lets a coplanar
   // coarse fragment that rounds to the same depth slip through and z-fight as a
@@ -816,13 +861,13 @@ function buildGroundLevel(
 // grouped. update() drives them all (each snaps to its own cell, so the coarse
 // levels rebuild rarely). Built entirely from the heightmap, so ground.bin and the
 // analytic dune code are both retired.
-export function createGround(): {
+export function createGround(uPlayer: PlayerUniform): {
   group: THREE.Group;
   update: (camX: number, camZ: number) => void;
 } {
   const group = new THREE.Group();
   const levels = GROUND_LEVELS.map((lvl, i) =>
-    buildGroundLevel(lvl, i, i < GROUND_LEVELS.length - 1),
+    buildGroundLevel(lvl, i, i < GROUND_LEVELS.length - 1, uPlayer),
   );
   for (const l of levels) group.add(l.mesh);
   let primed = false; // first call builds every level; after that, one per frame
