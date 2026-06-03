@@ -1637,14 +1637,25 @@ async function main() {
   // settle the eye onto the baked surface now the heightmap is loaded (spawn was
   // placed on the analytic fallback before the fetch resolved).
   camera.position.y = sampleHeight(camera.position.x, camera.position.z) + EYE_HEIGHT;
-  // bound the player inside the content disc, well within the terrain mesh and the
-  // distance fog, so skating outward eases to a stop in haze rather than reaching the
-  // ground's edge.
-  MOVE.boundSoft = world.R_MAX + 300;
-  MOVE.boundHard = world.R_MAX + 800;
   mark("terrain");
   const built = buildField(field, bookLods[0], bookLods[1], uPlayer, clouds.uniforms);
   mark("seat books");
+
+  // Wall the player just past the outermost book. R_MAX (the nominal time-radius) is
+  // the wrong number: the date-uncertainty frontier scatters books well beyond it (the
+  // furthest sits near 8080 vs an R_MAX of 7100), so the wall is derived from the
+  // actual render positions and self-corrects on a data regen. Clamped inside the mesh
+  // half-extent so the stop lands in fog over real ground, never at the mesh edge.
+  let maxR2 = 0;
+  for (let i = 0; i < built.px.length; i++) {
+    const d = built.px[i] * built.px[i] + built.pz[i] * built.pz[i];
+    if (d > maxR2) maxR2 = d;
+  }
+  const outermost = Math.sqrt(maxR2);
+  const meshLimit = heightmap.worldSize / 2 - 200; // keep clear of the mesh edge
+  MOVE.boundSoft = Math.min(outermost + 250, meshLimit - 450);
+  MOVE.boundHard = Math.min(outermost + 700, meshLimit);
+
   built.update(camera.position.x, camera.position.z);
   scene.add(built.group);
   scene.add(buildTeleporters(teleporters, stoneCircle, clouds.uniforms));
