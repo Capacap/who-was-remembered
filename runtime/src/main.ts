@@ -1339,11 +1339,19 @@ async function main() {
   // dunes. Used below for the DirectionalLight too.
   const SUN_POS = new THREE.Vector3(-700, 130, 380);
 
-  // dusk sky dome (see sky.ts): a warm glow fixed at the sun bearing, cooling to
-  // the anti-sun side, the whole dome deepening with the player's radial depth into
-  // the past. It recentres on the camera each frame (see the loop) so it reads as
-  // infinitely far and the world never shows an edge.
-  const sky = buildSky(SUN_POS);
+  // drifting cloud shadows (see clouds.ts): one shared mask + time, sampled at the
+  // world xz of the ground, books, heads and stones so the same shadow falls on a
+  // book and the sand under it, AND at the sky dome's pierce points so the storm's
+  // breaks open over the lit patches. The scene's main source of large-scale motion.
+  // Built before the sky because the dome shares its uniforms.
+  const clouds = buildClouds();
+
+  // storm sky dome (see sky.ts): a near-black cloud ceiling whose breaks are cut by
+  // the same drifting field that lights the ground, so the sky opens where the dunes
+  // beneath are lit. A warm glow stays fixed at the sun bearing; the whole dome
+  // deepens with the player's radial depth into the past. It recentres on the camera
+  // each frame (see the loop) so it reads as infinitely far and never shows an edge.
+  const sky = buildSky(SUN_POS, clouds.uniforms);
   scene.add(sky.mesh);
 
   const camera = new THREE.PerspectiveCamera(
@@ -1431,10 +1439,6 @@ async function main() {
   // proximity glow, so both reactive pools track the same centre (the overlapping
   // light radii). Updated once per frame in the loop.
   const uPlayer: PlayerUniform = { value: new THREE.Vector2(0, 0) };
-  // drifting cloud shadows (see clouds.ts): one shared mask + time, sampled at the
-  // world xz of the ground, books, heads and stones so the same shadow falls on a
-  // book and the sand under it. The scene's main source of large-scale motion.
-  const clouds = buildClouds();
   // the ground is one static mesh tessellated from the heightmap (terrain.buildGround):
   // no camera-following, no rebuild, no LOD seams. It just sits there; the raking light
   // and cloud shadow ride on shared uniforms updated in the loop.
@@ -1684,7 +1688,7 @@ async function main() {
       0,
       1,
     );
-    sky.update(depth);
+    sky.update(depth, camera.position.x, camera.position.z);
     renderer.render(scene, camera);
 
     // read renderer.info AFTER render (it resets per frame), throttled to ~4 Hz so

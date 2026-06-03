@@ -201,11 +201,34 @@ export const CLOUD_FRAG_COMMON = /* glsl */ `
   }
 `;
 
+// The sky-side reader of the SAME drifting field. Declares the shared uniforms and
+// skyCover(worldXZ), the raw weighted coverage [0,1] (NOT run through the ground's
+// day/night smoothstep, so the sky can pick its own, much narrower open threshold).
+// Splice into the sky dome's fragment <common>; the dome passes shared uClouds and
+// uCloudTime so its breaks drift in lockstep with the ground's lit patches. It uses
+// auto-mip texture2D rather than the explicit-LOD fetch the ground needs: the dome is
+// a smooth surface with no grazing-angle uv blow-up to dodge, and toward the horizon
+// the pierce point races outward, where auto-mip coarsening is exactly what keeps the
+// far breaks from aliasing. The uv math reuses the same JS-computed scale and wind
+// literals as cloudShadow, so the two fields cannot drift apart numerically.
+export const SKY_CLOUD_COMMON = /* glsl */ `
+  uniform sampler2D uClouds;
+  uniform float uCloudTime;
+  float skyCover(vec2 wxz) {
+    vec2 uv1 = wxz * ${(1 / SCALE1).toFixed(7)} + vec2(${_v1[0].toFixed(7)}, ${_v1[1].toFixed(7)}) * uCloudTime;
+    vec2 uv2 = wxz * ${(1 / SCALE2).toFixed(7)} + vec2(${_v2[0].toFixed(7)}, ${_v2[1].toFixed(7)}) * uCloudTime;
+    return texture2D(uClouds, uv1).r * ${WEIGHT1.toFixed(2)} + texture2D(uClouds, uv2).r * ${WEIGHT2.toFixed(2)};
+  }
+`;
+
 // The apply block: blend the night/day multiplier by the mask at the given world xz,
-// faded back to neutral by fadeExpr (the distance dissolve, so the far field stays
-// clean; pass "0.0" where there is no fade, e.g. opaque props). camDistExpr is the
-// fragment's view-space distance, feeding the explicit cloud mip. Splice after
-// <opaque_fragment>.
+// faded toward the NIGHT floor by fadeExpr as the surface recedes into the distance
+// dissolve, so the far field sinks into darkness to meet the near-black storm dome at
+// the horizon (it used to fade to neutral, which left the far dunes at full albedo,
+// glowing bright against the black sky). Fading to a CONSTANT keeps the far field
+// free of the cloud dappling's high-frequency flicker either way. Pass "0.0" where
+// there is no fade, e.g. opaque props. camDistExpr is the fragment's view-space
+// distance, feeding the explicit cloud mip. Splice after <opaque_fragment>.
 export function cloudApplyGLSL(
   xzExpr: string,
   fadeExpr: string,
@@ -215,7 +238,7 @@ export function cloudApplyGLSL(
     {
       float _lit = cloudShadow(${xzExpr}, ${camDistExpr});
       vec3 _tint = mix(${NIGHT_GLSL}, ${DAY_GLSL}, _lit);
-      _tint = mix(_tint, vec3(1.0), ${fadeExpr});
+      _tint = mix(_tint, ${NIGHT_GLSL}, ${fadeExpr});
       _tint = mix(vec3(1.0), _tint, uCloudMix); // diagnostic kill switch
       gl_FragColor.rgb *= _tint;
     }`;

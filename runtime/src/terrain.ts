@@ -475,8 +475,8 @@ function applyGroundMaterial(
          float rake = max(dot(wn, normalize(toP)), 0.0);
          gl_FragColor.rgb += ${PLAYER_LIGHT_RGB} * (${PLAYER_LIGHT_STRENGTH.toFixed(2)} * fall * rake);
        }` +
-        // drifting cloud shadow over the dunes, faded back out into the distance
-        // dissolve so the far ground keeps its clean fade into the dome.
+        // drifting cloud shadow over the dunes, sinking toward the night floor into
+        // the distance dissolve so the far ground darkens to meet the black storm dome.
         cloudApplyGLSL("vCloudXZ", "vGroundFade", "vCloudDist"),
     );
     shader.fragmentShader = frag.replace(
