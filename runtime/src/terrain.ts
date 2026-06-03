@@ -208,7 +208,7 @@ const PLAYER_LIGHT_RGB = `vec3(${_pl.r.toFixed(4)}, ${_pl.g.toFixed(4)}, ${_pl.b
 // uSkate (0..1) in the loop so it eases in/out with the mode. Eyeball knobs, baked as
 // GLSL literals like the warm pool; rebuild to retune.
 const SKATE_GLOW_COLOR = new THREE.Color(0x4a86ff); // cool blue pool
-const SKATE_GLOW_RADIUS = 60; // wider than the warm rake, reads as a halo
+const SKATE_GLOW_RADIUS = 36; // a tight pool right under the player
 const SKATE_GLOW_INNER = 2;
 const SKATE_GLOW_STRENGTH = 0.8; // additive intensity at centre, times uSkate
 const _sg = SKATE_GLOW_COLOR.clone().convertSRGBToLinear();
