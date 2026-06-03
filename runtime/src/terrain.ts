@@ -195,9 +195,9 @@ export const FADE_END = 6500; // fully gone (dome shows through) beyond this
 // baked into the GLSL as a linear literal, like the distance fade. Eyeball knobs.
 const PLAYER_LIGHT_COLOR = new THREE.Color(0xffc89c); // warm pool
 const PLAYER_LIGHT_RADIUS = 42; // raking fades out by this horizontal distance
-const PLAYER_LIGHT_INNER = 2; // full reach within this
+const PLAYER_LIGHT_INNER = 2.0; // full reach within this
 const PLAYER_LIGHT_STRENGTH = 0.55; // additive intensity at the pool centre
-const PLAYER_LIGHT_HEIGHT = 6; // light's height over the player; lower = more grazing
+const PLAYER_LIGHT_HEIGHT = 6.0; // light's height over the player; lower = more grazing
 const _pl = PLAYER_LIGHT_COLOR.clone().convertSRGBToLinear();
 const PLAYER_LIGHT_RGB = `vec3(${_pl.r.toFixed(4)}, ${_pl.g.toFixed(4)}, ${_pl.b.toFixed(4)})`;
 
@@ -208,8 +208,8 @@ const PLAYER_LIGHT_RGB = `vec3(${_pl.r.toFixed(4)}, ${_pl.g.toFixed(4)}, ${_pl.b
 // uSkate (0..1) in the loop so it eases in/out with the mode. Eyeball knobs, baked as
 // GLSL literals like the warm pool; rebuild to retune.
 const SKATE_GLOW_COLOR = new THREE.Color(0x4a86ff); // cool blue pool
-const SKATE_GLOW_RADIUS = 36; // a tight pool right under the player
-const SKATE_GLOW_INNER = 2;
+const SKATE_GLOW_RADIUS = 16; // a tight pool right under the player
+const SKATE_GLOW_INNER = 2.0;
 const SKATE_GLOW_STRENGTH = 0.8; // additive intensity at centre, times uSkate
 const _sg = SKATE_GLOW_COLOR.clone().convertSRGBToLinear();
 const SKATE_GLOW_RGB = `vec3(${_sg.r.toFixed(4)}, ${_sg.g.toFixed(4)}, ${_sg.b.toFixed(4)})`;
