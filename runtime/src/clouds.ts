@@ -15,8 +15,11 @@ import * as THREE from "three";
 // scales and speeds break the tile repeat and read as parallax. Seamless tiling
 // needs PERIODIC noise (ordinary fBm doesn't wrap), baked once into a DataTexture;
 // it can't be faked cheaply per fragment, which is why this is a texture and not
-// in-shader fBm. The shadow is a cool darkening multiply, faded back out into the
-// distance dissolve so the far field keeps its clean fade into the dome.
+// in-shader fBm. The mask no longer reads as a shadow but as a day/night terminator:
+// full night crushes the surface to a near-black cold blue, full day lifts it bright
+// and warm, and the two blend across the mask's soft edge. It is faded back to
+// neutral into the distance dissolve so the far field keeps its clean fade into the
+// dome.
 
 // Texture: power-of-two so it mipmaps (the ground samples it at grazing angles
 // where the uv derivatives explode; without mips that aliases into a crawling
@@ -38,24 +41,57 @@ const WEIGHT2 = 0.38;
 // and the sand agree on a prevailing direction. Speeds in world units/sec; the
 // underlay drifts slower for parallax.
 const WIND_ANGLE = 0.7;
-const WIND1 = 13;
+const WIND1 = 25;
 const WIND2 = 7;
 
 // Coverage shaping on the sampled mask (a weighted sum of two [0,1] layers, so
-// centred near 0.5): smoothstep(LO, HI) is the fraction in sun; below LO is full
-// shadow. Tighten LO..HI for harder cloud edges, widen for hazier ones.
-const COVER_LO = 0.46;
-const COVER_HI = 0.62;
+// centred near 0.5): smoothstep(LO, HI) is the day fraction; below LO is full night.
+// The LO..HI band is the terminator: widen it and night and day blend over a longer
+// gradient, tighten it for a starker divide.
+const COVER_LO = 0.5;
+const COVER_HI = 1.0;
 
-// Full-shadow multiplier, LINEAR (gl_FragColor is linear before the colorspace
-// encode), so authored directly rather than through sRGB: under a cloud the ground
-// drops to ~45% brightness and shifts cool, the way the references' shadowed ground
-// goes blue-grey rather than just dark. Eyeball knob.
-const TINT: [number, number, number] = [0.42, 0.46, 0.56];
+// The night/day multipliers, LINEAR (gl_FragColor is linear before the colorspace
+// encode), so authored directly rather than through sRGB. This is no longer a cloud
+// filtering sunlight; it is night and day themselves drifting across the world and
+// blending where they meet. NIGHT crushes the surface to a near-black cold blue; DAY
+// lifts it past neutral into a bright warm cast (channels >1 intentionally clip hot
+// in the working space). The wide gap between them is the surreal contrast. Eyeball
+// knobs.
+const NIGHT: [number, number, number] = [0.005, 0.007, 0.016];
+const DAY: [number, number, number] = [1.25, 1.08, 0.82];
+
+// Props (heads, stones) carry a fixed sandstone albedo everywhere, but the GROUND
+// ramps its OWN albedo from pale at the present to a dark grey in the deep past
+// (terrain.groundColor: pale->sand at half-radius, sand->grey at the rim). With the
+// props held flat, a drifting DAY patch out in the deep past lifts a bright sandstone
+// monument far above the grey ground around it, so it reads as a glowing aura that
+// pulses on the cloud's cycle while the ground stays dark. Ramping the prop's
+// brightness toward the same deep-past floor by radius removes the differential: a far
+// monument darkens with the sand it stands in and only pulses as much as the ground.
+// ERA_R mirrors terrain.ERA_GRADIENT_R (= world.json R_MAX); the ramp starts at the
+// half-radius (where the ground's own ramp turns sand->grey, so inner props, already
+// sand-coloured, are untouched). ERA_FLOOR is grey/sand lightness (~0.55). Eyeball knobs.
+const ERA_R = 7100;
+const ERA_FLOOR = 0.55;
+
+// Cloud mip from camera DISTANCE, not the GPU's screen-derivative mip. The
+// derivative-driven mip is unstable where the cloud uv's screen footprint jumps: a
+// near-vertical head/stone face has near-zero uv footprint, so the hardware picks the
+// finest, highest-frequency mip, and under the hard night/day contrast each mip flip
+// is a visible strobe. Camera distance is stable per object, so deriving the mip from
+// it removes that. LOD_REF is the distance still read at full detail (mip 0,
+// underfoot); the mask coarsens by one mip per doubling beyond it, up to LOD_MAX at
+// the dissolve horizon. Eyeball knobs.
+const LOD_REF = 120;
+const LOD_MAX = 6;
 
 export interface CloudUniforms {
   uClouds: { value: THREE.Texture };
   uCloudTime: { value: number };
+  // DIAGNOSTIC kill switch: 1 = full night/day tint, 0 = neutral (effect off).
+  // Lets a key disable the whole lighting effect at runtime to localise the flicker.
+  uCloudMix: { value: number };
 }
 
 // --- seamless periodic noise (baked once) -----------------------------------
@@ -145,30 +181,56 @@ function makeCloudTexture(): THREE.DataTexture {
 const _dir = [Math.cos(WIND_ANGLE), Math.sin(WIND_ANGLE)];
 const _v1 = [(_dir[0] * WIND1) / SCALE1, (_dir[1] * WIND1) / SCALE1];
 const _v2 = [(_dir[0] * WIND2) / SCALE2, (_dir[1] * WIND2) / SCALE2];
-const TINT_GLSL = `vec3(${TINT[0].toFixed(3)}, ${TINT[1].toFixed(3)}, ${TINT[2].toFixed(3)})`;
+const NIGHT_GLSL = `vec3(${NIGHT[0].toFixed(3)}, ${NIGHT[1].toFixed(3)}, ${NIGHT[2].toFixed(3)})`;
+const DAY_GLSL = `vec3(${DAY[0].toFixed(3)}, ${DAY[1].toFixed(3)}, ${DAY[2].toFixed(3)})`;
 
-// Uniform declarations + the cloudShadow() sampler. Splice into a fragment
-// shader's <common>. cloudShadow(worldXZ) returns 1 in full sun, 0 under cloud.
+// Uniform declarations + the cloudShadow() sampler. Splice into a fragment shader's
+// <common>. cloudShadow(worldXZ, camDist) returns 1 in full day, 0 in full night. The
+// mip is taken explicitly from camDist (see the LOD_REF note) via texture2DLodEXT
+// (three's WebGL2-safe alias for textureLod), so it never flips on a seam or a face.
 export const CLOUD_FRAG_COMMON = /* glsl */ `
   uniform sampler2D uClouds;
   uniform float uCloudTime;
-  float cloudShadow(vec2 wxz) {
+  uniform float uCloudMix;
+  float cloudShadow(vec2 wxz, float camDist) {
+    float lod = clamp(log2(max(camDist, 1.0) / ${LOD_REF.toFixed(1)}), 0.0, ${LOD_MAX.toFixed(1)});
     vec2 uv1 = wxz * ${(1 / SCALE1).toFixed(7)} + vec2(${_v1[0].toFixed(7)}, ${_v1[1].toFixed(7)}) * uCloudTime;
     vec2 uv2 = wxz * ${(1 / SCALE2).toFixed(7)} + vec2(${_v2[0].toFixed(7)}, ${_v2[1].toFixed(7)}) * uCloudTime;
-    float n = texture2D(uClouds, uv1).r * ${WEIGHT1.toFixed(2)} + texture2D(uClouds, uv2).r * ${WEIGHT2.toFixed(2)};
+    float n = texture2DLodEXT(uClouds, uv1, lod).r * ${WEIGHT1.toFixed(2)} + texture2DLodEXT(uClouds, uv2, lod).r * ${WEIGHT2.toFixed(2)};
     return smoothstep(${COVER_LO.toFixed(2)}, ${COVER_HI.toFixed(2)}, n);
   }
 `;
 
-// The apply block: darken+cool by the shadow at the given world xz, faded back to
-// unshadowed by fadeExpr (the distance dissolve, so the far field stays clean; pass
-// "0.0" where there is no fade, e.g. opaque props). Splice after <opaque_fragment>.
-export function cloudApplyGLSL(xzExpr: string, fadeExpr: string): string {
+// The apply block: blend the night/day multiplier by the mask at the given world xz,
+// faded back to neutral by fadeExpr (the distance dissolve, so the far field stays
+// clean; pass "0.0" where there is no fade, e.g. opaque props). camDistExpr is the
+// fragment's view-space distance, feeding the explicit cloud mip. Splice after
+// <opaque_fragment>.
+export function cloudApplyGLSL(
+  xzExpr: string,
+  fadeExpr: string,
+  camDistExpr: string,
+): string {
   return /* glsl */ `
     {
-      float _lit = cloudShadow(${xzExpr});
-      _lit = mix(1.0, _lit, 1.0 - (${fadeExpr}));
-      gl_FragColor.rgb *= mix(${TINT_GLSL}, vec3(1.0), _lit);
+      float _lit = cloudShadow(${xzExpr}, ${camDistExpr});
+      vec3 _tint = mix(${NIGHT_GLSL}, ${DAY_GLSL}, _lit);
+      _tint = mix(_tint, vec3(1.0), ${fadeExpr});
+      _tint = mix(vec3(1.0), _tint, uCloudMix); // diagnostic kill switch
+      gl_FragColor.rgb *= _tint;
+    }`;
+}
+
+// Darken a prop toward the deep-past floor by its radius, mirroring the ground's
+// own pale->sand->grey era ramp (see the ERA_* note). Ramps in only over the outer
+// half-radius, where the ground turns sand->grey; inner props (already sand-coloured)
+// keep full brightness. Splice before the cloud apply so the day/night tint multiplies
+// the era-correct base, exactly as it does on the ground (which ramps its albedo first).
+export function eraDarkenGLSL(xzExpr: string): string {
+  return /* glsl */ `
+    {
+      float _eraT = clamp((length(${xzExpr}) / ${ERA_R.toFixed(1)} - 0.5) * 2.0, 0.0, 1.0);
+      gl_FragColor.rgb *= mix(1.0, ${ERA_FLOOR.toFixed(2)}, _eraT);
     }`;
 }
 
@@ -194,23 +256,27 @@ export function applyCloudShadow(
     if (prev) prev.call(mat, shader, renderer);
     shader.uniforms.uClouds = cloud.uClouds;
     shader.uniforms.uCloudTime = cloud.uCloudTime;
+    shader.uniforms.uCloudMix = cloud.uCloudMix;
     shader.vertexShader = shader.vertexShader
       .replace(
         "#include <common>",
-        "#include <common>\nvarying vec2 vCloudXZ;",
+        "#include <common>\nvarying vec2 vCloudXZ;\nvarying float vCloudDist;",
       )
       .replace(
         "#include <project_vertex>",
-        `#include <project_vertex>\nvCloudXZ = ${worldXZ};`,
+        `#include <project_vertex>\nvCloudXZ = ${worldXZ};\nvCloudDist = length(mvPosition.xyz);`,
       );
     shader.fragmentShader = shader.fragmentShader
       .replace(
         "#include <common>",
-        "#include <common>\nvarying vec2 vCloudXZ;\n" + CLOUD_FRAG_COMMON,
+        "#include <common>\nvarying vec2 vCloudXZ;\nvarying float vCloudDist;\n" +
+          CLOUD_FRAG_COMMON,
       )
       .replace(
         "#include <opaque_fragment>",
-        "#include <opaque_fragment>\n" + cloudApplyGLSL("vCloudXZ", "0.0"),
+        "#include <opaque_fragment>\n" +
+          eraDarkenGLSL("vCloudXZ") +
+          cloudApplyGLSL("vCloudXZ", "0.0", "vCloudDist"),
       );
   };
 }
@@ -225,6 +291,7 @@ export function buildClouds(): {
   const uniforms: CloudUniforms = {
     uClouds: { value: makeCloudTexture() },
     uCloudTime: { value: 0 },
+    uCloudMix: { value: 1 },
   };
   return {
     uniforms,

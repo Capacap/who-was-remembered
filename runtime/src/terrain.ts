@@ -10,10 +10,10 @@ import { CLOUD_FRAG_COMMON, cloudApplyGLSL, type CloudUniforms } from "./clouds"
 // This lives in the renderer, not the pipeline. The vertical axis carries no data
 // (time and longitude are the horizontal x/z), so terrain is decoration by the
 // three-tier rule. The shape is a baked heightmap raster (stage9), and sampleHeight
-// is the single elevation source: the clipmap tessellates it, the player's feet
-// read it, and books seat on facetHeight (the facet the clipmap actually draws), so
-// the visible ground and everything on it agree. The analytic getGroundHeight below
-// is now only the pre-heightmap-load fallback.
+// is the single elevation source: the ground mesh tessellates it, the player's feet
+// read it, and books seat on facetHeight (the facet the ground mesh actually draws),
+// so the visible ground and everything on it agree. The analytic getGroundHeight
+// below is now only the pre-heightmap-load fallback.
 
 const PEAK_HEIGHT = 60; // a whisper of a central rise, not a summit, world units
 const PLATEAU_R = 700; // calm and level here (spawn + plaza + the year-2000 ring)
@@ -155,10 +155,9 @@ const COLOR_WAVELENGTH = 900; // patch-noise scale for the painted wobble
 
 // Crest/trough relief tint, layered on the radial base: crests read scoured pale
 // and a touch warm, troughs cooler and darker, so the dunes carry colour and not
-// just shading. The signal is sampled from each clipmap level's OWN grid (the
-// neighbour offset scales with the cell), so the colour tracks the relief that
-// level actually draws and degrades with it instead of aliasing into noise at the
-// coarse LODs. All four are eyeball knobs.
+// just shading. The signal is the vertex height minus its neighbours RELIEF_CELLS out
+// on the ground grid, so the colour tracks the relief the mesh actually draws. All
+// four are eyeball knobs.
 const RELIEF_CELLS = 3; // neighbour offset in cells: the relief's read wavelength
 const RELIEF_SCALE = 0.25; // slope-difference that reaches the full crest/trough tint
 const CREST_LIGHT = 0.15; // crest lightens / trough darkens (the dominant read)
@@ -175,17 +174,15 @@ const RING_SPACING = 512; // world units between rings (~a century at alpha = 1)
 const RING_LIGHT = 0.03; // lightness swing across a ring (the dominant read)
 const RING_HUE = 0.004; // warm/cool swing across a ring (subtle)
 
-// Distance fade: every clipmap level's opacity falls to zero between these radii
-// from the CAMERA, so the whole landscape dissolves into the sky dome before it
-// reaches any footprint edge. The fade is circular (camera distance), so unlike a
-// fog tint of opaque geometry it leaves no square plate to see from a height.
-// Colour-matching fog can only blend a surface toward the haze colour, never past
-// it, so a sunlit dune crest punches through as a bright ridge; going transparent
-// removes the surface entirely, so nothing is left to catch the light or to show
-// an edge. The catch the clipmap adds is that five camera-centred transparent
-// meshes have no stable depth-sort, so their overlap rings double-blend into a
-// flickering band; buildGroundLevel fixes that with an explicit renderOrder
-// (finest first) so each overlap is won by the finer level and blended once.
+// Distance fade: the ground's opacity falls to zero between these radii from the
+// CAMERA, so the whole landscape dissolves into the sky dome before it reaches the
+// mesh edge. The fade is circular (camera distance), so unlike a fog tint of opaque
+// geometry it leaves no square plate to see from a height. Colour-matching fog can
+// only blend a surface toward the haze colour, never past it, so a sunlit dune crest
+// punches through as a bright ridge; going transparent removes the surface entirely,
+// so nothing is left to catch the light or to show an edge. The mesh half-extent
+// (GROUND_HALF) is sized so this fade always lands before the edge while the player
+// is in the content region; far out in the empty void the faded edge can show.
 export const FADE_START = 3000; // fully opaque within this distance of the camera
 export const FADE_END = 6500; // fully gone (dome shows through) beyond this
 
@@ -210,53 +207,29 @@ export interface PlayerUniform {
   value: THREE.Vector2;
 }
 
-// --- camera-following ground LOD (geometry clipmap) -------------------------
-// The ground is built entirely from the shipped heightmap as concentric square
-// levels centred on the camera: a fine block underfoot, each level outward at
-// double the cell size, so on-screen facet size stays roughly bounded however the
-// camera roams. A single static mesh can't do that (a global tri budget is either
-// coarse underfoot or ruinous to ship, and the decimated disc was coarse exactly
-// where you stand). Every level shares one material, colour and jitter, so there
-// is no near/far seam in look, only a graduated step in facet size. Each level
-// snaps to its own cell so its facets never swim, and the coarser levels discard
-// a square hole under the finer level inside them, so the levels never fight in
-// the depth buffer.
+// --- ground: a single static mesh tessellated from the heightmap --------------
+// One uniform grid of GROUND_CELL facets spanning the world, built once at load and
+// never rebuilt. It replaced a five-level camera-following geometry clipmap. The
+// clipmap bounded on-screen facet size as the camera roamed, but its overlapping,
+// separately faded, camera-tracked levels stacked several subtle seam artifacts that
+// resisted every fix: a transparent level writes depth and culls the coarser one
+// beneath it, so where its fade made it translucent it revealed the sky dome through
+// the seam (an "aura" tracing each level, worst at altitude where all levels fade at
+// once); the per-frame hole tracking outran the round-robin per-level rebuild; and
+// the resolution change left T-junctions. A single surface has none of it: no
+// overlap, nothing to depth-cull, no rebuild, so no seams and a steadier framerate
+// (no re-tessellation stall when flying). The cost is spending triangles evenly
+// rather than concentrating them underfoot, which at GROUND_CELL = 12 is a few
+// million tris over the whole world, nothing for the GPU, and it ships nothing extra
+// because the mesh is generated from the same heightmap the clipmap used.
 //
-// The level boundary itself is handled by GEOMORPHING (Losasso & Hoppe). In a band
-// at each level's outer rim the fine vertices morph (height, and jitter relaxing to
-// zero) toward what the coarser level draws there, so by the boundary the fine
-// surface IS the coarse surface, vertex for vertex: no height step, no crack, no
-// pop on a cell-cross. For that to be exact the coarse side must agree, so each
-// level also relaxes its jitter to zero in a flat band around its inner hole edge;
-// both sides then meet on a plain shared lattice. The morph target reproduces the
-// coarser level's exact triangulated chord (same diagonal split), so the match is
-// C0, not approximate. The discard hole leaves a one-ring overlap where the fine
-// surface is identical to the coarse chord; a per-level depth bias (polygonOffset,
-// coarser = pushed back) makes the finer level deterministically win that overlap,
-// so no skirt is needed and there is no coplanar flicker at the seam.
-interface GroundLevel {
-  cell: number; // quad size, world units
-  half: number; // half-extent of the square block (every level is 128 cells across)
-  hole: number; // half-width of the central square discarded for the finer level
-  holeCell: number; // the finer level's cell: the hole snaps to THIS so its edge
-  //                   stays locked to the finer level's snapped real-surface edge
-}
-const GROUND_LEVELS: GroundLevel[] = [
-  { cell: 8, half: 512, hole: 0, holeCell: 0 }, // underfoot; finest, no hole
-  { cell: 16, half: 1024, hole: 504, holeCell: 8 }, // hole = finer.half-finer.cell,
-  { cell: 32, half: 2048, hole: 1008, holeCell: 16 }, //  so the coarser level picks
-  { cell: 64, half: 4096, hole: 2016, holeCell: 32 }, //  up exactly where the finer
-  { cell: 128, half: 8192, hole: 4032, holeCell: 64 }, // level's real surface ends
-];
+// The grid is jittered in-plane (the Vane low-poly look) keyed off the world cell, so
+// finestVertex/facetHeight reconstruct the drawn facet exactly and books seat on the
+// surface the player sees. flatShading derives the per-face normal in-shader.
+const GROUND_CELL = 12; // uniform facet size underfoot, world units
+const GROUND_HALF = 9000; // half-extent: covers the world (R_MAX ~7100) + the fade tail
 const GROUND_JIT_FRAC = 0.33; // in-plane vertex jitter as a fraction of the cell:
-//   the Vane look, applied at each level's own scale so the character is uniform
-const GROUND_MORPH_CELLS = 6; // rim morph-band width in cells: over this band the
-//   fine surface lerps to the coarse one, reaching an exact match at the boundary
-const GROUND_RELAX_FLAT = 2; // inner rings (in cells) held fully un-jittered around
-//   the hole, so the finer level's morph target lands on a plain coarse lattice
-const GROUND_RELAX_CELLS = 4; // width (cells) of the ramp from the flat hole band
-//   back to full jitter, so the relaxation isn't a hard line
-const clamp01 = (t: number) => (t < 0 ? 0 : t > 1 ? 1 : t);
+//   the Vane look, an organic faceted triangulation instead of a mechanical lattice
 
 // the dune offset at a point: anisotropic ridged noise, faded in past the
 // present plateau. See the dune-field note above for the construction.
@@ -338,12 +311,11 @@ export function peakHeight(): number {
 }
 
 // Ground colour at a world point: the radial pale-summit -> sand -> grey-void
-// narrative, a low-frequency painted wobble, and a crest/trough relief tint. The
-// clipmap tints its vertices with this from world position on each rebuild; it
-// stays per-vertex on the CPU by design (no texture, no baked raster), so the
-// low-poly vertex-colour look survives across the LOD levels. `relief` is the
-// signed, already-normalised local relief (+ on crests, - in hollows) the caller
-// reads from that level's grid; 0 leaves the base untouched.
+// narrative, a low-frequency painted wobble, and a crest/trough relief tint.
+// buildGround tints each vertex with this from world position; it stays per-vertex on
+// the CPU by design (no texture, no baked raster), so the low-poly vertex-colour look
+// holds. `relief` is the signed, already-normalised local relief (+ on crests, - in
+// hollows) the caller reads from the grid; 0 leaves the base untouched.
 const _hsl = { h: 0, s: 0, l: 0 }; // scratch for groundColor's single HSL roundtrip
 export function groundColor(
   x: number,
@@ -363,8 +335,8 @@ export function groundColor(
   // darken. Hue/sat shift against k's sign, lightness with it.
   const k = relief < -1 ? -1 : relief > 1 ? 1 : relief;
   // The painted wobble, the time rings and the relief tint are three HSL offsets;
-  // fold them into one getHSL/setHSL roundtrip rather than three (this runs per
-  // vertex on every clipmap rebuild, so the two saved RGB<->HSL conversions matter).
+  // fold them into one getHSL/setHSL roundtrip rather than three (this runs per vertex
+  // across the whole ground build, so the two saved RGB<->HSL conversions matter).
   out.getHSL(_hsl);
   _hsl.h += tone * 0.01 + ring * RING_HUE - k * CREST_HUE;
   _hsl.s += tone * 0.03 - k * CREST_SAT;
@@ -428,7 +400,7 @@ export function sampleHeight(x: number, z: number): number {
 
 // Surface normal from the baked raster, the heightmap counterpart of
 // getGroundNormal: central differences on sampleHeight so props seat to the same
-// surface the clipmap draws, not the analytic field that diverges from it. eps
+// surface the ground mesh draws, not the analytic field that diverges from it. eps
 // doubles as the footprint half-width, so a large prop conforms to the slope it
 // spans rather than one texel.
 export function sampleNormal(
@@ -442,73 +414,54 @@ export function sampleNormal(
   return out.set(-hx, 2 * eps, -hz).normalize();
 }
 
-// Inject the per-level material edits: the camera-distance opacity fade (every
-// level, so the world dissolves circularly into the dome before any footprint
-// edge) and a camera-centred square discard hole (when holeHalf > 0) that cuts
-// this level away where the finer level inside it sits, so a coarse facet can
-// never poke through the fine surface. Every level is transparent; their stable
-// ordering is the renderOrder set in buildGroundLevel, not this. Returns the
-// hole-centre uniform to be tracked to the camera each frame, or null for the
-// finest level (no hole).
+// Inject the ground material edits, shared by the one static ground mesh: the
+// camera-distance opacity fade (so the world dissolves circularly into the dome at
+// the far edge, no square plate) and the additive raking pool that follows the
+// player, then the drifting cloud-shadow multiply. All are per-fragment in world
+// space, so they ride on the static mesh unchanged from the clipmap days; only the
+// per-level discard hole and its depth machinery are gone with the clipmap.
 function applyGroundMaterial(
   mat: THREE.MeshLambertMaterial,
-  holeHalf: number,
+  cell: number,
   uPlayer: PlayerUniform,
   cloud: CloudUniforms,
-): { value: THREE.Vector2 } | null {
+): void {
   mat.transparent = true;
-  const holeCenter = holeHalf > 0 ? { value: new THREE.Vector2(0, 0) } : null;
   const fadeSpan = (FADE_END - FADE_START).toFixed(1);
-  // Each level bakes its hole size into the GLSL as a literal, invisible to
-  // Three's program-cache key (which sees only onBeforeCompile's source text,
-  // identical across levels). Without this, all levels would share whichever
-  // program compiled first and render wrong. Keying on holeHalf forces a distinct
-  // program per level. The raking light's source is identical across levels, so it
-  // needs no part in the key.
-  mat.customProgramCacheKey = () => `ground:${holeHalf}`;
   mat.onBeforeCompile = (shader) => {
-    if (holeCenter) shader.uniforms.uHoleCenter = holeCenter;
     shader.uniforms.uPlayer = uPlayer;
     shader.uniforms.uClouds = cloud.uClouds;
     shader.uniforms.uCloudTime = cloud.uCloudTime;
+    shader.uniforms.uCloudMix = cloud.uCloudMix;
     shader.vertexShader = shader.vertexShader
       .replace(
         "#include <common>",
-        "#include <common>\nvarying float vGroundFade;\nvarying vec3 vWorldPos;" +
-          (holeCenter ? "\nvarying vec2 vGroundXZ;" : ""),
+        "#include <common>\nvarying float vGroundFade;\nvarying float vCloudDist;\nvarying vec3 vWorldPos;\nvarying vec2 vCloudXZ;",
       )
       .replace(
         "#include <project_vertex>",
         `#include <project_vertex>
+         vCloudDist = length(mvPosition.xyz);
          vGroundFade = clamp(
-           (length(mvPosition.xyz) - ${FADE_START.toFixed(1)}) / ${fadeSpan},
+           (vCloudDist - ${FADE_START.toFixed(1)}) / ${fadeSpan},
            0.0, 1.0);
-         vWorldPos = (modelMatrix * vec4(transformed, 1.0)).xyz;` +
-          (holeCenter
-            ? `\n         vGroundXZ = vWorldPos.xz;`
-            : ""),
+         vWorldPos = (modelMatrix * vec4(transformed, 1.0)).xyz;
+         // sample the cloud on the un-jittered lattice point so the shadow reads off
+         // the grid rather than the per-vertex jitter; jitter is under half a cell, so
+         // rounding the local position to the cell grid recovers the lattice point.
+         vec2 _lat = floor(position.xz / ${cell.toFixed(1)} + 0.5) * ${cell.toFixed(1)};
+         vCloudXZ = (modelMatrix * vec4(_lat.x, 0.0, _lat.y, 1.0)).xz;`,
       );
     let frag = shader.fragmentShader.replace(
       "#include <common>",
-      "#include <common>\nvarying float vGroundFade;\nvarying vec3 vWorldPos;\nuniform vec2 uPlayer;" +
-        CLOUD_FRAG_COMMON +
-        (holeCenter
-          ? "\nuniform vec2 uHoleCenter;\nvarying vec2 vGroundXZ;"
-          : ""),
+      "#include <common>\nvarying float vGroundFade;\nvarying float vCloudDist;\nvarying vec3 vWorldPos;\nvarying vec2 vCloudXZ;\nuniform vec2 uPlayer;" +
+        CLOUD_FRAG_COMMON,
     );
-    if (holeCenter) {
-      frag = frag.replace(
-        "#include <clipping_planes_fragment>",
-        `#include <clipping_planes_fragment>
-         vec2 holeD = abs(vGroundXZ - uHoleCenter);
-         if (max(holeD.x, holeD.y) < ${holeHalf.toFixed(1)}) discard;`,
-      );
-    }
     // Raking pool, additive after lighting (linear space, before the colorspace
     // encode). The world-space face normal comes from the position derivatives the
     // flat shading already relies on, oriented upward; the light sits a little above
     // the player, so facets tilted toward the pool brighten and the gradient sweeps
-    // the dunes as the player moves. Falls to zero past the radius, so distant levels
+    // the dunes as the player moves. Falls to zero past the radius, so far fragments
     // pay only the derivative + a few ops.
     frag = frag.replace(
       "#include <opaque_fragment>",
@@ -524,24 +477,21 @@ function applyGroundMaterial(
        }` +
         // drifting cloud shadow over the dunes, faded back out into the distance
         // dissolve so the far ground keeps its clean fade into the dome.
-        cloudApplyGLSL("vWorldPos.xz", "vGroundFade"),
+        cloudApplyGLSL("vCloudXZ", "vGroundFade", "vCloudDist"),
     );
     shader.fragmentShader = frag.replace(
       "#include <dithering_fragment>",
       "#include <dithering_fragment>\ngl_FragColor.a *= 1.0 - vGroundFade;",
     );
   };
-  return holeCenter;
 }
 
-// The height a clipmap level of cell C draws at (wx, wz): the grid triangulates
-// each C-quad along its (x0,z0)->(x0+C,z0+C) diagonal (matching the index pattern
-// in buildGroundLevel), so reproduce that exact triangulated chord rather than a
-// bilinear patch. Two callers: the geomorph uses it as the next-coarser level's
-// surface to morph toward (C0-exact, because the coarser level is held un-jittered
-// around its hole so its near-boundary vertices sit on this lattice), and prop
-// seating uses it via facetHeight to drop a book onto the surface the player
-// actually sees, not the smooth field that surface only chords.
+// The height the ground grid draws at (wx, wz): each cell-quad triangulates along its
+// (x0,z0)->(x0+C,z0+C) diagonal (matching the index pattern in buildGround), so
+// reproduce that exact triangulated chord rather than a bilinear patch. Prop seating
+// uses it via facetHeight to drop a book onto the surface the player actually sees,
+// not the smooth field that surface only chords. (It also remains the slow-path
+// fallback inside facetHeight.)
 function chordHeight(wx: number, wz: number, C: number): number {
   const x0 = Math.floor(wx / C) * C;
   const z0 = Math.floor(wz / C) * C;
@@ -558,25 +508,23 @@ function chordHeight(wx: number, wz: number, C: number): number {
 }
 
 // --- prop seating: the exact drawn facet --------------------------------------
-// Books seat on the surface the clipmap actually DRAWS underfoot, not the smooth
+// Books seat on the surface the ground mesh actually DRAWS underfoot, not the smooth
 // sampleHeight field that surface only chords. The two diverge two ways on a tight
 // convex crest: the flat facet chords below the field (faceting), and the in-plane
 // jitter shoves the facet's corners up to GROUND_JIT_FRAC*cell sideways, which on a
 // steep face turns into a vertical offset of a couple of units. Seating on
 // sampleHeight floats over both; seating on the un-jittered chord still floats over
-// the second. So reconstruct the finest level's jittered triangle exactly as
-// buildGroundLevel draws it near the camera (full jitter, no morph: the canonical
-// close-up surface, which is the view that matters) and drop the book onto that
-// plane. No bias, so nothing legitimate is ever buried. The far field, where a
-// coarser morphing level is drawn under a static seat, still breathes, but that is
-// flight-only and faded; on foot the book you stand by is exact.
-const FINEST = GROUND_LEVELS[0].cell;
+// the second. So reconstruct the ground grid's jittered triangle exactly as
+// buildGround draws it and drop the book onto that plane. No bias, so nothing
+// legitimate is ever buried. The mesh is one uniform grid now, so this is exact
+// everywhere the book stands, not just near the camera.
+const FINEST = GROUND_CELL;
 const FINEST_JIT = FINEST * GROUND_JIT_FRAC;
 const _fv: THREE.Vector3[] = Array.from({ length: 16 }, () => new THREE.Vector3());
 
-// One finest-level vertex as drawn at jitterScale = 1: the disk jitter of
-// buildGroundLevel keyed on the world cell index (gx, gz), height sampled at the
-// jittered position. The un-jittered corner sits at (gx*FINEST, gz*FINEST).
+// One ground-grid vertex as drawn: the disk jitter of buildGround keyed on the world
+// cell index (gx, gz), height sampled at the jittered position. The un-jittered
+// corner sits at (gx*FINEST, gz*FINEST).
 function finestVertex(gx: number, gz: number, out: THREE.Vector3): THREE.Vector3 {
   const rr = FINEST_JIT * Math.sqrt(hash2(gx, gz));
   const th = hash2(gx + 7919, gz + 104729) * Math.PI * 2;
@@ -658,52 +606,51 @@ export function facetHeight(x: number, z: number): number {
   return chordHeight(x, z, FINEST);
 }
 
-// One clipmap level: a 128-cell grid that re-centres on the camera each time it
-// crosses one of ITS cells. Topology is built once; on a cell-cross only the
-// per-vertex height, in-plane jitter and colour are resampled and the mesh is
-// translated to the snapped origin. Snapping is what stops the facets swimming:
-// every vertex lands on a fixed world lattice, and the jitter is keyed off the
-// world cell a vertex covers (not its local index) so the irregular lattice is
-// welded to the world and only re-indexes as the window slides. The outer band
-// morphs to the coarser level (geomorphing) and a depth bias picks the winner at
-// the seam; see the clipmap note above. hasCoarser
-// is false for the outermost level (nothing to morph to; its rim fades into void).
-//
-// The work is split three ways so the caller can bound the per-frame cost: track()
-// re-points the discard-hole uniform at the camera (cheap, every frame); pending()
-// reports whether the camera has left this level's snapped cell; rebuild() does the
-// heavy 16641-vertex resample. A fast camera can cross several levels' cells in one
-// frame, so createGround caps rebuilds at one level per frame (round-robin) to stop
-// the spikes from stacking. Deferring a coarse rebuild is safe: the geomorph target
-// is recomputed analytically (chordHeight, not the neighbour mesh's state) and the
-// hole follows the camera via track(), so a frame-stale mesh position opens no crack.
-function buildGroundLevel(
-  level: GroundLevel,
-  index: number,
-  hasCoarser: boolean,
+// Build the ground: one static grid of GROUND_CELL facets over the whole world,
+// tessellated from the heightmap at load. Vertices use the world-cell disk jitter of
+// finestVertex (so facetHeight reconstructs the drawn facet and books seat exactly),
+// heights from sampleHeight, and the radial era colour with the crest/trough relief
+// tint. flatShading + vertexColors give the low-poly Vane look; applyGroundMaterial
+// adds the distance fade, the raking pool and the drifting cloud shadow. Built once
+// and never rebuilt: it sits still while the shared uPlayer/cloud uniforms move.
+export function buildGround(
   uPlayer: PlayerUniform,
   cloud: CloudUniforms,
-): {
-  mesh: THREE.Mesh;
-  track: (camX: number, camZ: number) => void;
-  pending: (camX: number, camZ: number) => boolean;
-  rebuild: (camX: number, camZ: number) => void;
-} {
-  const { cell, half, hole, holeCell } = level;
-  const N = Math.round((2 * half) / cell);
+): THREE.Mesh {
+  const cell = GROUND_CELL;
+  const g0 = -Math.round(GROUND_HALF / cell); // world-cell index of the (0,0) corner
+  const N = -2 * g0; // cells across
   const stride = N + 1;
-  const halfCells = half / cell;
-  const jit = cell * GROUND_JIT_FRAC;
   const vcount = stride * stride;
   const positions = new Float32Array(vcount * 3);
   const colors = new Float32Array(vcount * 3);
+  const v3 = new THREE.Vector3();
+  const c = new THREE.Color();
+  const ro = RELIEF_CELLS * cell; // neighbour offset for the crest/trough relief read
   for (let iz = 0; iz <= N; iz++) {
     for (let ix = 0; ix <= N; ix++) {
       const v = iz * stride + ix;
-      positions[v * 3] = -half + ix * cell;
-      positions[v * 3 + 2] = -half + iz * cell;
+      finestVertex(g0 + ix, g0 + iz, v3); // jittered world xz + sampled height
+      positions[v * 3] = v3.x;
+      positions[v * 3 + 1] = v3.y;
+      positions[v * 3 + 2] = v3.z;
+      // crest/trough relief: this vertex's height minus its four neighbours ro out,
+      // normalised to a signed ~[-1, 1], so crests read pale/warm and troughs cool.
+      const relief =
+        (v3.y -
+          0.25 *
+            (sampleHeight(v3.x - ro, v3.z) +
+              sampleHeight(v3.x + ro, v3.z) +
+              sampleHeight(v3.x, v3.z - ro) +
+              sampleHeight(v3.x, v3.z + ro))) /
+        (RELIEF_SCALE * ro);
+      groundColor(v3.x, v3.z, c, relief);
+      colors[v * 3] = c.r;
+      colors[v * 3 + 1] = c.g;
+      colors[v * 3 + 2] = c.b;
     }
   }
+  // two triangles per cell, split on the a->d diagonal exactly as facetHeight expects.
   const indices = new Uint32Array(N * N * 6);
   let t = 0;
   for (let iz = 0; iz < N; iz++) {
@@ -724,253 +671,14 @@ function buildGroundLevel(
   geom.setAttribute("position", new THREE.BufferAttribute(positions, 3));
   geom.setAttribute("color", new THREE.BufferAttribute(colors, 3));
   geom.setIndex(new THREE.BufferAttribute(indices, 1));
-  // flatShading derives the per-face normal from position derivatives in-shader,
-  // so the welded lattice still reads faceted and needs no vertex normals.
   const mat = new THREE.MeshLambertMaterial({
     vertexColors: true,
     flatShading: true,
   });
-  const holeCenter = applyGroundMaterial(mat, hole, uPlayer, cloud);
-  // The morph leaves the fine outer ring coplanar with the coarse hole edge they
-  // meet at. renderOrder (below) draws finer first, but GL_LESS lets a coplanar
-  // coarse fragment that rounds to the same depth slip through and z-fight as a
-  // flickering 1px line. Push each coarser level back so the tie is broken and the
-  // finer level reliably wins the shared edge.
-  if (index > 0) {
-    mat.polygonOffset = true;
-    // units only, no factor: the seam surfaces are identical (coplanar), so a
-    // constant depth nudge separates them. A slope-scaled factor term would blow
-    // up at the horizon where the ground is viewed edge-on, lighting up the far LOD.
-    mat.polygonOffsetFactor = 0;
-    mat.polygonOffsetUnits = index * 3;
-  }
+  applyGroundMaterial(mat, cell, uPlayer, cloud);
   const mesh = new THREE.Mesh(geom, mat);
-  mesh.frustumCulled = false; // it tracks the camera; its bounds are always in view
-  // The levels are all transparent and share the camera's centre, so Three's
-  // distance sort can't order them: it flips per frame, double-blending the
-  // overlap rings into a flickering band. renderOrder = index draws them finest
-  // first, so in every overlap the finer level writes depth first and the coarser
-  // one fails the depth test and is never blended on top. This is what actually
-  // stabilises the seams; the polygon offset above only breaks the coplanar tie.
-  mesh.renderOrder = index;
-
-  const posAttr = geom.attributes.position as THREE.BufferAttribute;
-  const colAttr = geom.attributes.color as THREE.BufferAttribute;
-  const c = new THREE.Color();
-  let snapX = NaN;
-  let snapZ = NaN;
-
-  // Re-point the discard-hole at the camera. Snap the hole to the FINER level's
-  // cell (holeCell), the same snap that level uses, so the hole edge and the finer
-  // level's real-surface edge never drift apart and open a gap along the boundary.
-  // Cheap and a no-op for the finest level; safe to run every frame regardless of
-  // whether this level rebuilds.
-  function track(camX: number, camZ: number): void {
-    if (holeCenter) {
-      holeCenter.value.set(
-        Math.round(camX / holeCell) * holeCell,
-        Math.round(camZ / holeCell) * holeCell,
-      );
-    }
-  }
-
-  // Has the camera left the cell this level last snapped to? If not, rebuild()
-  // would be a no-op, so the caller skips it.
-  function pending(camX: number, camZ: number): boolean {
-    return (
-      Math.round(camX / cell) * cell !== snapX ||
-      Math.round(camZ / cell) * cell !== snapZ
-    );
-  }
-
-  function rebuild(camX: number, camZ: number): void {
-    const sx = Math.round(camX / cell) * cell;
-    const sz = Math.round(camZ / cell) * cell;
-    snapX = sx;
-    snapZ = sz;
-    mesh.position.set(sx, 0, sz);
-    const baseIX = sx / cell - halfCells; // world-cell index of the (0,0) corner
-    const baseIZ = sz / cell - halfCells;
-    const coarseCell = cell * 2; // the next level out doubles the cell
-    const rOut = half - cell; // where the coarser level starts drawing (its hole)
-    const morphIn = rOut - GROUND_MORPH_CELLS * cell; // inner edge of the morph band
-    const morphW = GROUND_MORPH_CELLS * cell;
-    const relaxFlat = hole + GROUND_RELAX_FLAT * cell; // un-jittered out to here
-    const relaxW = GROUND_RELAX_CELLS * cell;
-    for (let iz = 0; iz <= N; iz++) {
-      for (let ix = 0; ix <= N; ix++) {
-        const v = iz * stride + ix;
-        const lx0 = -half + ix * cell; // un-jittered lattice position; the band
-        const lz0 = -half + iz * cell; //   coordinate is measured off this
-        let lx = lx0;
-        let lz = lz0;
-        const rim = ix === 0 || iz === 0 || ix === N || iz === N;
-        const d = Math.max(Math.abs(lx0), Math.abs(lz0)); // max-norm ring radius
-        // morph weight: 0 inside the band, ramping to 1 at the boundary where the
-        // coarser level takes over (only if there IS a coarser level out there).
-        const alpha = hasCoarser
-          ? clamp01((d - morphIn) / morphW)
-          : 0;
-        // jitter relaxes to 0 at the rim (so the morph target is un-jittered) and
-        // in the flat band around the hole (so this level matches the finer one's
-        // morph target). The rim itself is always clean, to keep the square edge.
-        let jitterScale = 1 - alpha;
-        if (hole > 0) jitterScale = Math.min(jitterScale, clamp01((d - relaxFlat) / relaxW));
-        if (rim) jitterScale = 0;
-        if (jitterScale > 0) {
-          // disk jitter (sqrt for area-uniform), keyed by world cell so it is
-          // stable as the level re-centres.
-          const gx = baseIX + ix;
-          const gz = baseIZ + iz;
-          const rr = jit * jitterScale * Math.sqrt(hash2(gx, gz));
-          const th = hash2(gx + 7919, gz + 104729) * Math.PI * 2;
-          lx += rr * Math.cos(th);
-          lz += rr * Math.sin(th);
-        }
-        const wx = lx + sx;
-        const wz = lz + sz;
-        let y = sampleHeight(wx, wz);
-        // crest/trough relief from this level's own grid: the raw height minus
-        // its four neighbours at RELIEF_CELLS cells out, normalised to a signed
-        // ~[-1, 1]. Offset scales with the cell, so the read wavelength tracks the
-        // LOD and the tint matches the relief this level draws. Uses the raw y,
-        // before the morph lerp below.
-        const ro = RELIEF_CELLS * cell;
-        const relief =
-          (y -
-            0.25 *
-              (sampleHeight(wx - ro, wz) +
-                sampleHeight(wx + ro, wz) +
-                sampleHeight(wx, wz - ro) +
-                sampleHeight(wx, wz + ro))) /
-          (RELIEF_SCALE * ro);
-        if (alpha > 0) {
-          // geomorph: lerp toward the coarser level's chord at this point
-          const tgt = chordHeight(wx, wz, coarseCell);
-          y += (tgt - y) * alpha;
-        }
-        positions[v * 3] = lx;
-        positions[v * 3 + 1] = y;
-        positions[v * 3 + 2] = lz;
-        groundColor(wx, wz, c, relief);
-        colors[v * 3] = c.r;
-        colors[v * 3 + 1] = c.g;
-        colors[v * 3 + 2] = c.b;
-      }
-    }
-    posAttr.needsUpdate = true;
-    colAttr.needsUpdate = true;
-    geom.computeBoundingSphere();
-  }
-
-  return { mesh, track, pending, rebuild };
-}
-
-// The whole ground: every GROUND_LEVELS entry as a camera-following clipmap level,
-// grouped. update() drives them all (each snaps to its own cell, so the coarse
-// levels rebuild rarely). Built entirely from the heightmap, so ground.bin and the
-// analytic dune code are both retired.
-export function createGround(
-  uPlayer: PlayerUniform,
-  cloud: CloudUniforms,
-): {
-  group: THREE.Group;
-  update: (camX: number, camZ: number) => void;
-} {
-  const group = new THREE.Group();
-  const levels = GROUND_LEVELS.map((lvl, i) =>
-    buildGroundLevel(lvl, i, i < GROUND_LEVELS.length - 1, uPlayer, cloud),
-  );
-  for (const l of levels) group.add(l.mesh);
-  let primed = false; // first call builds every level; after that, one per frame
-  let cursor = 0; // round-robin start, so no level starves under sustained flight
-  return {
-    group,
-    update: (camX: number, camZ: number) => {
-      for (const l of levels) l.track(camX, camZ); // hole tracking, every frame
-      if (!primed) {
-        // initial build: fill every level this frame so nothing flashes flat
-        for (const l of levels) if (l.pending(camX, camZ)) l.rebuild(camX, camZ);
-        primed = true;
-        return;
-      }
-      // A fast camera can leave several levels' cells in one frame; rebuilding all
-      // of them stacks 16641-vertex resamples into a single frame (the flight-speed
-      // stall). Rebuild at most ONE pending level per frame, advancing round-robin
-      // so the coarse levels still catch up within a few frames while distant/faded.
-      for (let k = 0; k < levels.length; k++) {
-        const idx = (cursor + k) % levels.length;
-        if (levels[idx].pending(camX, camZ)) {
-          levels[idx].rebuild(camX, camZ);
-          cursor = (idx + 1) % levels.length;
-          break;
-        }
-      }
-    },
-  };
-}
-
-// A displaced disc covering the full world (radius ~7100 + scatter tail), built
-// once by sampling getGroundHeight per vertex so it matches everything standing
-// on it. While we evaluate the dune shape the segment count is raised (see SEG
-// below) so the crests resolve instead of smoothing into bumps; the final
-// resolution is the bake's call. Books seated on the true height don't float
-// above the mesh because the mesh samples that same height. The ~30u plazas
-// span a couple of facets thanks to the wider plaza falloff.
-//
-// Flat-shaded and vertex-coloured for a low-poly, hand-painted look (Vane): the
-// grid is jittered in-plane so facets read as organic triangles, and the
-// material derives a per-face normal so each facet catches the sun distinctly.
-export function buildGroundMesh(): THREE.Mesh {
-  const SIZE = 18000;
-  // TEMP: raised from 768 to ~12u quads so the dune crests are actually visible
-  // for shape evaluation. This density would smooth away the low-poly facets in
-  // the final look; the heightmap bake will set the real resolution.
-  const SEG = 1536;
-  const quad = SIZE / SEG;
-  const JIT = quad * 0.33; // max in-plane displacement, as a fraction of a quad
-  const geom = new THREE.PlaneGeometry(SIZE, SIZE, SEG, SEG);
-  geom.rotateX(-Math.PI / 2); // into the XZ plane, +y up
-  const pos = geom.attributes.position;
-  const stride = SEG + 1;
-  const colors = new Float32Array(pos.count * 3);
-  const c = new THREE.Color();
-  for (let v = 0; v < pos.count; v++) {
-    const col = v % stride;
-    const row = (v / stride) | 0;
-    let x = pos.getX(v);
-    let z = pos.getZ(v);
-    // jitter interior vertices only, so the mesh edge stays gap-free. Displace
-    // within a DISK (radius JIT), not a square: a square's diagonal reaches
-    // ~1.4x further than its sides, so two neighbours could both lunge along it
-    // and collapse the edge between them into a sliver, which flat-shading turns
-    // into a garbage-normal streak. A disk caps the reach equally in every
-    // direction. sqrt() on the radius keeps the points area-uniform, not bunched
-    // at the centre.
-    if (col > 0 && col < SEG && row > 0 && row < SEG) {
-      const rr = JIT * Math.sqrt(hash2(col, row));
-      const th = hash2(col + 7919, row + 104729) * Math.PI * 2;
-      x += rr * Math.cos(th);
-      z += rr * Math.sin(th);
-    }
-    const y = getGroundHeight(x, z);
-    pos.setXYZ(v, x, y, z);
-    // radial narrative: pale summit -> sand -> grey void, plus a painted wobble.
-    groundColor(x, z, c);
-    colors[v * 3] = c.r;
-    colors[v * 3 + 1] = c.g;
-    colors[v * 3 + 2] = c.b;
-  }
-  pos.needsUpdate = true;
-  geom.setAttribute("color", new THREE.BufferAttribute(colors, 3));
-  // flatShading derives the normal per face from position derivatives, so the
-  // stale vertex normals from PlaneGeometry are ignored; no computeVertexNormals.
-  const mat = new THREE.MeshLambertMaterial({
-    vertexColors: true,
-    flatShading: true,
-  });
-  applyDistanceFade(mat);
-  return new THREE.Mesh(geom, mat);
+  mesh.frustumCulled = false; // one big mesh always wrapping the camera
+  return mesh;
 }
 
 // Inject a camera-distance opacity fade into a material: it goes fully

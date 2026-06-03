@@ -9,7 +9,7 @@ import {
   sampleHeight,
   sampleNormal,
   facetHeight,
-  createGround,
+  buildGround,
   applyDistanceFade,
   type PlayerUniform,
 } from "./terrain";
@@ -277,19 +277,20 @@ function applyProximityGlow(
     shader.uniforms.uGlowBoost = uni.uGlowBoost;
     shader.uniforms.uClouds = cloud.uClouds;
     shader.uniforms.uCloudTime = cloud.uCloudTime;
+    shader.uniforms.uCloudMix = cloud.uCloudMix;
     shader.vertexShader = shader.vertexShader
       .replace(
         "#include <common>",
-        "#include <common>\nvarying vec2 vGlowXZ;",
+        "#include <common>\nvarying vec2 vGlowXZ;\nvarying float vCloudDist;",
       )
       .replace(
         "#include <project_vertex>",
-        "#include <project_vertex>\nvGlowXZ = (modelMatrix * instanceMatrix * vec4(transformed, 1.0)).xz;",
+        "#include <project_vertex>\nvGlowXZ = (modelMatrix * instanceMatrix * vec4(transformed, 1.0)).xz;\nvCloudDist = length(mvPosition.xyz);",
       );
     shader.fragmentShader = shader.fragmentShader
       .replace(
         "#include <common>",
-        "#include <common>\nvarying vec2 vGlowXZ;\nuniform vec2 uPlayer;\n" +
+        "#include <common>\nvarying vec2 vGlowXZ;\nvarying float vCloudDist;\nuniform vec2 uPlayer;\n" +
           "uniform float uGlowRadius;\nuniform float uGlowInner;\n" +
           "uniform float uRestDim;\nuniform float uRestFar;\nuniform float uGlowBoost;\n" +
           CLOUD_FRAG_COMMON,
@@ -306,7 +307,7 @@ function applyProximityGlow(
          gl_FragColor.rgb += gl_FragColor.rgb * glow * uGlowBoost;` +
           // the same drifting cloud shadow the ground takes, so a book darkens with
           // the sand it stands in; faded out into the distance dissolve (vGroundFade).
-          cloudApplyGLSL("vGlowXZ", "vGroundFade"),
+          cloudApplyGLSL("vGlowXZ", "vGroundFade", "vCloudDist"),
       );
   };
 }
@@ -433,6 +434,12 @@ function buildHeads(
   update: (camera: THREE.Camera) => void;
 } {
   const mat = new THREE.MeshLambertMaterial({ color: 0xcbbfa8 }); // sandstone
+  // Fade the heads into the dome with distance, the SAME treatment the books get.
+  // Without it a head stays a full-brightness opaque speck all the way to the
+  // horizon, and a few-pixel high-contrast opaque object crawls against the pixel
+  // grid as the camera moves (the "aura"); the books were calm only because they
+  // already fade out before they shrink to that size (see GLOW_REST_FAR's note).
+  applyDistanceFade(mat);
   applyCloudShadow(mat, cloud, true); // boulders darken under the same drifting shadow
   const group = new THREE.Group();
   const nv = variants.length;
@@ -485,6 +492,7 @@ function buildHeads(
     coarseGeo.scale(HEAD_COARSE_PROXY, HEAD_COARSE_PROXY, HEAD_COARSE_PROXY);
     const coarse = new THREE.InstancedMesh(coarseGeo, mat, Math.max(cnt, 1));
     coarse.frustumCulled = false;
+    coarse.renderOrder = 5; // transparent now (distance fade); draw after the ground
     for (let i = 0; i < cnt; i++) coarse.setMatrixAt(i, tmp.fromArray(mf, i * 16));
     coarse.count = cnt;
     coarse.instanceMatrix.needsUpdate = true;
@@ -493,6 +501,7 @@ function buildHeads(
     const near = new THREE.InstancedMesh(variants[v][0], mat, HEAD_NEAR_CAP);
     near.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
     near.frustumCulled = false;
+    near.renderOrder = 5;
     near.count = 0;
     nearMeshes.push(near);
     group.add(near);
@@ -617,15 +626,13 @@ function buildField(
   midMat.customProgramCacheKey = () => "book:fade+page+glow+cloud";
   nearMat.customProgramCacheKey = () => "book:fade+page+glow+cloud";
 
-  // Explicit renderOrder, the same discipline the ground clipmap uses (terrain.ts,
-  // "all transparent and share the camera's centre, so Three's distance sort flips
-  // per frame and double-blends"). The books are transparent too and were all left
-  // at renderOrder 0, tied with each other and with ground level 0, so the sort
-  // flipped and the overlaps strobed: every near/mid book is also drawn by the
-  // always-on box, and the dense wedge keeps swapping books between the mid mesh and
-  // the box as MID_CAP overflows. Fixed by sequencing them deterministically: the
-  // ground levels draw first (renderOrder 0..4, finest first), then the detail
-  // meshes, then the box LAST. With depthWrite on, the detail writes depth at its
+  // Explicit renderOrder. The books are transparent (distance fade) and were all left
+  // at renderOrder 0, tied with each other and with the ground, so Three's distance
+  // sort flipped per frame and the overlaps strobed: every near/mid book is also drawn
+  // by the always-on box, and the dense wedge keeps swapping books between the mid mesh
+  // and the box as MID_CAP overflows. Fixed by sequencing them deterministically: the
+  // ground draws first (renderOrder 0), then the detail meshes, then the box LAST.
+  // With depthWrite on, the detail writes depth at its
   // larger front surface and the shrunk box behind it fails the test and is never
   // blended on top, so a book resolves to exactly one layer regardless of camera
   // motion. Stays below the teleporter beam (renderOrder 10).
@@ -679,7 +686,7 @@ function buildField(
     // pipeline (x, y) is the ground plane; map to world (x, z), y is up.
     px[i] = x[i] + (rnd() * 2 - 1) * SCATTER;
     pz[i] = y[i] + (rnd() * 2 - 1) * SCATTER;
-    // seat on the facet the clipmap actually draws underfoot, not the smooth
+    // seat on the facet the ground mesh actually draws underfoot, not the smooth
     // sampleHeight field it only chords: on a convex crest the facet sits below the
     // field, so a sampleHeight seat would float. The tilt still follows the smooth
     // normal (the float is a height problem; the facet's own normal would only add
@@ -853,13 +860,12 @@ const TP_BEAM_COLOR = new THREE.Color(0x2f6cff);
 // intersection. Full strength beyond FAR, gone within NEAR (≈ at the stones).
 const TP_BEAM_FADE_NEAR = 18;
 const TP_BEAM_FADE_FAR = 50;
-// The ground clipmap is transparent and assigns each of its levels renderOrder
-// 0..4 (terrain.GROUND_LEVELS). A default-renderOrder beam would draw before the
-// coarser levels, which then paint their opaque-near sand straight over it (the
-// beam writes no depth, so it can't defend those pixels). Drawing the beam after
-// every ground level fixes that; the depth TEST against the ground (which does
-// write depth) still occludes the beam behind nearer dunes, so physical occlusion
-// is preserved. Must stay above the highest ground renderOrder (4).
+// The ground is transparent (distance fade) at the default renderOrder 0. A beam at
+// the same order could draw before the ground, which then paints its opaque-near sand
+// straight over it (the beam writes no depth, so it can't defend those pixels).
+// Drawing the beam after the ground fixes that; the depth TEST against the ground
+// (which does write depth) still occludes the beam behind nearer dunes, so physical
+// occlusion is preserved. Stays above the ground and the books (renderOrder 5).
 const TP_BEAM_RENDER_ORDER = 10;
 // Horizontal radius around a circle's centre within which the travel prompt
 // arms. The stones span STONE_CIRCLE_DIAMETER (9 -> 4.5 radius) on a flattened
@@ -903,6 +909,12 @@ function buildTeleporters(
   // unfaded (no applyDistanceFade) like the other props, though being flat it is
   // lost to the haze at distance: the beam, not the ring, is the far beacon.
   const stoneMat = new THREE.MeshLambertMaterial({ color: 0xcbbfa8 }); // sandstone
+  // Fade the ring into the haze with distance, like the books and heads: an
+  // unfaded opaque ring stays a high-contrast speck at the horizon and crawls
+  // against the pixel grid (the flickering "aura"). The comment below already
+  // expected the ring "lost to the haze at distance"; the fade makes that real
+  // instead of leaving max-contrast confetti. The beam stays the far beacon.
+  applyDistanceFade(stoneMat);
   applyCloudShadow(stoneMat, cloud, false); // stones darken with the sand around them
   // The beam is an open-ended cylinder shaded as a volumetric light shaft. Two
   // gradients shape it: a silhouette-edge term (alpha ~ |view·normal|) that makes
@@ -972,6 +984,7 @@ function buildTeleporters(
     // ring of stones resting on the flattened plaza (terrain levels a disc here).
     const circle = new THREE.Mesh(circleGeom, stoneMat);
     circle.position.set(tp.x, h, tp.y);
+    circle.renderOrder = 5; // transparent now (distance fade); draw after the ground
     group.add(circle);
     // beam rising from the circle's centre, base at the ground. Drawn after the
     // transparent ground levels (see TP_BEAM_RENDER_ORDER) so they can't overpaint
@@ -1381,7 +1394,7 @@ async function main() {
 
   // --- load profiling -------------------------------------------------------
   // Phase wall-clock so load cost is measured, not guessed (console: filter
-  // "[load]"). "seat books" is the one to watch: it rebuilds a clipmap facet per
+  // "[load]"). "seat books" is the one to watch: it reconstructs a ground facet per
   // figure. performance.now() is ms since the page opened, so the final total reads
   // against navigation start and is comparable to the LCP you see in dev tools.
   const t0 = performance.now();
@@ -1406,13 +1419,13 @@ async function main() {
       loadStoneCircle("stone_circle.glb"),
     ]);
   mark("fetch+decode");
-  // the heightmap is the ground-height source for the clipmap and the player's
+  // the heightmap is the ground-height source for the ground mesh and the player's
   // feet; init it before anything samples it.
   initHeightmap(heightmap.res, heightmap.worldSize, heightmap.data);
   // the plazas flatten around the teleporters, so terrain needs them before the
   // books or monuments are seated. Books, monuments, the picker and the ring all read
   // sampleHeight/sampleNormal now, so they seat on the same baked surface the
-  // clipmap draws (no float-off; the analytic field is only the heightmap fallback).
+  // ground mesh draws (no float-off; the analytic field is only the heightmap fallback).
   initTerrain(teleporters);
   // one player-position uniform shared by the ground's raking light and the books'
   // proximity glow, so both reactive pools track the same centre (the overlapping
@@ -1422,11 +1435,11 @@ async function main() {
   // world xz of the ground, books, heads and stones so the same shadow falls on a
   // book and the sand under it. The scene's main source of large-scale motion.
   const clouds = buildClouds();
-  // the ground is a camera-following clipmap tessellated from the heightmap (see
-  // terrain.createGround); no static mesh ships any more.
-  const ground = createGround(uPlayer, clouds.uniforms);
-  ground.update(camera.position.x, camera.position.z);
-  scene.add(ground.group);
+  // the ground is one static mesh tessellated from the heightmap (terrain.buildGround):
+  // no camera-following, no rebuild, no LOD seams. It just sits there; the raking light
+  // and cloud shadow ride on shared uniforms updated in the loop.
+  const ground = buildGround(uPlayer, clouds.uniforms);
+  scene.add(ground);
   // settle the eye onto the baked surface now the heightmap is loaded (spawn was
   // placed on the analytic fallback before the fetch resolved).
   camera.position.y = sampleHeight(camera.position.x, camera.position.z) + EYE_HEIGHT;
@@ -1594,7 +1607,6 @@ async function main() {
   let sinceStat = 0;
   // worst-case ms for the two camera-driven rebuilds, reset each readout window,
   // so a bursty re-tessellation spike shows up instead of being averaged away.
-  let groundMs = 0;
   let booksMs = 0;
   const PICK_INTERVAL = 0.12; // ~8 Hz; the look-at label needn't be per-frame
   renderer.setAnimationLoop(() => {
@@ -1647,23 +1659,18 @@ async function main() {
       tpPrompt.style.display = armed ? "block" : "none";
     }
 
-    // keep the clipmap centred on the camera: each level re-tessellates only when
-    // it crosses one of its own cells, and the discard holes follow every frame.
-    let tA = performance.now();
-    ground.update(camera.position.x, camera.position.z);
-    const gm = performance.now() - tA;
-    if (gm > groundMs) groundMs = gm;
-    tA = performance.now();
+    // the ground is static (built once); only the books refill by LOD as the camera
+    // roams. Time the refill for the HUD.
+    const tA = performance.now();
     built.update(camera.position.x, camera.position.z);
     const bm = performance.now() - tA;
     if (bm > booksMs) booksMs = bm;
     heads.update(camera); // pick each head's LOD by camera distance (a handful)
 
     compass.update();
-    // travelling pools of light: move the shared player-position uniform (book
-    // glow + ground rake) to the player every frame. The book LOD refill and the
-    // clipmap rebuild are both gated by their move distance, far too coarse for a
-    // smooth pool, so the uniform is driven here, not in their update()s.
+    // travelling pools of light: move the shared player-position uniform (book glow +
+    // ground rake) to the player every frame. The book LOD refill is gated by move
+    // distance, far too coarse for a smooth pool, so the uniform is driven here.
     uPlayer.value.set(camera.position.x, camera.position.z);
     // drift the cloud shadows across the whole landscape (ground, books, heads,
     // stones all sample the one shared mask + time).
@@ -1692,9 +1699,7 @@ async function main() {
         `calls  ${r.calls}\n` +
         `tris   ${(r.triangles / 1e6).toFixed(2)}M\n` +
         `books  ${built.nearMesh.count.toLocaleString()} full + ${built.midMesh.count.toLocaleString()} mid / ${field.n.toLocaleString()} box\n` +
-        `ground ${groundMs.toFixed(1)}ms (peak)\n` +
         `bookfl ${booksMs.toFixed(1)}ms (peak)`;
-      groundMs = 0;
       booksMs = 0;
     }
   });
