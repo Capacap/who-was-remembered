@@ -62,6 +62,11 @@ const MOVE = {
   // changes fast and the same filter smooths the dune bumps that would otherwise jolt
   // the camera (and the stomach). Higher = stiffer.
   followK: 12,
+  // seconds of velocity to look ahead when sampling the ground: a steep dune face
+  // lifts the eye before you reach it, so a fast climb reads as a climb, not a snap or
+  // a clip-through. Scales with speed (negligible at a walk), so it only acts when it
+  // matters. The hard floor below is the actual no-clip guarantee; this just smooths it.
+  lookAhead: 0.12,
   // circular world bound, set from world.R_MAX once it loads. Past SOFT the outward
   // velocity is shed so you ease along the edge; HARD is the hard clamp. Both sit
   // inside the terrain mesh and the distance fog, so you coast to a stop in haze and
@@ -1495,10 +1500,22 @@ function createController(camera: THREE.PerspectiveCamera, dom: HTMLElement) {
 
     // pin the eye to the baked ground, smoothed. The skate lift raises it a touch as a
     // tactile cue; the time-constant filter keeps the feet planted at a walk and smooths
-    // dune bumps at skate speed where rigid tracking would jolt the camera.
+    // dune bumps at skate speed where rigid tracking would jolt the camera. Sample at the
+    // body AND a velocity-scaled look-ahead, taking the max so a rising slope lifts the
+    // eye before you reach it (a climb, not a snap) while a crest still eases down.
     const lift = skating ? MOVE.hoverLift : 0;
-    const targetY = sampleHeight(camera.position.x, camera.position.z) + EYE_HEIGHT + lift;
+    const gHere = sampleHeight(camera.position.x, camera.position.z);
+    const gAhead = sampleHeight(
+      camera.position.x + vel.x * MOVE.lookAhead,
+      camera.position.z + vel.z * MOVE.lookAhead,
+    );
+    const targetY = Math.max(gHere, gAhead) + EYE_HEIGHT + lift;
     camera.position.y += (targetY - camera.position.y) * (1 - Math.exp(-MOVE.followK * dt));
+    // hard floor: the smoothing must never lag the eye below the surface on a fast climb
+    // (the clip-through-the-dune bug). Snap up to the ground at the body; downhill is
+    // unaffected because there the eye already sits above this floor.
+    const floorY = gHere + EYE_HEIGHT;
+    if (camera.position.y < floorY) camera.position.y = floorY;
 
     return skating ? "skate" : "walk";
   }
