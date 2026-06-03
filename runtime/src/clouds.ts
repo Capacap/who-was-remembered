@@ -182,7 +182,9 @@ const _dir = [Math.cos(WIND_ANGLE), Math.sin(WIND_ANGLE)];
 const _v1 = [(_dir[0] * WIND1) / SCALE1, (_dir[1] * WIND1) / SCALE1];
 const _v2 = [(_dir[0] * WIND2) / SCALE2, (_dir[1] * WIND2) / SCALE2];
 const NIGHT_GLSL = `vec3(${NIGHT[0].toFixed(3)}, ${NIGHT[1].toFixed(3)}, ${NIGHT[2].toFixed(3)})`;
-const DAY_GLSL = `vec3(${DAY[0].toFixed(3)}, ${DAY[1].toFixed(3)}, ${DAY[2].toFixed(3)})`;
+// exported so the books can cast their sun-reveal in the EXACT daylight colour the
+// ground tints to (see main.ts applyProximityGlow), locking the two to one palette.
+export const DAY_GLSL = `vec3(${DAY[0].toFixed(3)}, ${DAY[1].toFixed(3)}, ${DAY[2].toFixed(3)})`;
 
 // Uniform declarations + the cloudShadow() sampler. Splice into a fragment shader's
 // <common>. cloudShadow(worldXZ, camDist) returns 1 in full day, 0 in full night. The

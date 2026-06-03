@@ -19,6 +19,7 @@ import {
   applyCloudShadow,
   CLOUD_FRAG_COMMON,
   cloudApplyGLSL,
+  DAY_GLSL,
   type CloudUniforms,
 } from "./clouds";
 
@@ -76,13 +77,44 @@ const PAGE_CREAM = new THREE.Color(0xece2cc);
 // geo-hue read in exchange for a starker reveal). GLOW_BOOST is the extra
 // additive glow at the centre of the pool. Eyeball knobs.
 const GLOW_RADIUS = 36; // books dark beyond this horizontal distance from the player
-const GLOW_INNER = 8; // full brightness within this
+const GLOW_INNER = 2; // tight full-brightness core at the player's feet; smooth taper to GLOW_RADIUS
 const GLOW_REST_DIM = 0.12; // resting brightness of a near book outside the pool (0 = black)
 const GLOW_REST_FAR = 0.4; // resting brightness once distance-faded; higher than REST_DIM
 //   so far books are dim dusty specks, not max-contrast black confetti. The dark
 //   specks on bright sand were the worst of the sub-pixel flicker, so lifting the
 //   far floor trades a little of the stark dark field for a calmer horizon.
 const GLOW_BOOST = 0.6; // additive bloom at the pool centre
+
+// Self-emission so a book is a coloured speck even where the night lighting and the
+// proximity dim would otherwise lose it in the dark (the whole field had sunk into
+// the black storm scene). EMISSIVE is a fraction of the book's own geo hue added as
+// true self-light AFTER the cloud tint, so it pierces the storm shadow rather than
+// being multiplied to black under it (a speck bursting through the dark, like the
+// sky). EMISSIVE_NEAR is the extra emission the proximity pool adds, so a book by the
+// player burns brighter than the distant field (see applyProximityGlow).
+const GLOW_EMISSIVE = 0.14; // base self-glow as a fraction of the book's hue
+const GLOW_EMISSIVE_NEAR = 0.5; // extra emission at the pool centre
+
+// The field is never quite still, so it reads as alive rather than as plotted data.
+// The life is MOTION, not a brightness flicker (scaling the emissive made dim-hued
+// books barely move while bright ones winked hard, an inconsistent read). Two effects
+// layer onto the player's proximity pool, both driven by the shared uCloudTime (seconds)
+// so they stay in step with the drifting weather:
+//   - BOB: each book hovers gently above its seat on its OWN hashed phase, so the field
+//     shimmers with uncoordinated motion rather than a marching swell. Strictly positive
+//     (0..AMP) so a book never dips below the sand, where it would clip and read as the
+//     dark "waves" a signed swell produced.
+//   - REVEAL: the sun-reveal. Where a daylight break drifts over a book it lights up in
+//     step with the sand it stands on: a second tap of the SAME cloudShadow field the
+//     ground reads for its day/night tint, cast in the SAME warm DAY colour, so the two
+//     are locked to one sky. The ground swings its whole albedo from near-black to bright
+//     daylight, so to keep the books from looking flat by comparison the reveal is strong
+//     (a book in full sun emits close to its own hue, warmed). It is gated by cloudShadow,
+//     so at night it falls to zero and only the steady uEmissive floor remains, the floor
+//     that keeps books visible in the dark in the first place.
+const BOB_AMP = 0.07; // world units a book hovers above its seat (0..AMP, never below)
+const BOB_SPEED = 0.5; // rad/s; period ~12s
+const GLOW_REVEAL = 2.0; // sun-reveal strength: book self-light at full daylight
 
 interface GlowUniforms {
   uPlayer: PlayerUniform;
@@ -91,6 +123,8 @@ interface GlowUniforms {
   uRestDim: { value: number };
   uRestFar: { value: number };
   uGlowBoost: { value: number };
+  uEmissive: { value: number };
+  uEmissiveNear: { value: number };
 }
 
 // Per-instance variety to break up the uniform-grid read. Rotation/tilt/footprint
@@ -275,17 +309,36 @@ function applyProximityGlow(
     shader.uniforms.uRestDim = uni.uRestDim;
     shader.uniforms.uRestFar = uni.uRestFar;
     shader.uniforms.uGlowBoost = uni.uGlowBoost;
+    shader.uniforms.uEmissive = uni.uEmissive;
+    shader.uniforms.uEmissiveNear = uni.uEmissiveNear;
     shader.uniforms.uClouds = cloud.uClouds;
     shader.uniforms.uCloudTime = cloud.uCloudTime;
     shader.uniforms.uCloudMix = cloud.uCloudMix;
     shader.vertexShader = shader.vertexShader
       .replace(
         "#include <common>",
-        "#include <common>\nvarying vec2 vGlowXZ;\nvarying float vCloudDist;",
+        "#include <common>\nvarying vec2 vGlowXZ;\nvarying float vCloudDist;\n" +
+          "uniform float uCloudTime;\n" +
+          // Dave Hoskins hash12: scales the coord down before any fract, so it keeps
+          // precision out at the disc's ~7000u edge where fract(sin(dot)*43758) aliases
+          // adjacent books to the same value. Drives each book's own bob phase. Returns 0..1.
+          "float bookHash(vec2 p){ vec3 q = fract(vec3(p.xyx) * 0.1031); q += dot(q, q.yzx + 33.33); return fract((q.x + q.y) * q.z); }",
       )
+      // Bob each book. project_vertex has already set gl_Position from mvPosition; recompute
+      // it in world space so the motion is rigid regardless of the per-book spine scale baked
+      // into instanceMatrix (an object-space offset would scale with thickness). Phase keys
+      // off the instance ORIGIN, not the per-vertex position, so a whole book moves as one.
+      //   _bob:  per-book hover, own hashed phase, 0..AMP so it only ever rises.
       .replace(
         "#include <project_vertex>",
-        "#include <project_vertex>\nvGlowXZ = (modelMatrix * instanceMatrix * vec4(transformed, 1.0)).xz;\nvCloudDist = length(mvPosition.xyz);",
+        `#include <project_vertex>
+         vec4 _O = modelMatrix * instanceMatrix * vec4(0.0, 0.0, 0.0, 1.0);
+         vec4 _wpos = modelMatrix * instanceMatrix * vec4(transformed, 1.0);
+         vGlowXZ = _wpos.xz;
+         float _bob = (0.5 + 0.5 * sin(uCloudTime * ${BOB_SPEED.toFixed(3)} + bookHash(_O.xz) * 6.2831853)) * ${BOB_AMP.toFixed(3)};
+         _wpos.y += _bob;
+         gl_Position = projectionMatrix * viewMatrix * _wpos;
+         vCloudDist = length(mvPosition.xyz);`,
       );
     shader.fragmentShader = shader.fragmentShader
       .replace(
@@ -293,6 +346,7 @@ function applyProximityGlow(
         "#include <common>\nvarying vec2 vGlowXZ;\nvarying float vCloudDist;\nuniform vec2 uPlayer;\n" +
           "uniform float uGlowRadius;\nuniform float uGlowInner;\n" +
           "uniform float uRestDim;\nuniform float uRestFar;\nuniform float uGlowBoost;\n" +
+          "uniform float uEmissive;\nuniform float uEmissiveNear;\n" +
           CLOUD_FRAG_COMMON,
       )
       .replace(
@@ -307,7 +361,18 @@ function applyProximityGlow(
          gl_FragColor.rgb += gl_FragColor.rgb * glow * uGlowBoost;` +
           // the same drifting cloud shadow the ground takes, so a book darkens with
           // the sand it stands in; faded out into the distance dissolve (vGroundFade).
-          cloudApplyGLSL("vGlowXZ", "vGroundFade", "vCloudDist"),
+          cloudApplyGLSL("vGlowXZ", "vGroundFade", "vCloudDist") +
+          // self-emission, added AFTER the cloud tint so it is true self-light: it
+          // survives cloud shadow (a book is a speck bursting through the dark, like the
+          // sky) instead of being multiplied to black under the storm. The steady floor
+          // (uEmissive) plus the proximity pool (uEmissiveNear) carry the book's own hue.
+          // The sun-reveal rides on top: where the SAME cloudShadow field that lights the
+          // ground reads daylight, the book emits its hue warmed by the SAME DAY colour
+          // the ground tints to, so a passing sun patch lights book and sand together. It
+          // falls to zero at night, leaving only the floor that keeps books visible there.
+          `gl_FragColor.rgb += diffuseColor.rgb * (uEmissive + glow * uEmissiveNear);
+           float _sun = cloudShadow(vGlowXZ, vCloudDist);
+           gl_FragColor.rgb += diffuseColor.rgb * ${DAY_GLSL} * (_sun * ${GLOW_REVEAL.toFixed(3)});`,
       );
   };
 }
@@ -575,7 +640,15 @@ function buildField(
   // full->mid lands where a book is already a few px, mid->box smaller still. A
   // per-book dither on the inner boundary scatters that swap so it isn't a clean ring
   // sweeping the field as the camera moves.
-  const PROXY = 0.85;
+  // Each book is drawn by EXACTLY ONE mesh. The box draws the whole field; when a book is
+  // promoted to a near/mid detail tier (see update()), its box instance is hidden (zeroed
+  // matrix), so the box and the detail never cover the same book. That removes the overlap
+  // outright, which is what every depth trick here was fighting: a shrunk box read dimmer
+  // than the detail (emission scales with on-screen area), so the detail region glowed in a
+  // cell-quantized bright zone; a depth-biased box sank behind the terrain at grazing angles
+  // and the mid-field vanished. With no overlap the box keeps a plain depth relationship
+  // with the ground (never disappears) and there is no box-vs-detail seam to hide.
+  const PROXY = 1.0;
   const boxGeo = new THREE.BoxGeometry(
     (bb.max.x - bb.min.x) * PROXY,
     SPINE * PROXY,
@@ -604,6 +677,8 @@ function buildField(
     uRestDim: { value: GLOW_REST_DIM },
     uRestFar: { value: GLOW_REST_FAR },
     uGlowBoost: { value: GLOW_BOOST },
+    uEmissive: { value: GLOW_EMISSIVE },
+    uEmissiveNear: { value: GLOW_EMISSIVE_NEAR },
   };
   const farMat = new THREE.MeshLambertMaterial();
   applyDistanceFade(farMat);
@@ -627,19 +702,17 @@ function buildField(
   nearMat.customProgramCacheKey = () => "book:fade+page+glow+cloud";
 
   // Explicit renderOrder. The books are transparent (distance fade) and were all left
-  // at renderOrder 0, tied with each other and with the ground, so Three's distance
-  // sort flipped per frame and the overlaps strobed: every near/mid book is also drawn
-  // by the always-on box, and the dense wedge keeps swapping books between the mid mesh
-  // and the box as MID_CAP overflows. Fixed by sequencing them deterministically: the
-  // ground draws first (renderOrder 0), then the detail meshes, then the box LAST.
-  // With depthWrite on, the detail writes depth at its
-  // larger front surface and the shrunk box behind it fails the test and is never
-  // blended on top, so a book resolves to exactly one layer regardless of camera
-  // motion. Stays below the teleporter beam (renderOrder 10).
-  const RO_DETAIL = 5; // near/mid detail: after the ground, before the box
-  const RO_BOX = 7; // the always-on box base: drawn last so detail occludes it
+  // at renderOrder 0, tied with each other and with the ground, so Three's distance sort
+  // flipped per frame. Since a book is now drawn by exactly one mesh (promoted instances
+  // are hidden in the box), the tiers never overlap, so this is purely a deterministic
+  // transparent-sort order: ground first (renderOrder 0), then the books, below the
+  // teleporter beam (renderOrder 10). Keep detail before box so blends are stable.
+  const RO_DETAIL = 5; // near/mid detail: after the ground
+  const RO_BOX = 7; // the box base: the rest of the field
   const farMesh = new THREE.InstancedMesh(boxGeo, farMat, n);
-  farMesh.instanceMatrix.setUsage(THREE.StaticDrawUsage);
+  // dynamic: update() hides/restores instances as books move in and out of the detail
+  // tiers, so the box matrix is rewritten on each rebuild, not just once at build.
+  farMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
   farMesh.frustumCulled = false; // spans the whole disc; never wholly off-screen
   farMesh.renderOrder = RO_BOX;
   const midMesh = new THREE.InstancedMesh(bookMid, midMat, MID_CAP);
@@ -771,6 +844,12 @@ function buildField(
   const maxRing = Math.ceil(R_MID / CELL) + 1; // cells beyond this are wholly out of range
   const m = new THREE.Matrix4();
   const c = new THREE.Color();
+  // a book promoted to a detail tier has its box instance collapsed to a point (zero
+  // scale -> degenerate, no fragments), so the box never double-draws it. We track the
+  // promoted ids so the next rebuild can restore their box matrix before re-promoting.
+  const HIDE = new THREE.Matrix4().makeScale(0, 0, 0);
+  const hidden = new Int32Array(NEAR_CAP + MID_CAP);
+  let nHidden = 0;
   let lastX = Infinity;
   let lastZ = Infinity;
   function update(camX: number, camZ: number): void {
@@ -779,6 +858,13 @@ function buildField(
     if (mdx * mdx + mdz * mdz < RB2) return;
     lastX = camX;
     lastZ = camZ;
+    // restore the box instances hidden last rebuild; the walk below re-hides whichever
+    // are still promoted, so a book that fell out of the detail tiers reappears in the box.
+    for (let h = 0; h < nHidden; h++) {
+      const i = hidden[h];
+      farMesh.setMatrixAt(i, m.fromArray(fullMat, i * 16));
+    }
+    nHidden = 0;
     const cgx = Math.floor((camX - minX) / CELL);
     const cgz = Math.floor((camZ - minZ) / CELL);
     let kNear = 0;
@@ -802,11 +888,15 @@ function buildField(
           nearMesh.setMatrixAt(kNear, m.fromArray(fullMat, i * 16));
           nearMesh.setColorAt(kNear, c.fromArray(fullCol, i * 3));
           kNear++;
+          farMesh.setMatrixAt(i, HIDE); // detail draws it; collapse the box copy
+          hidden[nHidden++] = i;
         } else if (kMid < MID_CAP) {
           // mid band, or a near-band book that overflowed NEAR_CAP (still gets detail)
           midMesh.setMatrixAt(kMid, m.fromArray(fullMat, i * 16));
           midMesh.setColorAt(kMid, c.fromArray(fullCol, i * 3));
           kMid++;
+          farMesh.setMatrixAt(i, HIDE); // detail draws it; collapse the box copy
+          hidden[nHidden++] = i;
         }
         // else: both detail caps full, the always-drawn box base covers this book
       }
@@ -835,6 +925,8 @@ function buildField(
     midMesh.count = kMid;
     midMesh.instanceMatrix.needsUpdate = true;
     if (midMesh.instanceColor) midMesh.instanceColor.needsUpdate = true;
+    // the restores and re-hides above rewrote a subset of the box matrix; push it once.
+    farMesh.instanceMatrix.needsUpdate = true;
   }
 
   const group = new THREE.Group();
