@@ -27,8 +27,8 @@ import * as THREE from "three";
 // blobs); OCT adds finer structure. The noise is periodic over BASE_PERIOD so the
 // tile is seamless.
 const RES = 256;
-const BASE_PERIOD = 4;
-const OCT = 4;
+const BASE_PERIOD = 6;
+const OCT = 3;
 
 // Two sampling layers in world space: a mid layer that carries the read and a
 // larger, slower underlay that de-correlates the tiling. World units per tile.
@@ -48,7 +48,7 @@ const WIND2 = 7;
 // centred near 0.5): smoothstep(LO, HI) is the day fraction; below LO is full night.
 // The LO..HI band is the terminator: widen it and night and day blend over a longer
 // gradient, tighten it for a starker divide.
-const COVER_LO = 0.5;
+const COVER_LO = 0.50;
 const COVER_HI = 1.0;
 
 // The night/day multipliers, LINEAR (gl_FragColor is linear before the colorspace
