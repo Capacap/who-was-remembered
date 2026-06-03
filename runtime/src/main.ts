@@ -36,9 +36,44 @@ const info = document.getElementById("info") as HTMLDivElement;
 // (see DESIGN.md / stage6). Eye height and speeds are in metres, converted once.
 const UNITS_PER_METRE = 1.4;
 const EYE_HEIGHT = 1.7 * UNITS_PER_METRE; // ~2.4u: stand a head above the sand
-const WALK_SPEED = 2.5; // units/sec, DESIGN's deliberately slow pace
-const RUN_MULT = 5; // hold-to-run
-const FLY_SPEED = 60; // crossing the void on foot is an 80-min walk by design
+// Grounded movement is velocity-based with acceleration: two modes that share one
+// continuous feel, so there's no toggle the player has to discover.
+//   walk  - default; high accel AND high decel, low top speed. Crisp and precise for
+//           reading: you start and stop almost instantly, the deliberate slow pace.
+//   skate - hold Shift; high accel but LOW decel and a high top speed. You build
+//           momentum and coast, so crossing the empty antiquity voids is a long glide
+//           rather than a dead walk. Release Shift and you drop to walk's high decel,
+//           braking to a stop quickly. Book picking is suppressed while skating so the
+//           prompts don't strobe as you blow past the field.
+// Decel is a RATE applied to the live velocity, never a clamp: releasing Shift at full
+// skate speed bleeds the speed off smoothly from wherever you were, it doesn't snap to
+// the walk cap. Top speed only limits what acceleration may ADD. Numbers are units/sec
+// or units/sec^2 and live on one object so they can be tuned live from the devtools
+// console (window.MOVE) without a rebuild.
+const MOVE = {
+  walk: { max: 5, accel: 30, decel: 50 },
+  skate: { max: 80, accel: 30, decel: 15 },
+  // the eye lifts this much the instant you start skating: a small, deliberate cue
+  // that the button did something, well short of an actual fly-height float. The
+  // ground-follow filter eases it in and out, so it reads as rising onto the glide.
+  hoverLift: 0.8,
+  // ground-follow stiffness: a fixed time-constant filter on eye height. At a walk the
+  // terrain target barely moves so the feet stay planted; at skate speed the target
+  // changes fast and the same filter smooths the dune bumps that would otherwise jolt
+  // the camera (and the stomach). Higher = stiffer.
+  followK: 12,
+  // circular world bound, set from world.R_MAX once it loads. Past SOFT the outward
+  // velocity is shed so you ease along the edge; HARD is the hard clamp. Both sit
+  // inside the terrain mesh and the distance fog, so you coast to a stop in haze and
+  // never see the ground run out.
+  boundSoft: Infinity,
+  boundHard: Infinity,
+};
+(window as unknown as { MOVE: typeof MOVE }).MOVE = MOVE;
+
+// Dev-only free flight (F). Kept as a tool: it clips terrain and breaks the grounded
+// premise, so it's off the player HUD, but it's too useful for inspection to cut.
+const FLY_SPEED = 60;
 const FLY_RUN_MULT = 6;
 
 // tier -> beacon colour only. Size is now a separate axis (book_scale, from
@@ -1347,68 +1382,131 @@ function createCompass(
 }
 
 // --- first-person controller ----------------------------------------------
-// PointerLockControls owns the look (Euler camera, pitch clamped internally).
-// We own translation: a key-state object drives a velocity each frame. Walk
-// mode pins Y to the ground; fly mode frees Y and follows the full look vector.
+// PointerLockControls owns the look (Euler camera, pitch clamped internally). We own
+// translation. Grounded movement (walk + skate) integrates a persistent velocity with
+// per-mode accel/decel and pins the eye to the baked ground through a smoothing filter;
+// dev flight (F) keeps the old instant free-Y model untouched.
+type MoveMode = "walk" | "skate" | "fly";
 function createController(camera: THREE.PerspectiveCamera, dom: HTMLElement) {
   const controls = new PointerLockControls(camera, dom);
   const keys = new Set<string>();
+  const vel = new THREE.Vector3(); // carried horizontal velocity (xz; y stays 0)
   let flying = false;
 
   const onKeyDown = (e: KeyboardEvent) => {
-    if (e.code === "KeyF") flying = !flying;
+    if (e.code === "KeyF") {
+      flying = !flying; // dev fly toggle; drop carried momentum so neither mode lurches
+      vel.set(0, 0, 0);
+    }
     keys.add(e.code);
   };
   const onKeyUp = (e: KeyboardEvent) => keys.delete(e.code);
   document.addEventListener("keydown", onKeyDown);
   document.addEventListener("keyup", onKeyUp);
-  // releasing the lock (Esc) should also drop held keys, or the player keeps
-  // drifting after the cursor reappears.
-  controls.addEventListener("unlock", () => keys.clear());
+  // releasing the lock (Esc) drops held keys AND the carried velocity, or the player
+  // keeps gliding after the cursor reappears.
+  controls.addEventListener("unlock", () => {
+    keys.clear();
+    vel.set(0, 0, 0);
+  });
   dom.addEventListener("click", () => controls.lock());
 
   const forward = new THREE.Vector3();
   const right = new THREE.Vector3();
-  const move = new THREE.Vector3();
+  const wish = new THREE.Vector3();
+  const target = new THREE.Vector3();
   const UP = new THREE.Vector3(0, 1, 0);
 
-  function update(dt: number) {
-    if (!controls.isLocked) return flying;
+  // move `vel` toward `target` by at most `maxDelta`, as a vector so a turn swings the
+  // heading and accel/decel scale the magnitude under one rule. This is what makes
+  // releasing Shift bleed speed off smoothly instead of snapping to a cap.
+  const approach = (maxDelta: number) => {
+    target.sub(vel); // the delta we'd ideally apply this frame
+    const len = target.length();
+    if (len <= maxDelta || len === 0) vel.add(target);
+    else vel.addScaledVector(target, maxDelta / len);
+  };
+
+  function update(dt: number): MoveMode {
+    if (!controls.isLocked) return flying ? "fly" : "walk";
 
     camera.getWorldDirection(forward);
-    if (!flying) forward.y = 0; // walk: ignore pitch, move along the ground
+    if (!flying) forward.y = 0; // grounded: ignore pitch, move along the ground
     forward.normalize();
     right.crossVectors(forward, UP).normalize();
 
-    move.set(0, 0, 0);
-    if (keys.has("KeyW") || keys.has("ArrowUp")) move.add(forward);
-    if (keys.has("KeyS") || keys.has("ArrowDown")) move.sub(forward);
-    if (keys.has("KeyD") || keys.has("ArrowRight")) move.add(right);
-    if (keys.has("KeyA") || keys.has("ArrowLeft")) move.sub(right);
     if (flying) {
-      if (keys.has("Space")) move.y += 1;
-      if (keys.has("KeyC")) move.y -= 1;
+      // dev free flight: instant velocity, free Y, Shift boosts. Unchanged.
+      wish.set(0, 0, 0);
+      if (keys.has("KeyW") || keys.has("ArrowUp")) wish.add(forward);
+      if (keys.has("KeyS") || keys.has("ArrowDown")) wish.sub(forward);
+      if (keys.has("KeyD") || keys.has("ArrowRight")) wish.add(right);
+      if (keys.has("KeyA") || keys.has("ArrowLeft")) wish.sub(right);
+      if (keys.has("Space")) wish.y += 1;
+      if (keys.has("KeyC")) wish.y -= 1;
+      const boost = keys.has("ShiftLeft") || keys.has("ShiftRight") ? FLY_RUN_MULT : 1;
+      if (wish.lengthSq() > 0) {
+        wish.normalize().multiplyScalar(FLY_SPEED * boost * dt);
+        camera.position.add(wish);
+      }
+      return "fly";
     }
 
-    const running = keys.has("ShiftLeft") || keys.has("ShiftRight");
-    const base = flying ? FLY_SPEED : WALK_SPEED;
-    const speed = base * (running ? (flying ? FLY_RUN_MULT : RUN_MULT) : 1);
+    // grounded: walk by default, skate while Shift is held.
+    const skating = keys.has("ShiftLeft") || keys.has("ShiftRight");
+    const cfg = skating ? MOVE.skate : MOVE.walk;
 
-    if (move.lengthSq() > 0) {
-      move.normalize().multiplyScalar(speed * dt);
-      camera.position.add(move);
+    wish.set(0, 0, 0);
+    if (keys.has("KeyW") || keys.has("ArrowUp")) wish.add(forward);
+    if (keys.has("KeyS") || keys.has("ArrowDown")) wish.sub(forward);
+    if (keys.has("KeyD") || keys.has("ArrowRight")) wish.add(right);
+    if (keys.has("KeyA") || keys.has("ArrowLeft")) wish.sub(right);
+
+    if (wish.lengthSq() > 0) {
+      // accelerate toward the wished heading at top speed
+      target.copy(wish.normalize()).multiplyScalar(cfg.max);
+      approach(cfg.accel * dt);
+    } else {
+      // no input: ease toward rest at the mode's decel (skate coasts, walk brakes hard)
+      target.set(0, 0, 0);
+      approach(cfg.decel * dt);
     }
-    // walk mode keeps the eye a fixed height above the ground every frame;
-    // fly mode leaves Y wherever the player flew it. The walk height reads the
-    // baked heightmap (the same field the near patch tessellates), so the feet
-    // sit on the visible near ground rather than the analytic surface.
-    if (!flying) {
-      camera.position.y = sampleHeight(camera.position.x, camera.position.z) + EYE_HEIGHT;
+
+    camera.position.x += vel.x * dt;
+    camera.position.z += vel.z * dt;
+
+    // circular world bound: past SOFT shed the outward velocity so you ease along the
+    // edge, and hard-clamp at HARD. Both sit in the fog, so the stop reads as the world
+    // thinning out rather than a wall.
+    const r = Math.hypot(camera.position.x, camera.position.z);
+    if (r > MOVE.boundSoft) {
+      const nx = camera.position.x / r;
+      const nz = camera.position.z / r;
+      const outward = vel.x * nx + vel.z * nz;
+      if (outward > 0) {
+        vel.x -= outward * nx;
+        vel.z -= outward * nz;
+      }
+      if (r > MOVE.boundHard) {
+        camera.position.x = nx * MOVE.boundHard;
+        camera.position.z = nz * MOVE.boundHard;
+      }
     }
-    return flying;
+
+    // pin the eye to the baked ground, smoothed. The skate lift raises it a touch as a
+    // tactile cue; the time-constant filter keeps the feet planted at a walk and smooths
+    // dune bumps at skate speed where rigid tracking would jolt the camera.
+    const lift = skating ? MOVE.hoverLift : 0;
+    const targetY = sampleHeight(camera.position.x, camera.position.z) + EYE_HEIGHT + lift;
+    camera.position.y += (targetY - camera.position.y) * (1 - Math.exp(-MOVE.followK * dt));
+
+    return skating ? "skate" : "walk";
   }
 
-  return { controls, update };
+  // zero the carried velocity (teleport/spawn shouldn't arrive mid-glide).
+  const stop = () => vel.set(0, 0, 0);
+
+  return { controls, update, stop };
 }
 
 async function main() {
@@ -1458,7 +1556,7 @@ async function main() {
   renderer.setSize(window.innerWidth, window.innerHeight);
   document.body.appendChild(renderer.domElement);
 
-  const { controls, update } = createController(camera, renderer.domElement);
+  const { controls, update, stop } = createController(camera, renderer.domElement);
   scene.add(controls.object);
 
   // perf monitor: stats.js panel (click to cycle FPS / ms / MB) plus a text
@@ -1539,6 +1637,11 @@ async function main() {
   // settle the eye onto the baked surface now the heightmap is loaded (spawn was
   // placed on the analytic fallback before the fetch resolved).
   camera.position.y = sampleHeight(camera.position.x, camera.position.z) + EYE_HEIGHT;
+  // bound the player inside the content disc, well within the terrain mesh and the
+  // distance fog, so skating outward eases to a stop in haze rather than reaching the
+  // ground's edge.
+  MOVE.boundSoft = world.R_MAX + 300;
+  MOVE.boundHard = world.R_MAX + 800;
   mark("terrain");
   const built = buildField(field, bookLods[0], bookLods[1], uPlayer, clouds.uniforms);
   mark("seat books");
@@ -1627,6 +1730,7 @@ async function main() {
     window.setTimeout(() => {
       const tp = teleporters[dest];
       camera.position.set(tp.x, sampleHeight(tp.x, tp.y) + EYE_HEIGHT, tp.y);
+      stop(); // arrive at rest, not mid-glide
       fade.style.opacity = "0"; // fade back in on the destination
       window.setTimeout(() => {
         traveling = false;
@@ -1680,13 +1784,13 @@ async function main() {
   });
 
   const hint =
-    "click to look · WASD move · Shift run · F fly · Space/C up·down · E inspect · T travel · Esc release";
-  const setHud = (flying: boolean) => {
-    info.innerHTML = `${field.n.toLocaleString()} figures · ${
-      flying ? "flying" : "walking"
-    } · centre = year 2000<br>${hint}`;
+    "click to look · WASD move · Shift skate · E inspect · T travel · Esc release";
+  const setHud = (mode: MoveMode) => {
+    const label = mode === "fly" ? "flying (dev)" : mode === "skate" ? "skating" : "walking";
+    info.innerHTML =
+      `${field.n.toLocaleString()} figures · ${label} · centre = year 2000<br>${hint}`;
   };
-  setHud(false);
+  setHud("walk");
 
   window.addEventListener("resize", () => {
     camera.aspect = window.innerWidth / window.innerHeight;
@@ -1698,7 +1802,7 @@ async function main() {
   console.log(`[load] total ${(performance.now() - t0).toFixed(0)}ms to first frame`);
 
   const clock = new THREE.Clock();
-  let wasFlying = false;
+  let mode: MoveMode = "walk";
   let sincePick = 0;
   let sinceStat = 0;
   // worst-case ms for the two camera-driven rebuilds, reset each readout window,
@@ -1707,15 +1811,16 @@ async function main() {
   const PICK_INTERVAL = 0.12; // ~8 Hz; the look-at label needn't be per-frame
   renderer.setAnimationLoop(() => {
     const dt = Math.min(clock.getDelta(), 0.1); // clamp after tab-out stalls
-    const flying = update(dt);
-    if (flying !== wasFlying) {
-      setHud(flying);
-      wasFlying = flying;
+    const m = update(dt);
+    if (m !== mode) {
+      setHud(m);
+      mode = m;
     }
 
     // look-at picking: only while walking the scene (locked) and not inspecting.
+    // Suppressed while skating so the glance prompt doesn't strobe as books blow past.
     sincePick += dt;
-    if (!overlayOpen && controls.isLocked) {
+    if (!overlayOpen && controls.isLocked && mode !== "skate") {
       if (sincePick >= PICK_INTERVAL) {
         sincePick = 0;
         target = pick();
@@ -1751,7 +1856,7 @@ async function main() {
             `<div class="tp-act">press <kbd>T</kbd> to travel</div>`;
         }
       }
-      const armed = nearTp >= 0 && !overlayOpen && controls.isLocked;
+      const armed = nearTp >= 0 && !overlayOpen && controls.isLocked && mode !== "skate";
       tpPrompt.style.display = armed ? "block" : "none";
     }
 
