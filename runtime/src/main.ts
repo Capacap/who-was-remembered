@@ -14,6 +14,13 @@ import {
   type PlayerUniform,
 } from "./terrain";
 import { buildSky } from "./sky";
+import {
+  buildClouds,
+  applyCloudShadow,
+  CLOUD_FRAG_COMMON,
+  cloudApplyGLSL,
+  type CloudUniforms,
+} from "./clouds";
 
 // --- walkable field --------------------------------------------------------
 // One instanced box per figure, placed straight from the pipeline's (x, y), with
@@ -254,7 +261,11 @@ function applyPageMask(mat: THREE.Material): void {
 // before the distance-fade alpha at <dithering_fragment>, so a far book both dims
 // and fades. The shared uniforms object is assigned by reference to every patched
 // material, so updating uPlayer once per frame moves the pool on all of them.
-function applyProximityGlow(mat: THREE.Material, uni: GlowUniforms): void {
+function applyProximityGlow(
+  mat: THREE.Material,
+  uni: GlowUniforms,
+  cloud: CloudUniforms,
+): void {
   const prev = mat.onBeforeCompile;
   mat.onBeforeCompile = (shader, renderer) => {
     if (prev) prev.call(mat, shader, renderer);
@@ -264,6 +275,8 @@ function applyProximityGlow(mat: THREE.Material, uni: GlowUniforms): void {
     shader.uniforms.uRestDim = uni.uRestDim;
     shader.uniforms.uRestFar = uni.uRestFar;
     shader.uniforms.uGlowBoost = uni.uGlowBoost;
+    shader.uniforms.uClouds = cloud.uClouds;
+    shader.uniforms.uCloudTime = cloud.uCloudTime;
     shader.vertexShader = shader.vertexShader
       .replace(
         "#include <common>",
@@ -278,7 +291,8 @@ function applyProximityGlow(mat: THREE.Material, uni: GlowUniforms): void {
         "#include <common>",
         "#include <common>\nvarying vec2 vGlowXZ;\nuniform vec2 uPlayer;\n" +
           "uniform float uGlowRadius;\nuniform float uGlowInner;\n" +
-          "uniform float uRestDim;\nuniform float uRestFar;\nuniform float uGlowBoost;",
+          "uniform float uRestDim;\nuniform float uRestFar;\nuniform float uGlowBoost;\n" +
+          CLOUD_FRAG_COMMON,
       )
       .replace(
         "#include <opaque_fragment>",
@@ -289,7 +303,10 @@ function applyProximityGlow(mat: THREE.Material, uni: GlowUniforms): void {
          // set by applyDistanceFade upstream), so far specks lose contrast and stop crawling.
          float restFloor = mix(uRestDim, uRestFar, vGroundFade);
          gl_FragColor.rgb *= mix(restFloor, 1.0, glow);
-         gl_FragColor.rgb += gl_FragColor.rgb * glow * uGlowBoost;`,
+         gl_FragColor.rgb += gl_FragColor.rgb * glow * uGlowBoost;` +
+          // the same drifting cloud shadow the ground takes, so a book darkens with
+          // the sand it stands in; faded out into the distance dissolve (vGroundFade).
+          cloudApplyGLSL("vGlowXZ", "vGroundFade"),
       );
   };
 }
@@ -410,11 +427,13 @@ async function loadDecorations(url: string): Promise<Decoration[]> {
 function buildHeads(
   variants: THREE.BufferGeometry[][],
   decos: Decoration[],
+  cloud: CloudUniforms,
 ): {
   group: THREE.Group;
   update: (camera: THREE.Camera) => void;
 } {
   const mat = new THREE.MeshLambertMaterial({ color: 0xcbbfa8 }); // sandstone
+  applyCloudShadow(mat, cloud, true); // boulders darken under the same drifting shadow
   const group = new THREE.Group();
   const nv = variants.length;
   // world-vertical extent of each variant once laid face-up: the head's local z
@@ -520,6 +539,7 @@ function buildField(
   bookNear: THREE.BufferGeometry, // LOD00, full detail, drawn closest
   bookMid: THREE.BufferGeometry, // LOD01, drawn across the mid band
   uPlayer: PlayerUniform, // shared player-position uniform (also drives the ground rake)
+  cloud: CloudUniforms, // shared cloud-shadow uniforms (also drift over the ground)
 ) {
   const { n, x, y, tier, geo, lon, scale } = field;
   // the scale byte is the normalized article length (export_runtime quantized the
@@ -578,24 +598,24 @@ function buildField(
   };
   const farMat = new THREE.MeshLambertMaterial();
   applyDistanceFade(farMat);
-  applyProximityGlow(farMat, glow);
+  applyProximityGlow(farMat, glow, cloud);
   const midMat = new THREE.MeshLambertMaterial();
   applyDistanceFade(midMat);
   applyPageMask(midMat);
-  applyProximityGlow(midMat, glow);
+  applyProximityGlow(midMat, glow, cloud);
   const nearMat = new THREE.MeshLambertMaterial();
   applyDistanceFade(nearMat);
   applyPageMask(nearMat);
-  applyProximityGlow(nearMat, glow);
+  applyProximityGlow(nearMat, glow, cloud);
   // All three now share applyProximityGlow as their outermost onBeforeCompile, so
   // their default program-cache keys (= onBeforeCompile.toString(), closure vars
   // excluded) collide. far has no page mask while mid/near do, so without a
   // distinguishing key three would hand all three whichever program compiled
   // first. Key on the actual patch stack: mid/near are identical (share a program,
   // correct), far is its own. Same defence the ground material uses for its holes.
-  farMat.customProgramCacheKey = () => "book:fade+glow";
-  midMat.customProgramCacheKey = () => "book:fade+page+glow";
-  nearMat.customProgramCacheKey = () => "book:fade+page+glow";
+  farMat.customProgramCacheKey = () => "book:fade+glow+cloud";
+  midMat.customProgramCacheKey = () => "book:fade+page+glow+cloud";
+  nearMat.customProgramCacheKey = () => "book:fade+page+glow+cloud";
 
   // Explicit renderOrder, the same discipline the ground clipmap uses (terrain.ts,
   // "all transparent and share the camera's centre, so Three's distance sort flips
@@ -873,12 +893,17 @@ async function loadHeightmap(
   return { res, worldSize, data };
 }
 
-function buildTeleporters(list: Teleporter[], circleGeom: THREE.BufferGeometry) {
+function buildTeleporters(
+  list: Teleporter[],
+  circleGeom: THREE.BufferGeometry,
+  cloud: CloudUniforms,
+) {
   // The stones take the same sandstone as the heads and props, so the monument
   // reads as carved from the desert rather than dropped onto it. Opaque and
   // unfaded (no applyDistanceFade) like the other props, though being flat it is
   // lost to the haze at distance: the beam, not the ring, is the far beacon.
   const stoneMat = new THREE.MeshLambertMaterial({ color: 0xcbbfa8 }); // sandstone
+  applyCloudShadow(stoneMat, cloud, false); // stones darken with the sand around them
   // The beam is an open-ended cylinder shaded as a volumetric light shaft. Two
   // gradients shape it: a silhouette-edge term (alpha ~ |view·normal|) that makes
   // a view ray glowing brightest where it passes through the most of the column
@@ -1295,11 +1320,17 @@ async function main() {
   const HORIZON = new THREE.Color(0x847b6d);
   scene.background = HORIZON;
 
-  // time-encoded sky dome (see sky.ts): a warm present-glow toward the world
-  // origin, cooling and darkening toward the deep-past rim, the dome deepening
-  // with the player's radial depth. It recentres on the camera each frame (see
-  // the loop) so it reads as infinitely far and the world never shows an edge.
-  const sky = buildSky();
+  // The world sunlight and the sky's warm glow share one bearing, so the bright
+  // side of the dome is where the sun actually is, and neither moves as the player
+  // walks (see sky.ts). ~9deg elevation: grazing, for long tonal gradients on the
+  // dunes. Used below for the DirectionalLight too.
+  const SUN_POS = new THREE.Vector3(-700, 130, 380);
+
+  // dusk sky dome (see sky.ts): a warm glow fixed at the sun bearing, cooling to
+  // the anti-sun side, the whole dome deepening with the player's radial depth into
+  // the past. It recentres on the camera each frame (see the loop) so it reads as
+  // infinitely far and the world never shows an edge.
+  const sky = buildSky(SUN_POS);
   scene.add(sky.mesh);
 
   const camera = new THREE.PerspectiveCamera(
@@ -1337,14 +1368,15 @@ async function main() {
   camera.position.set(0, sampleHeight(0, 0) + EYE_HEIGHT, 0);
   camera.lookAt(0, 0, 8000);
 
-  // Dusk rig matching the time-sky: a low, warm, raking sun so every dune face
-  // shows light/dark contrast (a grazing sun maximises the cosine difference
-  // between slopes, which is what makes the dunes read as 3D), over a dim, cool
-  // hemisphere ambient so the directional term dominates instead of flooding the
-  // slopes flat. The old high sun + strong ambient washed the relief out.
+  // Dusk rig matching the sky: a low, warm, raking sun so every dune face shows
+  // light/dark contrast (a grazing sun maximises the cosine difference between
+  // slopes, which is what makes the dunes read as 3D), over a dim, cool hemisphere
+  // ambient so the directional term dominates instead of flooding the slopes flat.
+  // The sun sits on SUN_POS, the same bearing the sky's warm glow uses, so the lit
+  // ground and the bright sky agree.
   scene.add(new THREE.HemisphereLight(0xffd9b3, 0x2b2f47, 0.5));
   const sun = new THREE.DirectionalLight(0xffb066, 2.3);
-  sun.position.set(-700, 130, 380); // ~9deg elevation: grazing, long tonal gradients
+  sun.position.copy(SUN_POS);
   scene.add(sun);
 
   // --- load profiling -------------------------------------------------------
@@ -1386,21 +1418,25 @@ async function main() {
   // proximity glow, so both reactive pools track the same centre (the overlapping
   // light radii). Updated once per frame in the loop.
   const uPlayer: PlayerUniform = { value: new THREE.Vector2(0, 0) };
+  // drifting cloud shadows (see clouds.ts): one shared mask + time, sampled at the
+  // world xz of the ground, books, heads and stones so the same shadow falls on a
+  // book and the sand under it. The scene's main source of large-scale motion.
+  const clouds = buildClouds();
   // the ground is a camera-following clipmap tessellated from the heightmap (see
   // terrain.createGround); no static mesh ships any more.
-  const ground = createGround(uPlayer);
+  const ground = createGround(uPlayer, clouds.uniforms);
   ground.update(camera.position.x, camera.position.z);
   scene.add(ground.group);
   // settle the eye onto the baked surface now the heightmap is loaded (spawn was
   // placed on the analytic fallback before the fetch resolved).
   camera.position.y = sampleHeight(camera.position.x, camera.position.z) + EYE_HEIGHT;
   mark("terrain");
-  const built = buildField(field, bookLods[0], bookLods[1], uPlayer);
+  const built = buildField(field, bookLods[0], bookLods[1], uPlayer, clouds.uniforms);
   mark("seat books");
   built.update(camera.position.x, camera.position.z);
   scene.add(built.group);
-  scene.add(buildTeleporters(teleporters, stoneCircle));
-  const heads = buildHeads(headVariants, decorations); // half-buried scatter (Stage 10)
+  scene.add(buildTeleporters(teleporters, stoneCircle, clouds.uniforms));
+  const heads = buildHeads(headVariants, decorations, clouds.uniforms); // half-buried scatter (Stage 10)
   scene.add(heads.group);
 
   mark("props");
@@ -1629,15 +1665,19 @@ async function main() {
     // clipmap rebuild are both gated by their move distance, far too coarse for a
     // smooth pool, so the uniform is driven here, not in their update()s.
     uPlayer.value.set(camera.position.x, camera.position.z);
-    // keep the dome centred on the viewer, and steer the time-sky: warm present
-    // toward the origin, the dome deepening with radial depth into the past.
+    // drift the cloud shadows across the whole landscape (ground, books, heads,
+    // stones all sample the one shared mask + time).
+    clouds.update(dt);
+    // keep the dome centred on the viewer (so it reads as infinitely far), and
+    // deepen it with radial depth into the past. The warm glow's bearing is fixed
+    // to the sun, so the dome no longer steers off the camera position.
     sky.mesh.position.copy(camera.position);
     const depth = clamp(
       Math.hypot(camera.position.x, camera.position.z) / world.R_MAX,
       0,
       1,
     );
-    sky.update(camera.position.x, camera.position.z, depth);
+    sky.update(depth);
     renderer.render(scene, camera);
 
     // read renderer.info AFTER render (it resets per frame), throttled to ~4 Hz so

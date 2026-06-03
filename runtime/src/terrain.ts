@@ -1,4 +1,5 @@
 import * as THREE from "three";
+import { CLOUD_FRAG_COMMON, cloudApplyGLSL, type CloudUniforms } from "./clouds";
 
 // --- terrain ----------------------------------------------------------------
 // The world is a near-flat desert and the dunes are its relief, not a texture
@@ -453,6 +454,7 @@ function applyGroundMaterial(
   mat: THREE.MeshLambertMaterial,
   holeHalf: number,
   uPlayer: PlayerUniform,
+  cloud: CloudUniforms,
 ): { value: THREE.Vector2 } | null {
   mat.transparent = true;
   const holeCenter = holeHalf > 0 ? { value: new THREE.Vector2(0, 0) } : null;
@@ -467,6 +469,8 @@ function applyGroundMaterial(
   mat.onBeforeCompile = (shader) => {
     if (holeCenter) shader.uniforms.uHoleCenter = holeCenter;
     shader.uniforms.uPlayer = uPlayer;
+    shader.uniforms.uClouds = cloud.uClouds;
+    shader.uniforms.uCloudTime = cloud.uCloudTime;
     shader.vertexShader = shader.vertexShader
       .replace(
         "#include <common>",
@@ -487,6 +491,7 @@ function applyGroundMaterial(
     let frag = shader.fragmentShader.replace(
       "#include <common>",
       "#include <common>\nvarying float vGroundFade;\nvarying vec3 vWorldPos;\nuniform vec2 uPlayer;" +
+        CLOUD_FRAG_COMMON +
         (holeCenter
           ? "\nuniform vec2 uHoleCenter;\nvarying vec2 vGroundXZ;"
           : ""),
@@ -516,7 +521,10 @@ function applyGroundMaterial(
          float fall = 1.0 - smoothstep(${PLAYER_LIGHT_INNER.toFixed(1)}, ${PLAYER_LIGHT_RADIUS.toFixed(1)}, pdist);
          float rake = max(dot(wn, normalize(toP)), 0.0);
          gl_FragColor.rgb += ${PLAYER_LIGHT_RGB} * (${PLAYER_LIGHT_STRENGTH.toFixed(2)} * fall * rake);
-       }`,
+       }` +
+        // drifting cloud shadow over the dunes, faded back out into the distance
+        // dissolve so the far ground keeps its clean fade into the dome.
+        cloudApplyGLSL("vWorldPos.xz", "vGroundFade"),
     );
     shader.fragmentShader = frag.replace(
       "#include <dithering_fragment>",
@@ -674,6 +682,7 @@ function buildGroundLevel(
   index: number,
   hasCoarser: boolean,
   uPlayer: PlayerUniform,
+  cloud: CloudUniforms,
 ): {
   mesh: THREE.Mesh;
   track: (camX: number, camZ: number) => void;
@@ -721,7 +730,7 @@ function buildGroundLevel(
     vertexColors: true,
     flatShading: true,
   });
-  const holeCenter = applyGroundMaterial(mat, hole, uPlayer);
+  const holeCenter = applyGroundMaterial(mat, hole, uPlayer, cloud);
   // The morph leaves the fine outer ring coplanar with the coarse hole edge they
   // meet at. renderOrder (below) draws finer first, but GL_LESS lets a coplanar
   // coarse fragment that rounds to the same depth slip through and z-fight as a
@@ -861,13 +870,16 @@ function buildGroundLevel(
 // grouped. update() drives them all (each snaps to its own cell, so the coarse
 // levels rebuild rarely). Built entirely from the heightmap, so ground.bin and the
 // analytic dune code are both retired.
-export function createGround(uPlayer: PlayerUniform): {
+export function createGround(
+  uPlayer: PlayerUniform,
+  cloud: CloudUniforms,
+): {
   group: THREE.Group;
   update: (camX: number, camZ: number) => void;
 } {
   const group = new THREE.Group();
   const levels = GROUND_LEVELS.map((lvl, i) =>
-    buildGroundLevel(lvl, i, i < GROUND_LEVELS.length - 1, uPlayer),
+    buildGroundLevel(lvl, i, i < GROUND_LEVELS.length - 1, uPlayer, cloud),
   );
   for (const l of levels) group.add(l.mesh);
   let primed = false; // first call builds every level; after that, one per frame
