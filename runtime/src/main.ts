@@ -1646,10 +1646,13 @@ async function main() {
   // proximity glow, so both reactive pools track the same centre (the overlapping
   // light radii). Updated once per frame in the loop.
   const uPlayer: PlayerUniform = { value: new THREE.Vector2(0, 0) };
+  // skate state for the ground's cool glow pool: ramped 0..1 in the loop so the blue
+  // blooms in/out with the mode rather than snapping on with the Shift key.
+  const uSkate = { value: 0 };
   // the ground is one static mesh tessellated from the heightmap (terrain.buildGround):
   // no camera-following, no rebuild, no LOD seams. It just sits there; the raking light
   // and cloud shadow ride on shared uniforms updated in the loop.
-  const ground = buildGround(uPlayer, clouds.uniforms);
+  const ground = buildGround(uPlayer, uSkate, clouds.uniforms);
   scene.add(ground);
   // settle the eye onto the baked surface now the heightmap is loaded (spawn was
   // placed on the analytic fallback before the fetch resolved).
@@ -1901,6 +1904,9 @@ async function main() {
     // ground rake) to the player every frame. The book LOD refill is gated by move
     // distance, far too coarse for a smooth pool, so the uniform is driven here.
     uPlayer.value.set(camera.position.x, camera.position.z);
+    // ease the skate glow toward on/off so the blue pool blooms in and out instead of
+    // popping with the Shift key (time-constant filter, same shape as the eye-lift).
+    uSkate.value += ((mode === "skate" ? 1 : 0) - uSkate.value) * (1 - Math.exp(-6 * dt));
     // drift the cloud shadows across the whole landscape (ground, books, heads,
     // stones all sample the one shared mask + time).
     clouds.update(dt);

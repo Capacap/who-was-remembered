@@ -201,6 +201,19 @@ const PLAYER_LIGHT_HEIGHT = 6; // light's height over the player; lower = more g
 const _pl = PLAYER_LIGHT_COLOR.clone().convertSRGBToLinear();
 const PLAYER_LIGHT_RGB = `vec3(${_pl.r.toFixed(4)}, ${_pl.g.toFixed(4)}, ${_pl.b.toFixed(4)})`;
 
+// Skate glow: a cool pool that blooms under the player while hovering, a second
+// signal (beyond the small hover lift) that Shift is doing something. It shares the
+// raking pool's centre and normal but is wider and mostly flat (lightly raked), so it
+// reads as the ground glowing beneath you rather than a directional light. Ramped by
+// uSkate (0..1) in the loop so it eases in/out with the mode. Eyeball knobs, baked as
+// GLSL literals like the warm pool; rebuild to retune.
+const SKATE_GLOW_COLOR = new THREE.Color(0x4a86ff); // cool blue pool
+const SKATE_GLOW_RADIUS = 60; // wider than the warm rake, reads as a halo
+const SKATE_GLOW_INNER = 2;
+const SKATE_GLOW_STRENGTH = 0.8; // additive intensity at centre, times uSkate
+const _sg = SKATE_GLOW_COLOR.clone().convertSRGBToLinear();
+const SKATE_GLOW_RGB = `vec3(${_sg.r.toFixed(4)}, ${_sg.g.toFixed(4)}, ${_sg.b.toFixed(4)})`;
+
 // A live uniform carrying the player's world-xz position, shared between the
 // ground's raking light and the books' proximity glow so both pools share a centre.
 export interface PlayerUniform {
@@ -424,12 +437,14 @@ function applyGroundMaterial(
   mat: THREE.MeshLambertMaterial,
   cell: number,
   uPlayer: PlayerUniform,
+  uSkate: { value: number },
   cloud: CloudUniforms,
 ): void {
   mat.transparent = true;
   const fadeSpan = (FADE_END - FADE_START).toFixed(1);
   mat.onBeforeCompile = (shader) => {
     shader.uniforms.uPlayer = uPlayer;
+    shader.uniforms.uSkate = uSkate;
     shader.uniforms.uClouds = cloud.uClouds;
     shader.uniforms.uCloudTime = cloud.uCloudTime;
     shader.uniforms.uCloudMix = cloud.uCloudMix;
@@ -454,7 +469,7 @@ function applyGroundMaterial(
       );
     let frag = shader.fragmentShader.replace(
       "#include <common>",
-      "#include <common>\nvarying float vGroundFade;\nvarying float vCloudDist;\nvarying vec3 vWorldPos;\nvarying vec2 vCloudXZ;\nuniform vec2 uPlayer;" +
+      "#include <common>\nvarying float vGroundFade;\nvarying float vCloudDist;\nvarying vec3 vWorldPos;\nvarying vec2 vCloudXZ;\nuniform vec2 uPlayer;\nuniform float uSkate;" +
         CLOUD_FRAG_COMMON,
     );
     // Raking pool, additive after lighting (linear space, before the colorspace
@@ -474,6 +489,11 @@ function applyGroundMaterial(
          float fall = 1.0 - smoothstep(${PLAYER_LIGHT_INNER.toFixed(1)}, ${PLAYER_LIGHT_RADIUS.toFixed(1)}, pdist);
          float rake = max(dot(wn, normalize(toP)), 0.0);
          gl_FragColor.rgb += ${PLAYER_LIGHT_RGB} * (${PLAYER_LIGHT_STRENGTH.toFixed(2)} * fall * rake);
+         // cool pool while skating: wider, mostly-radial blue glow under the player,
+         // ramped by uSkate so it blooms in as Shift engages. Lightly raked so the
+         // ground reads as glowing beneath you rather than lit by a second sun.
+         float bfall = 1.0 - smoothstep(${SKATE_GLOW_INNER.toFixed(1)}, ${SKATE_GLOW_RADIUS.toFixed(1)}, pdist);
+         gl_FragColor.rgb += uSkate * ${SKATE_GLOW_RGB} * (${SKATE_GLOW_STRENGTH.toFixed(2)} * bfall * (0.45 + 0.55 * rake));
        }` +
         // drifting cloud shadow over the dunes, sinking toward the night floor into
         // the distance dissolve so the far ground darkens to meet the black storm dome.
@@ -615,6 +635,7 @@ export function facetHeight(x: number, z: number): number {
 // and never rebuilt: it sits still while the shared uPlayer/cloud uniforms move.
 export function buildGround(
   uPlayer: PlayerUniform,
+  uSkate: { value: number },
   cloud: CloudUniforms,
 ): THREE.Mesh {
   const cell = GROUND_CELL;
@@ -675,7 +696,7 @@ export function buildGround(
     vertexColors: true,
     flatShading: true,
   });
-  applyGroundMaterial(mat, cell, uPlayer, cloud);
+  applyGroundMaterial(mat, cell, uPlayer, uSkate, cloud);
   const mesh = new THREE.Mesh(geom, mat);
   mesh.frustumCulled = false; // one big mesh always wrapping the camera
   return mesh;
