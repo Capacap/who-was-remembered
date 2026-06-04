@@ -82,6 +82,30 @@ WIND_Z = np.sin(WIND_ANGLE)
 NOISE_INNER = PLATEAU_R  # dunes start past the calm present plateau
 NOISE_FULL = 1400.0  # ... at full height by here
 
+# --- spiral twist (polar warp) ----------------------------------------------
+# The dune frame is twisted by an angle that grows with radius, so the straight
+# transverse bands wind into spirals emanating from the centre. The twist is a
+# pre-warp of the sample coordinates (not a rotating wind vector, which would
+# break the crest level-sets); straight bands in the twisted frame pull back to
+# spirals in world space. SWIRL = 0 leaves the original diagonal dune field.
+SWIRL = 0.4  # twist strength (radians of frame rotation per unit of the law)
+SWIRL_LAW = "log"  # "log": phi = SWIRL*ln(r/r0) (constant pitch, self-similar)
+#                    "linear": phi = SWIRL*(r-r0)/1000 (arms tighten outward)
+SWIRL_R0 = PLATEAU_R  # radius of zero twist; the spiral unwinds to nothing here
+
+# --- large-scale spiral arms (the readable vortex) --------------------------
+# Twisting the fine dunes alone reads as combed texture, not a vortex, and in
+# the game's flat dark light it washes out. So the vortex is carried by a second,
+# much larger scale: broad log-spiral swells laid over the normal dunes. The
+# dunes stay sand; these arms are the shape you read from a vantage. Gentle by
+# construction (big wavelength -> shallow slopes -> walkable, and broad enough to
+# catch flat light as sweeping tonal bands). psi = ARMS*theta + PITCH*ln(r); an
+# integer arm count keeps the atan2 branch cut seamless.
+SPIRAL_AMP = 55.0  # swell height, world units (0 = no arms)
+SPIRAL_ARMS = 2  # number of arms (must be integer for a seamless wrap)
+SPIRAL_PITCH = 2.8  # winding tightness: arms turn faster per ln(r) as this grows
+SPIRAL_R0 = PLATEAU_R  # arms phase-anchored here (where the dune envelope opens)
+
 # --- slip-face asymmetry (raster ops, no runtime equivalent) ----------------
 # The symmetric ridged field reads as sand waves. Real transverse dunes lean
 # downwind: a long gentle windward ramp, a short steep lee face. We get that in
@@ -170,6 +194,45 @@ def hill(r: np.ndarray) -> np.ndarray:
     return PEAK_HEIGHT * (1 - smootherstep((r - PLATEAU_R) / (BASE_R - PLATEAU_R)))
 
 
+def swirl_angle(r: np.ndarray) -> np.ndarray:
+    """Frame-rotation angle at each radius; 0 everywhere when SWIRL is off."""
+    if SWIRL == 0.0:
+        return np.zeros_like(r)
+    rr = np.maximum(r, 1.0)  # guard log/divide at the very centre
+    if SWIRL_LAW == "linear":
+        return SWIRL * (rr - SWIRL_R0) / 1000.0
+    return SWIRL * np.log(rr / SWIRL_R0)  # log spiral: constant pitch
+
+
+def swirl_coords(x: np.ndarray, z: np.ndarray, r: np.ndarray) -> tuple:
+    """Rotate (x, z) about the origin by swirl_angle(r), winding bands to spirals."""
+    phi = swirl_angle(r)
+    c, s = np.cos(phi), np.sin(phi)
+    return c * x - s * z, s * x + c * z
+
+
+def lee_wind(r: np.ndarray) -> tuple:
+    """Per-cell downwind direction for the slip-face lean, following each arm.
+
+    The dunes are built in the frame twisted by +swirl_angle, so the world-space
+    along-wind direction is the global wind rotated by -swirl_angle. With SWIRL
+    off this is just the constant (WIND_X, WIND_Z), broadcast over the grid.
+    """
+    phi = swirl_angle(r)
+    c, s = np.cos(-phi), np.sin(-phi)
+    return c * WIND_X - s * WIND_Z, s * WIND_X + c * WIND_Z
+
+
+def spiral_arms(x: np.ndarray, z: np.ndarray, r: np.ndarray) -> np.ndarray:
+    """Broad log-spiral swells: the large-scale vortex laid over the dunes."""
+    if SPIRAL_AMP == 0.0:
+        return np.zeros_like(r)
+    env = smootherstep((r - NOISE_INNER) / (NOISE_FULL - NOISE_INNER))
+    theta = np.arctan2(z, x)
+    psi = SPIRAL_ARMS * theta + SPIRAL_PITCH * np.log(np.maximum(r, 1.0) / SPIRAL_R0)
+    return env * SPIRAL_AMP * np.cos(psi)
+
+
 def dune_symmetric(x: np.ndarray, z: np.ndarray, r: np.ndarray) -> np.ndarray:
     """Anisotropic ridged dune offset, faded in past the present plateau.
 
@@ -177,6 +240,7 @@ def dune_symmetric(x: np.ndarray, z: np.ndarray, r: np.ndarray) -> np.ndarray:
     avalanche passes turn it into leaning dunes; see dune_relief.
     """
     env = smootherstep((r - NOISE_INNER) / (NOISE_FULL - NOISE_INNER))
+    x, z = swirl_coords(x, z, r)  # twist the dune frame into a spiral (no-op if off)
     # meander the crest lines so they aren't ruled straight
     wx = x + WARP_AMP * perlin(x / WARP_SCALE, z / WARP_SCALE)
     wz = z + WARP_AMP * perlin(x / WARP_SCALE + 41.3, z / WARP_SCALE + 17.9)
@@ -206,7 +270,8 @@ def _bilinear(F: np.ndarray, row: np.ndarray, col: np.ndarray) -> np.ndarray:
             + f10 * fr * (1 - fc) + f11 * fr * fc)
 
 
-def lee_shear(D: np.ndarray, texel: float) -> np.ndarray:
+def lee_shear(D: np.ndarray, texel: float,
+              wind_x: np.ndarray, wind_z: np.ndarray) -> np.ndarray:
     """Shear the field downwind by LEE_SHEAR * height, so the dunes lean.
 
     Models a forward warp p -> p + L*D(p)*wind: every column of sand slides
@@ -216,7 +281,8 @@ def lee_shear(D: np.ndarray, texel: float) -> np.ndarray:
     output cell q solve p = q - L*D(p)*wind by fixed-point iteration, then read
     D at p. A single pass leaves it symmetric; the iterations are what resolve
     the lean, so LEE_SHEAR_ITERS must stay >= ~4. Columns index world x, rows
-    index world z, and (WIND_X, WIND_Z) is the wind in that frame.
+    index world z. (wind_x, wind_z) is the downwind direction, per cell so the
+    slip faces can follow a spiralled field outward (a constant frame if off).
     """
     if LEE_SHEAR <= 0 or LEE_SHEAR_ITERS < 1:
         return D
@@ -226,8 +292,8 @@ def lee_shear(D: np.ndarray, texel: float) -> np.ndarray:
     pc, pr = qc.copy(), qr.copy()
     for _ in range(LEE_SHEAR_ITERS):
         shift = LEE_SHEAR * _bilinear(D, pr, pc) / texel  # in texels, at source
-        pc = qc - shift * WIND_X
-        pr = qr - shift * WIND_Z
+        pc = qc - shift * wind_x
+        pr = qr - shift * wind_z
     return _bilinear(D, pr, pc)
 
 
@@ -263,7 +329,8 @@ def dune_relief(x: np.ndarray, z: np.ndarray, r: np.ndarray,
                 texel: float) -> np.ndarray:
     """Asymmetric dune relief: symmetric field, sheared downwind, avalanched."""
     D = dune_symmetric(x, z, r)
-    D = lee_shear(D, texel)
+    lwx, lwz = lee_wind(r)  # per-cell downwind dir (follows the spiral, or const)
+    D = lee_shear(D, texel, lwx, lwz)
     D = avalanche(D, texel)
     return D
 
@@ -279,7 +346,7 @@ def bake_heightmap(res: int, teleporters: np.ndarray) -> np.ndarray:
     gx, gz = np.meshgrid(axis, axis)  # gx varies along columns, gz along rows
     r = np.hypot(gx, gz)
 
-    H = hill(r) + dune_relief(gx, gz, r, texel)
+    H = hill(r) + dune_relief(gx, gz, r, texel) + spiral_arms(gx, gz, r)
 
     # Carve a level plaza at each teleporter: blend the field toward the
     # monument's own local ground height inside FLATTEN_R, easing back to the
@@ -314,10 +381,10 @@ def bake_window(cx: float, cz: float, size: float, px: int) -> tuple[np.ndarray,
     az = cz - size / 2 + (np.arange(px) + 0.5) * texel
     gx, gz = np.meshgrid(ax, az)
     r = np.hypot(gx, gz)
-    return hill(r) + dune_relief(gx, gz, r, texel), texel
+    return hill(r) + dune_relief(gx, gz, r, texel) + spiral_arms(gx, gz, r), texel
 
 
-def report_asymmetry(H: np.ndarray, texel: float) -> None:
+def report_asymmetry(H: np.ndarray, texel: float, wind: tuple) -> None:
     """Print windward-vs-lee slope stats for a dune patch, as an objective read.
 
     Projects the gradient onto the wind axis: climbing toward a crest (windward)
@@ -325,8 +392,9 @@ def report_asymmetry(H: np.ndarray, texel: float) -> None:
     windward slopes and steep lee slopes, so the lee/windward mean-slope ratio
     is the asymmetry number; 1.0 is a symmetric field.
     """
+    wind_x, wind_z = wind
     dz, dx = np.gradient(H, texel)  # dH/dz (rows), dH/dx (cols)
-    g = dx * WIND_X + dz * WIND_Z  # along-wind directional derivative
+    g = dx * wind_x + dz * wind_z  # along-wind directional derivative
     windward = g[g > 0]  # climbing toward the crest as we go downwind
     lee = -g[g < 0]  # dropping off the lee as we continue downwind
     if windward.size and lee.size:
@@ -352,7 +420,7 @@ def year_to_radius(year: float) -> float:
 
 
 def render(H: np.ndarray, teleporters: np.ndarray, crop: dict, out: Path,
-           vert_exag: float, dpi: int) -> None:
+           vert_exag: float, dpi: int, wind: tuple) -> None:
     res = H.shape[0]
     texel = WORLD_SIZE / res
     half = WORLD_SIZE / 2
@@ -419,19 +487,20 @@ def render(H: np.ndarray, teleporters: np.ndarray, crop: dict, out: Path,
     axc.set_title(f"dune crop @ ({cx:.0f}, {cz:.0f}), {cs:.0f}u wide "
                   f"({crop['texel']:.1f}u/texel)")
     # draw the profile line (a downwind transect through the crop centre)
+    wind_x, wind_z = wind
     cH = crop["H"]
     n = cH.shape[0]
     half_n = (n - 1) / 2
     tline = np.arange(n) - half_n
-    px = cx + tline * crop["texel"] * WIND_X
-    pz = cz + tline * crop["texel"] * WIND_Z
+    px = cx + tline * crop["texel"] * wind_x
+    pz = cz + tline * crop["texel"] * wind_z
     axc.plot(px, pz, color="#39ff8c", lw=1.2, alpha=0.9)
 
     # Bottom: an along-wind elevation transect through the crop centre. The wind
     # blows toward +s, so a leaning dune should show a long gentle windward ramp
     # rising to the crest then a short steep drop down the lee face.
     s_world = tline * crop["texel"]
-    samp = _bilinear(cH, half_n + tline * WIND_Z, half_n + tline * WIND_X)
+    samp = _bilinear(cH, half_n + tline * wind_z, half_n + tline * wind_x)
     axp.plot(s_world, samp, color="#b5651d", lw=1.6)
     axp.fill_between(s_world, samp.min(), samp, color="#b5651d", alpha=0.18)
     axp.set_xlabel("downwind distance along transect (u)  -->  wind direction")
@@ -472,17 +541,44 @@ def main() -> None:
                         help="override REPOSE_DEG (lee-face stable angle)")
     parser.add_argument("--aval-iters", type=int, default=None,
                         help="override AVALANCHE_ITERS (sand-slide passes)")
+    parser.add_argument("--swirl", type=float, default=None,
+                        help="override SWIRL (spiral twist strength; 0 = straight)")
+    parser.add_argument("--swirl-law", choices=("log", "linear"), default=None,
+                        help="override SWIRL_LAW (log = constant pitch)")
+    parser.add_argument("--swirl-r0", type=float, default=None,
+                        help="override SWIRL_R0 (radius of zero twist)")
+    parser.add_argument("--spiral-amp", type=float, default=None,
+                        help="override SPIRAL_AMP (large arm swell height; 0 = off)")
+    parser.add_argument("--spiral-arms", type=int, default=None,
+                        help="override SPIRAL_ARMS (number of arms, integer)")
+    parser.add_argument("--spiral-pitch", type=float, default=None,
+                        help="override SPIRAL_PITCH (arm winding tightness)")
     args = parser.parse_args()
 
-    global LEE_SHEAR, REPOSE_DEG, AVALANCHE_ITERS
+    global LEE_SHEAR, REPOSE_DEG, AVALANCHE_ITERS, SWIRL, SWIRL_LAW, SWIRL_R0
+    global SPIRAL_AMP, SPIRAL_ARMS, SPIRAL_PITCH
     if args.lean is not None:
         LEE_SHEAR = args.lean
     if args.repose is not None:
         REPOSE_DEG = args.repose
     if args.aval_iters is not None:
         AVALANCHE_ITERS = args.aval_iters
+    if args.swirl is not None:
+        SWIRL = args.swirl
+    if args.swirl_law is not None:
+        SWIRL_LAW = args.swirl_law
+    if args.swirl_r0 is not None:
+        SWIRL_R0 = args.swirl_r0
+    if args.spiral_amp is not None:
+        SPIRAL_AMP = args.spiral_amp
+    if args.spiral_arms is not None:
+        SPIRAL_ARMS = args.spiral_arms
+    if args.spiral_pitch is not None:
+        SPIRAL_PITCH = args.spiral_pitch
     print(f"asymmetry: lean={LEE_SHEAR:g} repose={REPOSE_DEG:g}deg "
           f"avalanche={AVALANCHE_ITERS} passes")
+    print(f"swirl: {SWIRL:g} ({SWIRL_LAW}, r0={SWIRL_R0:g})")
+    print(f"spiral arms: amp={SPIRAL_AMP:g} arms={SPIRAL_ARMS} pitch={SPIRAL_PITCH:g}")
 
     start = time.perf_counter()
 
@@ -510,9 +606,13 @@ def main() -> None:
 
     cx, cz = args.crop_center
     cH, ctexel = bake_window(cx, cz, args.crop_size, 1536)
-    report_asymmetry(cH, ctexel)
+    # local downwind direction at the crop centre (rotates with the swirl), so
+    # the asymmetry transect runs across the dunes, not at a global-wind angle.
+    cwx, cwz = lee_wind(np.hypot(cx, cz))
+    cwind = (float(cwx), float(cwz))
+    report_asymmetry(cH, ctexel, cwind)
     crop = {"H": cH, "texel": ctexel, "cx": cx, "cz": cz, "size": args.crop_size}
-    render(H, teleporters, crop, args.out_png, args.vert_exag, args.dpi)
+    render(H, teleporters, crop, args.out_png, args.vert_exag, args.dpi, cwind)
     print(f"  wrote {args.out_png}")
     print(f"done in {time.perf_counter() - start:.1f}s")
 
