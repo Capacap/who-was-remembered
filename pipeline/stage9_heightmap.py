@@ -118,6 +118,16 @@ SMOOTH_BLUR = 220.0  # density blur radius, world units (~the dune scale)
 SMOOTH_PCTL = 98.0  # density percentile mapped to full attenuation
 SMOOTH_BLUR2 = 400.0  # post-clip blur, world units: feathers the saturated rim, spreads the mask
 
+# --- central vortex calm ----------------------------------------------------
+# The dunes spiral all the way in (a true vortex), but a radial calm flattens
+# them toward the centre so spawn stays a clean vantage. Full calm across the
+# vantage dome, easing out over a long ramp so the dunes rise gently through the
+# eye and book ring rather than walling the horizon. Combined with the book
+# density by union (max), never summed, so the two never over-flatten.
+CENTER_STRENGTH = 1.0  # max calm at the centre (1 = dead flat on the vantage dome)
+CENTER_CALM_R0 = 220.0  # full-calm pocket radius (= the vantage dome foot)
+CENTER_CALM_R1 = 1400.0  # ... dunes back to full amplitude by here
+
 # --- radial spiral dunes (the radiating texture) ----------------------------
 # The dunes read as TEXTURE that radiates from the centre. They are ridged noise
 # (ridges on the zero-set of fBm, which fork, merge and pinch off organically),
@@ -375,7 +385,6 @@ def dune_spiral(x: np.ndarray, z: np.ndarray, r: np.ndarray) -> np.ndarray:
     """
     if SP_AMP == 0.0:
         return np.zeros_like(r)
-    env = smootherstep((r - NOISE_INNER) / (NOISE_FULL - NOISE_INNER))
     rr = np.maximum(r, 1.0)
     theta = np.arctan2(z, x)
     tp = theta - SP_TWIST * np.log(rr / SP_R0)  # spiralled angle, coherent across octaves
@@ -392,7 +401,7 @@ def dune_spiral(x: np.ndarray, z: np.ndarray, r: np.ndarray) -> np.ndarray:
         out = out + w * _spiral_ridge(ang, lnr, k, SP_ASPECT)
         wsum = wsum + w
     out = np.where(wsum > 1e-6, out / np.maximum(wsum, 1e-6), out)  # full height at band edges
-    return env * SP_AMP * out
+    return SP_AMP * out  # radial envelope applied later by dune_envelope (unified calm)
 
 
 def dune_spiral_relief(x: np.ndarray, z: np.ndarray, r: np.ndarray,
@@ -472,25 +481,44 @@ def book_density_field(books: np.ndarray, res: int, texel: float) -> np.ndarray:
     return gaussian_filter(mask, SMOOTH_BLUR2 / texel)
 
 
+def dune_envelope(r: np.ndarray, density: np.ndarray) -> np.ndarray:
+    """The single amplitude envelope on the spiral dunes, in [0, 1].
+
+    Two calming sources combine by union (max), never summed: a radial centre
+    calm that flattens the dunes toward spawn (full inside CENTER_CALM_R0, easing
+    to none by CENTER_CALM_R1) so the vantage stays clean while the spiral still
+    reaches inward, and the book-density calm so clusters read as visible mass.
+    A point is calmed by whichever source wants it calmer, so the centre pocket
+    and a dense cluster on top of it saturate at flat rather than over-flattening.
+    """
+    center_calm = CENTER_STRENGTH * (
+        1.0 - smootherstep((r - CENTER_CALM_R0) / (CENTER_CALM_R1 - CENTER_CALM_R0)))
+    calm = np.maximum(center_calm, SMOOTH_STRENGTH * density)
+    return 1.0 - np.clip(calm, 0.0, 1.0)
+
+
 def bake_heightmap(res: int, teleporters: np.ndarray,
-                   books: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+                   books: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Sample the height field on a res x res grid over the world square.
 
-    Returns (H, density). H[i, j] has j indexing world x and i indexing world z,
-    both at pixel centres: x = -W/2 + (j + 0.5) * texel, z = -W/2 + (i + 0.5) *
-    texel. density is the same-shaped normalised book-density field used to calm the
-    dunes, returned for inspection.
+    Returns (H, density, envelope). H[i, j] has j indexing world x and i indexing
+    world z, both at pixel centres: x = -W/2 + (j + 0.5) * texel, z = -W/2 + (i +
+    0.5) * texel. density is the normalised book-density field; envelope is the
+    combined dune amplitude scale (centre calm unioned with book calm). Both are
+    same-shaped and returned for inspection.
     """
     texel = WORLD_SIZE / res
     axis = -WORLD_SIZE / 2 + (np.arange(res) + 0.5) * texel
     gx, gz = np.meshgrid(axis, axis)  # gx varies along columns, gz along rows
     r = np.hypot(gx, gz)
 
-    # Calm the dunes where books cluster (the hill, swell and centre are structure,
-    # left untouched; only the occluding dune texture is attenuated).
+    # Scale the dunes by the unified envelope: calm toward the centre (clean
+    # vantage, dunes spiralling gently inward) unioned with book-density calm
+    # (clusters read as mass). The hill, swell and centre are structure, untouched;
+    # only the occluding dune texture is attenuated.
     dens = book_density_field(books, res, texel)
-    atten = 1.0 - SMOOTH_STRENGTH * dens
-    H = (hill(r) + atten * dune_spiral_relief(gx, gz, r, texel)
+    env = dune_envelope(r, dens)
+    H = (hill(r) + env * dune_spiral_relief(gx, gz, r, texel)
          + spiral_swell(gx, gz, r) + center_texture(gx, gz, r))
 
     # Carve a level plaza at each teleporter: blend the field toward the
@@ -512,7 +540,7 @@ def bake_heightmap(res: int, teleporters: np.ndarray,
             blend = 1 - smootherstep((d - FLATTEN_R) / FLATTEN_FALLOFF)
             H += (th[k] - H) * blend
 
-    return H, dens
+    return H, dens, env
 
 
 def bake_window(cx: float, cz: float, size: float, px: int) -> tuple[np.ndarray, float]:
@@ -688,14 +716,13 @@ def _overlay_structure(ax, teleporters: np.ndarray) -> None:
     ax.set_aspect("equal")
 
 
-def render_density(density: np.ndarray, teleporters: np.ndarray, out: Path,
-                   dpi: int) -> None:
-    """Inspect the book-density smoothing: the density field and the dune
-    attenuation it produces, side by side with the world structure overlaid."""
+def render_density(density: np.ndarray, envelope: np.ndarray,
+                   teleporters: np.ndarray, out: Path, dpi: int) -> None:
+    """Inspect the dune smoothing: the book-density field and the combined dune
+    envelope (centre calm unioned with book calm), side by side with structure."""
     res = density.shape[0]
     half = WORLD_SIZE / 2
     extent = [-half, half, -half, half]
-    atten = 1.0 - SMOOTH_STRENGTH * density
 
     fig = plt.figure(figsize=(26, 13), dpi=dpi)
     fig.subplots_adjust(left=0.04, right=0.97, top=0.9, bottom=0.05, wspace=0.16)
@@ -707,11 +734,12 @@ def render_density(density: np.ndarray, teleporters: np.ndarray, out: Path,
     fig.colorbar(im, ax=axd, fraction=0.046, pad=0.04, label="normalised density")
     axd.set_title(f"book density (blur={SMOOTH_BLUR:g}u, pctl={SMOOTH_PCTL:g})")
 
-    im = axa.imshow(atten, extent=extent, origin="lower", cmap="viridis",
-                    vmin=1 - SMOOTH_STRENGTH, vmax=1)
+    im = axa.imshow(envelope, extent=extent, origin="lower", cmap="viridis",
+                    vmin=0, vmax=1)
     fig.colorbar(im, ax=axa, fraction=0.046, pad=0.04, label="dune amplitude x")
-    axa.set_title(f"dune attenuation (strength={SMOOTH_STRENGTH:g}): "
-                  f"dark = calmed to {1 - SMOOTH_STRENGTH:.0%}")
+    axa.set_title(f"dune envelope: centre calm (R0={CENTER_CALM_R0:g} "
+                  f"R1={CENTER_CALM_R1:g}) U book calm (strength={SMOOTH_STRENGTH:g}); "
+                  f"dark = flat")
 
     for ax in (axd, axa):
         _overlay_structure(ax, teleporters)
@@ -877,7 +905,7 @@ def main() -> None:
 
     texel = WORLD_SIZE / args.res
     print(f"baking {args.res}x{args.res} heightmap ({texel:.2f}u/texel)...")
-    H, density = bake_heightmap(args.res, teleporters, books)
+    H, density, envelope = bake_heightmap(args.res, teleporters, books)
     print(f"  elevation range {H.min():.1f}..{H.max():.1f}u")
 
     args.out_npz.parent.mkdir(parents=True, exist_ok=True)
@@ -897,7 +925,7 @@ def main() -> None:
     print(f"  wrote {args.out_png}")
 
     if books.size:
-        render_density(density, teleporters, args.out_density_png, args.dpi)
+        render_density(density, envelope, teleporters, args.out_density_png, args.dpi)
         print(f"  wrote {args.out_density_png}")
     print(f"done in {time.perf_counter() - start:.1f}s")
 
