@@ -16,7 +16,6 @@ import {
 import { buildSky } from "./sky";
 import {
   buildClouds,
-  applyCloudShadow,
   CLOUD_FRAG_COMMON,
   cloudApplyGLSL,
   DAY_GLSL,
@@ -417,237 +416,6 @@ function applyProximityGlow(
   };
 }
 
-// Target footprint diameter of the stone circle in world units. The authored
-// model is ~4.9u across; scaled up to this so the player can walk inside the ring
-// rather than step over it, while still sitting well within the 28u flat plaza
-// core the terrain levels around each monument (terrain FLATTEN_R = 14).
-const STONE_CIRCLE_DIAMETER = 9;
-
-// Bake the authored stone circle (stone_circle_LOD00) into a ground-ready geometry:
-// uniform-scale so its widest footprint axis is STONE_CIRCLE_DIAMETER, recentre x/z
-// on the origin, and drop its base to y = 0 so it rests on the plaza when placed at
-// ground height. The model has 643 tris and only 26 are ever drawn, so the finer
-// LODs aren't worth the swap bookkeeping; LOD00 is used at every distance.
-async function loadStoneCircle(url: string): Promise<THREE.BufferGeometry> {
-  const gltf = await gltfLoader.loadAsync(url);
-  const src = gltf.scene.getObjectByName("stone_circle_LOD00") as
-    | THREE.Mesh
-    | undefined;
-  if (!src?.isMesh) throw new Error(`no 'stone_circle_LOD00' mesh in ${url}`);
-  const g = (src.geometry as THREE.BufferGeometry).clone();
-  g.computeBoundingBox();
-  let bb = g.boundingBox!;
-  const k = STONE_CIRCLE_DIAMETER / Math.max(bb.max.x - bb.min.x, bb.max.z - bb.min.z);
-  g.scale(k, k, k);
-  g.computeBoundingBox();
-  bb = g.boundingBox!;
-  // recentre the footprint on the origin; sink the base to y = 0 so the stones
-  // stand on the ground rather than half-buried or floating when seated.
-  g.translate(-(bb.min.x + bb.max.x) / 2, -bb.min.y, -(bb.min.z + bb.max.z) / 2);
-  return g;
-}
-
-// --- decorative heads --------------------------------------------------------
-// Three sculpted head variants from heads.glb, scattered half-buried in the sand
-// with faces to the sky (Stage 10 finds the clear spots; decorations.json carries
-// per-head position and jitter). Pure decoration, no data; they thicken the
-// dream-logic without disturbing a single book. Plain stone material; the basemesh
-// ships no material and its COLOR_n/TEXCOORD_n layers are ignored.
-// World units along the sculpted up axis (crown to chin). Bounded by the camera,
-// not taste: there is no collision, so a head tall enough to reach eye height
-// (EYE_HEIGHT ~2.4u) means the player walks INTO the face and the view fills with
-// the inside of the skull. The heads are nearly as deep as tall (measured z/y
-// ~0.93), so laid on their back the crown rises ~0.93*HEAD_HEIGHT*scale*(1-sink).
-// At 2.0 the tallest possible head (scale 1.4, sink 0.30) tops out ~1.8u, below the
-// eye, so the camera always glides over the crown instead of into it. A head then
-// reads as a boulder among the books (~3-7 book-lengths), never a colossus.
-const HEAD_HEIGHT = 2.0;
-//   Stage 10's HEAD_RADIUS (the open-sand a head needs) tracks ~half of this.
-// each variant's three LODs (full, mid, coarse), the same ladder the books use.
-const HEAD_VARIANTS = [
-  ["head01_LOD00", "head01_LOD01", "head01_LOD02"],
-  ["head02_LOD00", "head02_LOD01", "head02_LOD02"],
-  ["head03_LOD00", "head03_LOD01", "head03_LOD02"],
-];
-// Heads are instanced like the books, NOT one THREE.LOD object each: at 10k heads
-// that was 10k scene nodes, 10k update() calls and a draw call per visible head,
-// which tanked the frame. Instead every head draws from a single static coarse
-// InstancedMesh per variant (the bulk, always on, ~104 tris each), and only the
-// handful within HEAD_R_FULL of the camera also draw from a small full-detail pool
-// that hides the coarse mesh inside it. Heads sit ~60-125u apart, so that pool is
-// nearly always near-empty. Coarse is shrunk by HEAD_COARSE_PROXY so the full mesh
-// cleanly occludes it where both draw (the book box uses the same trick).
-const HEAD_R_FULL = 40; // full detail within this radius; coarse (104 tris) beyond
-const HEAD_NEAR_CAP = 48; // full-detail instances per variant (far more than ever in range)
-const HEAD_REBUILD = 20; // refill the near pool only after the camera moves this far
-const HEAD_COARSE_PROXY = 0.9; // shrink coarse so the full mesh occludes it, no z-fight
-
-// Each LOD uniform-scaled to HEAD_HEIGHT on the sculpted up axis (y) and recentred
-// on the origin in all three axes, so a head can be freely laid on its back and
-// sunk into the sand by a per-instance transform without the LOD ladder shifting.
-function normalizeHead(src: THREE.Mesh): THREE.BufferGeometry {
-  const g = (src.geometry as THREE.BufferGeometry).clone();
-  g.computeBoundingBox();
-  let bb = g.boundingBox!;
-  const s = HEAD_HEIGHT / (bb.max.y - bb.min.y);
-  g.scale(s, s, s);
-  g.computeBoundingBox();
-  bb = g.boundingBox!;
-  g.translate(
-    -(bb.min.x + bb.max.x) / 2,
-    -(bb.min.y + bb.max.y) / 2,
-    -(bb.min.z + bb.max.z) / 2,
-  );
-  return g;
-}
-
-// returns, per variant, its three baked LOD geometries.
-async function loadHeadLods(url: string): Promise<THREE.BufferGeometry[][]> {
-  const gltf = await gltfLoader.loadAsync(url);
-  return HEAD_VARIANTS.map((lods) =>
-    lods.map((name) => {
-      const src = gltf.scene.getObjectByName(name) as THREE.Mesh | undefined;
-      if (!src?.isMesh) throw new Error(`no '${name}' mesh in ${url}`);
-      return normalizeHead(src);
-    }),
-  );
-}
-
-// One head per Stage 10 decoration: laid on its back facing the sky, sunk into
-// the sand by its sink fraction, spun by its yaw, sized by its scale. Each is a
-// THREE.LOD swapping mesh by camera distance (update() driven each frame); opaque
-// and unfaded like the teleporter beacons. Three variants jittered into hundreds.
-interface Decoration {
-  x: number; // pipeline ground x (-> world x)
-  y: number; // pipeline ground y (-> world z)
-  v: number; // variant index 0..2
-  s: number; // scale multiplier
-  rot: number; // yaw, radians
-  sink: number; // fraction of the laid head buried below grade
-}
-
-async function loadDecorations(url: string): Promise<Decoration[]> {
-  return (await fetch(url)).json();
-}
-
-function buildHeads(
-  variants: THREE.BufferGeometry[][],
-  decos: Decoration[],
-  cloud: CloudUniforms,
-): {
-  group: THREE.Group;
-  update: (camera: THREE.Camera) => void;
-} {
-  const mat = new THREE.MeshLambertMaterial({ color: 0xcbbfa8 }); // sandstone
-  // Fade the heads into the dome with distance, the SAME treatment the books get.
-  // Without it a head stays a full-brightness opaque speck all the way to the
-  // horizon, and a few-pixel high-contrast opaque object crawls against the pixel
-  // grid as the camera moves (the "aura"); the books were calm only because they
-  // already fade out before they shrink to that size (see GLOW_REST_FAR's note).
-  applyDistanceFade(mat);
-  applyCloudShadow(mat, cloud, true); // boulders darken under the same drifting shadow
-  const group = new THREE.Group();
-  const nv = variants.length;
-  // world-vertical extent of each variant once laid face-up: the head's local z
-  // (face depth, which the +90° X rotation swings onto world y) at scale 1. Used to
-  // bury the head by its sink fraction.
-  const depth = variants.map((geos) => {
-    geos[0].computeBoundingBox();
-    const b = geos[0].boundingBox!;
-    return b.max.z - b.min.z;
-  });
-
-  // Bucket heads by variant and bake each one's world transform once. Lay the head
-  // on its back facing the sky (Rx +90, the sculpted face axis ran opposite the
-  // first guess), spin it by its yaw (YXZ -> Ry·Rx), scale, and sink it so its
-  // centre sits at ground + H*(0.5 - sink), burying exactly that fraction of H.
-  const dummy = new THREE.Object3D();
-  const mats: number[][] = Array.from({ length: nv }, () => []);
-  const xs: number[][] = Array.from({ length: nv }, () => []);
-  const zs: number[][] = Array.from({ length: nv }, () => []);
-  for (const d of decos) {
-    const v = d.v < nv ? d.v : 0;
-    const H = depth[v] * d.s;
-    dummy.position.set(d.x, sampleHeight(d.x, d.y) + H * (0.5 - d.sink), d.y);
-    dummy.rotation.set(Math.PI / 2, d.rot, 0, "YXZ");
-    dummy.scale.setScalar(d.s);
-    dummy.updateMatrix();
-    for (let k = 0; k < 16; k++) mats[v].push(dummy.matrix.elements[k]);
-    xs[v].push(d.x);
-    zs[v].push(d.y);
-  }
-
-  // Per variant: a static coarse InstancedMesh holding ALL its heads (always drawn,
-  // never frustum-culled since it spans the disc), plus a small dynamic full-detail
-  // pool refilled around the camera. The coarse geometry is shrunk so the full mesh
-  // occludes it cleanly where both draw.
-  const matF32: Float32Array[] = [];
-  const posX: Float32Array[] = [];
-  const posZ: Float32Array[] = [];
-  const nearMeshes: THREE.InstancedMesh[] = [];
-  const tmp = new THREE.Matrix4();
-  for (let v = 0; v < nv; v++) {
-    const cnt = xs[v].length;
-    const mf = new Float32Array(mats[v]);
-    matF32.push(mf);
-    posX.push(new Float32Array(xs[v]));
-    posZ.push(new Float32Array(zs[v]));
-
-    const coarseGeo = variants[v][2].clone();
-    coarseGeo.scale(HEAD_COARSE_PROXY, HEAD_COARSE_PROXY, HEAD_COARSE_PROXY);
-    const coarse = new THREE.InstancedMesh(coarseGeo, mat, Math.max(cnt, 1));
-    coarse.frustumCulled = false;
-    coarse.renderOrder = 5; // transparent now (distance fade); draw after the ground
-    for (let i = 0; i < cnt; i++) coarse.setMatrixAt(i, tmp.fromArray(mf, i * 16));
-    coarse.count = cnt;
-    coarse.instanceMatrix.needsUpdate = true;
-    group.add(coarse);
-
-    const near = new THREE.InstancedMesh(variants[v][0], mat, HEAD_NEAR_CAP);
-    near.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-    near.frustumCulled = false;
-    near.renderOrder = 5;
-    near.count = 0;
-    nearMeshes.push(near);
-    group.add(near);
-  }
-
-  // Refill the full-detail pools only when the camera has moved HEAD_REBUILD. With
-  // ~10k heads total a brute scan is trivial (it fires rarely, not per frame).
-  const RF2 = HEAD_R_FULL * HEAD_R_FULL;
-  const RB2 = HEAD_REBUILD * HEAD_REBUILD;
-  const m = new THREE.Matrix4();
-  let lastX = Infinity;
-  let lastZ = Infinity;
-  function update(camera: THREE.Camera): void {
-    const cx = camera.position.x;
-    const cz = camera.position.z;
-    const dx = cx - lastX;
-    const dz = cz - lastZ;
-    if (dx * dx + dz * dz < RB2) return;
-    lastX = cx;
-    lastZ = cz;
-    for (let v = 0; v < nv; v++) {
-      const x = posX[v];
-      const z = posZ[v];
-      const mf = matF32[v];
-      const near = nearMeshes[v];
-      let k = 0;
-      for (let i = 0; i < x.length && k < HEAD_NEAR_CAP; i++) {
-        const ex = x[i] - cx;
-        const ez = z[i] - cz;
-        if (ex * ex + ez * ez < RF2) {
-          near.setMatrixAt(k, m.fromArray(mf, i * 16));
-          k++;
-        }
-      }
-      near.count = k;
-      near.instanceMatrix.needsUpdate = true;
-    }
-  }
-  return { group, update };
-}
-
 function buildField(
   field: Awaited<ReturnType<typeof loadPositions>>,
   bookNear: THREE.BufferGeometry, // LOD00, full detail, drawn closest
@@ -984,7 +752,8 @@ function buildField(
 // marking a known place once you're near enough to see it.
 const TP_BEAM_HEIGHT = 80; // visible shaft height above the ground
 const TP_BEAM_RADIUS = 0.6;
-const TP_BEAM_COLOR = new THREE.Color(0x2f6cff);
+const TP_BEAM_COLOR = new THREE.Color(0x2f6cff); // blue, up the shaft; matches the pad rim
+const TP_BEAM_COLOR_BASE = new THREE.Color(0x3df0ff); // cyan at the foot, handing off to the pad core
 // A round tube crossing the ground plane reveals its tube shape at the waterline
 // (curved bottom rim, the far wall seen through the near one), which breaks the
 // flat-pillar illusion up close. So the beam fades out by horizontal camera
@@ -992,6 +761,13 @@ const TP_BEAM_COLOR = new THREE.Color(0x2f6cff);
 // intersection. Full strength beyond FAR, gone within NEAR (≈ at the stones).
 const TP_BEAM_FADE_NEAR = 18;
 const TP_BEAM_FADE_FAR = 50;
+// Proximity ramp: far away the beam is a dim, plain-blue beacon so it draws the eye
+// without dominating the horizon; it brightens to full cyan/blue intensity as the
+// player closes in (and the FADE_NEAR clip still takes over once you're on the pad).
+// Keep in sync with terrain.ts TP_GLOW_APPROACH_* so beam and pad ramp together.
+const TP_BEAM_APPROACH_NEAR = 70; // camera xz distance at which it reaches full intensity
+const TP_BEAM_APPROACH_FAR = 260; // beyond this it sits at the dim far level
+const TP_BEAM_FAR_LEVEL = 0.5; // intensity multiplier when far (0..1)
 // The ground is transparent (distance fade) at the default renderOrder 0. A beam at
 // the same order could draw before the ground, which then paints its opaque-near sand
 // straight over it (the beam writes no depth, so it can't defend those pixels).
@@ -999,10 +775,9 @@ const TP_BEAM_FADE_FAR = 50;
 // (which does write depth) still occludes the beam behind nearer dunes, so physical
 // occlusion is preserved. Stays above the ground and the books (renderOrder 5).
 const TP_BEAM_RENDER_ORDER = 10;
-// Horizontal radius around a circle's centre within which the travel prompt
-// arms. The stones span STONE_CIRCLE_DIAMETER (9 -> 4.5 radius) on a flattened
-// plaza; a touch wider than the ring so you trigger while standing among the
-// stones, not only dead centre.
+// Horizontal radius around a plaza's centre within which the travel prompt arms.
+// Sits just inside the floor glow (terrain TP_GLOW_RADIUS = 9), so you arm while
+// standing in the bright pad rather than only dead centre or out at its faint edge.
 const TP_ENTER_RADIUS = 7;
 
 interface Teleporter {
@@ -1031,23 +806,12 @@ async function loadHeightmap(
   return { res, worldSize, data };
 }
 
-function buildTeleporters(
-  list: Teleporter[],
-  circleGeom: THREE.BufferGeometry,
-  cloud: CloudUniforms,
-) {
-  // The stones take the same sandstone as the heads and props, so the monument
-  // reads as carved from the desert rather than dropped onto it. Opaque and
-  // unfaded (no applyDistanceFade) like the other props, though being flat it is
-  // lost to the haze at distance: the beam, not the ring, is the far beacon.
-  const stoneMat = new THREE.MeshLambertMaterial({ color: 0xcbbfa8 }); // sandstone
-  // Fade the ring into the haze with distance, like the books and heads: an
-  // unfaded opaque ring stays a high-contrast speck at the horizon and crawls
-  // against the pixel grid (the flickering "aura"). The comment below already
-  // expected the ring "lost to the haze at distance"; the fade makes that real
-  // instead of leaving max-contrast confetti. The beam stays the far beacon.
-  applyDistanceFade(stoneMat);
-  applyCloudShadow(stoneMat, cloud, false); // stones darken with the sand around them
+function buildTeleporters(list: Teleporter[]) {
+  // The floor marker is now a blue glow baked into the terrain shader at each plaza
+  // (terrain TP_GLOW_*), not a prop built here. Being the ground itself it reacts to
+  // the light like everything else and can never read superimposed, and it carries the
+  // "stand here" cue up close exactly as the beam fades out to spare the camera. So
+  // this builds only the far beacon.
   // The beam is an open-ended cylinder shaded as a volumetric light shaft. Two
   // gradients shape it: a silhouette-edge term (alpha ~ |view·normal|) that makes
   // a view ray glowing brightest where it passes through the most of the column
@@ -1068,10 +832,14 @@ function buildTeleporters(
   const beamMat = new THREE.ShaderMaterial({
     uniforms: {
       uColor: { value: TP_BEAM_COLOR },
+      uColorBase: { value: TP_BEAM_COLOR_BASE },
       uOpacity: { value: 0.4 },
       uHeight: { value: TP_BEAM_HEIGHT },
       uFadeNear: { value: TP_BEAM_FADE_NEAR },
       uFadeFar: { value: TP_BEAM_FADE_FAR },
+      uApproachNear: { value: TP_BEAM_APPROACH_NEAR },
+      uApproachFar: { value: TP_BEAM_APPROACH_FAR },
+      uFarLevel: { value: TP_BEAM_FAR_LEVEL },
     },
     transparent: true,
     blending: THREE.AdditiveBlending,
@@ -1092,9 +860,13 @@ function buildTeleporters(
     `,
     fragmentShader: /* glsl */ `
       uniform vec3 uColor;
+      uniform vec3 uColorBase;
       uniform float uOpacity;
       uniform float uFadeNear;
       uniform float uFadeFar;
+      uniform float uApproachNear;
+      uniform float uApproachFar;
+      uniform float uFarLevel;
       varying vec3 vWorldPos;
       varying vec3 vWorldNormal;
       varying float vT;
@@ -1106,19 +878,23 @@ function buildTeleporters(
         // trigger it): fade the whole beam out as you approach, hiding the waterline.
         float camDist = distance(cameraPosition.xz, vWorldPos.xz);
         float camFade = smoothstep(uFadeNear, uFadeFar, camDist);
-        gl_FragColor = vec4(uColor, uOpacity * edge * vert * camFade);
+        // lift the foot off the ground: the pad glow owns the centre, so fading the
+        // lowest sliver of the shaft to zero stops the two additive sources stacking
+        // into a white hotspot where they meet.
+        float baseFade = smoothstep(0.0, 0.14, vT);
+        // proximity: dim, plain-blue when far; bright, cyan-footed when near.
+        float approach = smoothstep(uApproachFar, uApproachNear, camDist); // 0 far, 1 near
+        float prox = mix(uFarLevel, 1.0, approach);
+        vec3 footCol = mix(uColor, uColorBase, approach); // cyan foot only emerges on approach
+        vec3 col = mix(footCol, uColor, clamp(vT, 0.0, 1.0)); // foot grading to blue up the shaft
+        gl_FragColor = vec4(col, uOpacity * edge * vert * camFade * baseFade * prox);
       }
     `,
   });
   const group = new THREE.Group();
   for (const tp of list) {
     const h = sampleHeight(tp.x, tp.y);
-    // ring of stones resting on the flattened plaza (terrain levels a disc here).
-    const circle = new THREE.Mesh(circleGeom, stoneMat);
-    circle.position.set(tp.x, h, tp.y);
-    circle.renderOrder = 5; // transparent now (distance fade); draw after the ground
-    group.add(circle);
-    // beam rising from the circle's centre, base at the ground. Drawn after the
+    // beam rising from the plaza centre, base at the ground. Drawn after the
     // transparent ground levels (see TP_BEAM_RENDER_ORDER) so they can't overpaint
     // it; it fades out by camera distance (shader) before the waterline shows.
     const beam = new THREE.Mesh(beamGeom, beamMat);
@@ -1555,7 +1331,7 @@ async function main() {
   const SUN_POS = new THREE.Vector3(-700, 130, 380);
 
   // drifting cloud shadows (see clouds.ts): one shared mask + time, sampled at the
-  // world xz of the ground, books, heads and stones so the same shadow falls on a
+  // world xz of the ground, books and stones so the same shadow falls on a
   // book and the sand under it, AND at the sky dome's pierce points so the storm's
   // breaks open over the lit patches. The scene's main source of large-scale motion.
   // Built before the sky because the dome shares its uniforms.
@@ -1629,7 +1405,7 @@ async function main() {
   };
 
   info.innerHTML = "loading positions…";
-  const [field, teleporters, meta, world, heightmap, bookLods, headVariants, decorations, stoneCircle] =
+  const [field, teleporters, meta, world, heightmap, bookLods] =
     await Promise.all([
       loadPositions("positions.bin"),
       loadTeleporters("teleporters.json"),
@@ -1637,9 +1413,6 @@ async function main() {
       loadWorld("world.json"),
       loadHeightmap("heightmap.bin"),
       loadBookLods("book.glb", ["book_LOD00", "book_LOD01"]),
-      loadHeadLods("heads.glb"),
-      loadDecorations("decorations.json"),
-      loadStoneCircle("stone_circle.glb"),
     ]);
   mark("fetch+decode");
   // the heightmap is the ground-height source for the ground mesh and the player's
@@ -1686,9 +1459,7 @@ async function main() {
 
   built.update(camera.position.x, camera.position.z);
   scene.add(built.group);
-  scene.add(buildTeleporters(teleporters, stoneCircle, clouds.uniforms));
-  const heads = buildHeads(headVariants, decorations, clouds.uniforms); // half-buried scatter (Stage 10)
-  scene.add(heads.group);
+  scene.add(buildTeleporters(teleporters));
 
   mark("props");
 
@@ -1905,7 +1676,6 @@ async function main() {
     built.update(camera.position.x, camera.position.z);
     const bm = performance.now() - tA;
     if (bm > booksMs) booksMs = bm;
-    heads.update(camera); // pick each head's LOD by camera distance (a handful)
 
     compass.update();
     // travelling pools of light: move the shared player-position uniform (book glow +
@@ -1915,7 +1685,7 @@ async function main() {
     // ease the skate glow toward on/off so the blue pool blooms in and out instead of
     // popping with the Shift key (time-constant filter, same shape as the eye-lift).
     uSkate.value += ((mode === "skate" ? 1 : 0) - uSkate.value) * (1 - Math.exp(-6 * dt));
-    // drift the cloud shadows across the whole landscape (ground, books, heads,
+    // drift the cloud shadows across the whole landscape (ground, books and
     // stones all sample the one shared mask + time).
     clouds.update(dt);
     // keep the dome centred on the viewer (so it reads as infinitely far), and

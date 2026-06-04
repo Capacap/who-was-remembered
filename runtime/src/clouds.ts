@@ -10,7 +10,7 @@ import * as THREE from "three";
 // (Kuindzhi), bright breaks in a storm. A scrolling coverage mask is exactly that.
 //
 // The mask is a seamless tiling greyscale texture sampled at the world xz of every
-// lit surface (ground, books, heads, stones) and scrolled by uCloudTime, so the
+// lit surface (ground, books) and scrolled by uCloudTime, so the
 // same shadow falls on a book and the sand it stands in. Two layers at different
 // scales and speeds break the tile repeat and read as parallax. Seamless tiling
 // needs PERIODIC noise (ordinary fBm doesn't wrap), baked once into a DataTexture;

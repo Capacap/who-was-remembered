@@ -30,7 +30,6 @@ Run:
 from __future__ import annotations
 
 import argparse
-import json
 from pathlib import Path
 
 import matplotlib
@@ -46,13 +45,7 @@ from stage6_place import R_INNER, R_MAX, RADIUS_ALPHA, TIME_SPAN
 ROOT = Path(__file__).resolve().parent
 PLACEMENT_PATH = ROOT / "cache" / "layout.parquet"
 TELEPORTERS_PATH = ROOT / "cache" / "teleporters.parquet"
-DECORATIONS_PATH = ROOT.parent / "runtime" / "public" / "decorations.json"
 OUT_PATH = ROOT / "cache" / "plots" / "layout.png"
-
-# Stage 10's three head variants, coloured distinctly so the plot shows both the
-# spatial spread (do they really only collect in the outer void?) and the variant
-# mix. Magenta-ish so they pop off the viridis era ramp.
-DECO_COLORS = ["#ff5fa2", "#ffa83f", "#7cf0ff"]
 
 # Years to attempt a guide ring for. Drawn only where the era curve has not
 # yet clipped to R_MAX (year - TIME_SPAN), i.e. inside the linear regime;
@@ -90,18 +83,11 @@ def load_teleporters(path: Path) -> list[dict]:
     return table.to_pylist()
 
 
-def load_decorations(path: Path) -> list[dict]:
-    if not path.exists():
-        return []
-    return json.loads(path.read_text())
-
-
 def plot(
     cx: np.ndarray,
     cy: np.ndarray,
     cyears: np.ndarray,
     anchors: list[dict],
-    decos: list[dict],
     out: Path,
     dpi: int,
 ) -> None:
@@ -156,26 +142,13 @@ def plot(
             zorder=7, path_effects=stroke,
         )
 
-    # Decoration heads (Stage 10). Plotted last so they sit above the corpus, with
-    # the marker sized by each head's scale jitter, coloured by variant. This is the
-    # read the user wants: how sparse the scatter is and whether they really avoid
-    # the dense core and gather in the outer void.
-    if decos:
-        dx = np.array([d["x"] for d in decos])
-        dy = np.array([d["y"] for d in decos])
-        dv = np.array([d["v"] for d in decos])
-        ds = np.array([d["s"] for d in decos])
-        dcol = [DECO_COLORS[v % len(DECO_COLORS)] for v in dv]
-        ax.scatter(dx, dy, s=18 + ds * 26, c=dcol, marker="o",
-                   edgecolors="#0a0a0a", linewidths=0.5, alpha=0.95, zorder=8)
-
     lim = float(np.max(np.hypot(cx, cy))) * 1.02
     ax.set_xlim(-lim, lim)
     ax.set_ylim(-lim, lim)
     ax.set_aspect("equal")
     ax.set_title(
         f"Final layout: {len(cx):,} figures (color = era), "
-        f"{len(anchors)} teleporters (gold stars), {len(decos)} heads (dots). "
+        f"{len(anchors)} teleporters (gold stars). "
         f"Angle = longitude, radius = time; origin = year 2000."
     )
 
@@ -195,7 +168,6 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--placement", type=Path, default=PLACEMENT_PATH)
     parser.add_argument("--teleporters", type=Path, default=TELEPORTERS_PATH)
-    parser.add_argument("--decorations", type=Path, default=DECORATIONS_PATH)
     parser.add_argument("--out", type=Path, default=OUT_PATH)
     parser.add_argument("--dpi", type=int, default=130)
     args = parser.parse_args()
@@ -207,13 +179,9 @@ def main() -> None:
 
     cx, cy, cyears = load_corpus(args.placement)
     anchors = load_teleporters(args.teleporters)
-    decos = load_decorations(args.decorations)
     args.out.parent.mkdir(parents=True, exist_ok=True)
-    plot(cx, cy, cyears, anchors, decos, args.out, args.dpi)
-    print(
-        f"plotted {len(cx):,} figures + {len(anchors)} teleporters "
-        f"+ {len(decos)} heads -> {args.out}"
-    )
+    plot(cx, cy, cyears, anchors, args.out, args.dpi)
+    print(f"plotted {len(cx):,} figures + {len(anchors)} teleporters -> {args.out}")
 
 
 if __name__ == "__main__":

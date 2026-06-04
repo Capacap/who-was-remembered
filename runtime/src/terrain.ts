@@ -253,6 +253,36 @@ const SKATE_GLOW_STRENGTH = 0.8; // additive intensity at centre, times uSkate
 const _sg = SKATE_GLOW_COLOR.clone().convertSRGBToLinear();
 const SKATE_GLOW_RGB = `vec3(${_sg.r.toFixed(4)}, ${_sg.g.toFixed(4)}, ${_sg.b.toFixed(4)})`;
 
+// Teleporter floor glow: a blue emissive disc pooled on each plaza, the near-field
+// "stand here" marker. The beam fades out within TP_BEAM_FADE_NEAR so it never clips
+// the camera up close, which is exactly where it stops telling you where to stand;
+// this glow takes over there, so the column and the pad hand off as one beacon. Same
+// blue as the beam (main.ts TP_BEAM_COLOR). Additive emissive like the vortex eye, so
+// it reads in the barely-lit centre instead of crushing dark, and because it IS the
+// ground it can never look superimposed (the stone ring it replaced did, being a warm
+// Lambert prop dropped onto the cool emissive centre). Evaluated per-fragment over the
+// teleporter positions, not per-vertex: the disc is smaller than a GROUND_CELL facet,
+// so a vertex attribute would light a single triangle. A slow pulse off uCloudTime
+// reads as powered. Eyeball knobs; tune against the vortex teal, which the innermost
+// teleporters sit inside (a blue pad there has to fight the near-white eye glow).
+const TP_GLOW_INNER = new THREE.Color(0x3df0ff); // cyan at the centre of the pad
+const TP_GLOW_OUTER = new THREE.Color(0x2f6cff); // blue at the rim, matches main.ts TP_BEAM_COLOR
+const TP_GLOW_RADIUS = 9; // disc footprint, world units; tracks main.ts TP_ENTER_RADIUS (the travel zone)
+const TP_GLOW_FALLOFF = 1.6; // intensity exponent over the radius; >1 keeps a bright core with a soft skirt
+const TP_GLOW_STRENGTH = 0.85; // additive intensity at the centre
+const TP_GLOW_PULSE = 0.18; // pulse depth as a fraction of strength (0 = steady)
+const TP_GLOW_PULSE_SPEED = 0.6; // pulse rate against the drifting uCloudTime
+// Proximity ramp off the player position: far away the pad is a dim, plain-blue
+// beacon; on approach it brightens and the cyan core emerges. Keep in sync with
+// main.ts TP_BEAM_APPROACH_* so beam and pad ramp together.
+const TP_GLOW_APPROACH_NEAR = 70; // player distance (world u) at which the pad reaches full intensity
+const TP_GLOW_APPROACH_FAR = 260; // beyond this the pad sits at the dim far level
+const TP_GLOW_FAR_LEVEL = 0.3; // intensity multiplier when far (0..1)
+const _tgi = TP_GLOW_INNER.clone().convertSRGBToLinear();
+const _tgo = TP_GLOW_OUTER.clone().convertSRGBToLinear();
+const TP_GLOW_INNER_RGB = `vec3(${_tgi.r.toFixed(4)}, ${_tgi.g.toFixed(4)}, ${_tgi.b.toFixed(4)})`;
+const TP_GLOW_OUTER_RGB = `vec3(${_tgo.r.toFixed(4)}, ${_tgo.g.toFixed(4)}, ${_tgo.b.toFixed(4)})`;
+
 // A live uniform carrying the player's world-xz position, shared between the
 // ground's raking light and the books' proximity glow so both pools share a centre.
 export interface PlayerUniform {
@@ -504,12 +534,41 @@ function applyGroundMaterial(
 ): void {
   mat.transparent = true;
   const fadeSpan = (FADE_END - FADE_START).toFixed(1);
+  // Teleporter floor glow, built from the plaza positions initTerrain stored (set
+  // before buildGround calls this). Evaluated per-fragment over the teleporter array;
+  // skipped entirely when there are none, since a zero-length GLSL array is invalid.
+  const tpPos = plazas.map((p) => new THREE.Vector2(p.x, p.z));
+  const tpDecl = tpPos.length ? `\nuniform vec2 uTpPos[${tpPos.length}];` : "";
+  const tpGlow = tpPos.length
+    ? `
+       {
+         float tpGlow = 0.0;
+         float tpT = 0.0; // radial fraction (0 centre, 1 rim) of the dominant pad
+         float tpApproach = 1.0; // 0 when the player is far from that pad, 1 when near
+         for (int i = 0; i < ${tpPos.length}; i++) {
+           float t = clamp(distance(vWorldPos.xz, uTpPos[i]) / ${TP_GLOW_RADIUS.toFixed(2)}, 0.0, 1.0);
+           float g = pow(1.0 - t, ${TP_GLOW_FALLOFF.toFixed(2)}); // soft falloff across the whole disc
+           if (g > tpGlow) {
+             tpGlow = g; tpT = t;
+             tpApproach = smoothstep(${TP_GLOW_APPROACH_FAR.toFixed(1)}, ${TP_GLOW_APPROACH_NEAR.toFixed(1)}, distance(uPlayer, uTpPos[i]));
+           }
+         }
+         // far: dim, plain-blue. near: brighter, with the cyan core emerging.
+         float tpProx = mix(${TP_GLOW_FAR_LEVEL.toFixed(2)}, 1.0, tpApproach);
+         vec3 tpInner = mix(${TP_GLOW_OUTER_RGB}, ${TP_GLOW_INNER_RGB}, tpApproach);
+         vec3 tpCol = mix(tpInner, ${TP_GLOW_OUTER_RGB}, tpT);
+         // slow breathing pulse so the pad reads as powered, not painted.
+         float tpPulse = 1.0 - ${TP_GLOW_PULSE.toFixed(2)} * (0.5 - 0.5 * cos(uCloudTime * ${TP_GLOW_PULSE_SPEED.toFixed(3)}));
+         gl_FragColor.rgb += tpGlow * tpCol * (${TP_GLOW_STRENGTH.toFixed(2)} * tpPulse * tpProx);
+       }`
+    : "";
   mat.onBeforeCompile = (shader) => {
     shader.uniforms.uPlayer = uPlayer;
     shader.uniforms.uSkate = uSkate;
     shader.uniforms.uClouds = cloud.uClouds;
     shader.uniforms.uCloudTime = cloud.uCloudTime;
     shader.uniforms.uCloudMix = cloud.uCloudMix;
+    if (tpPos.length) shader.uniforms.uTpPos = { value: tpPos };
     shader.vertexShader = shader.vertexShader
       .replace(
         "#include <common>",
@@ -534,6 +593,7 @@ function applyGroundMaterial(
     let frag = shader.fragmentShader.replace(
       "#include <common>",
       "#include <common>\nvarying float vEye;\nvarying float vRelief;\nvarying float vGroundFade;\nvarying float vCloudDist;\nvarying vec3 vWorldPos;\nvarying vec2 vCloudXZ;\nuniform vec2 uPlayer;\nuniform float uSkate;" +
+        tpDecl +
         CLOUD_FRAG_COMMON,
     );
     // Raking pool, additive after lighting (linear space, before the colorspace
@@ -569,7 +629,10 @@ function applyGroundMaterial(
        }` +
         // drifting cloud shadow over the dunes, sinking toward the night floor into
         // the distance dissolve so the far ground darkens to meet the black storm dome.
-        cloudApplyGLSL("vCloudXZ", "vGroundFade", "vCloudDist"),
+        cloudApplyGLSL("vCloudXZ", "vGroundFade", "vCloudDist") +
+        // teleporter floor glow last, AFTER the cloud multiply, so the powered pad
+        // holds steady instead of dimming as a shadow drifts over the plaza.
+        tpGlow,
     );
     shader.fragmentShader = frag.replace(
       "#include <dithering_fragment>",
