@@ -187,6 +187,21 @@ const RELIEF_SCALE = 0.25; // slope-difference that reaches the full crest/troug
 const CREST_LIGHT = 0.15; // crest lightens / trough darkens (the dominant read)
 const CREST_SAT = 0.07; // crest bleaches / trough deepens
 const CREST_HUE = 0.012; // crest warms / trough cools
+// The albedo crest/trough tint above is crushed by the raking dusk sun (lighting
+// already owns light/dark on the flat-shaded facets, so an albedo shift can't
+// compete and the dunes read as one sand colour). So the crest/trough COLOUR is
+// carried by an additive emissive term, lighting-independent like the vortex eye:
+// crests catch a warm rim, troughs pool a deep red glow. Keyed to the same signed
+// relief k, passed per-vertex as aRelief. Two independent strengths so the warm rim
+// and the red pool tune separately; zero a strength to drop that half of the tint.
+const CREST_EMIS = new THREE.Color(0xffc890); // warm rim glow on crests
+const TROUGH_EMIS = new THREE.Color(0xcc2800); // deep red glow pooled in troughs
+const CREST_EMIS_STRENGTH = 0.18;
+const TROUGH_EMIS_STRENGTH = 0.2;
+const _crestE = CREST_EMIS.clone().convertSRGBToLinear();
+const _troughE = TROUGH_EMIS.clone().convertSRGBToLinear();
+const CREST_EMIS_RGB = `vec3(${_crestE.r.toFixed(4)}, ${_crestE.g.toFixed(4)}, ${_crestE.b.toFixed(4)})`;
+const TROUGH_EMIS_RGB = `vec3(${_troughE.r.toFixed(4)}, ${_troughE.g.toFixed(4)}, ${_troughE.b.toFixed(4)})`;
 
 // Time rings: radius is time, so a gentle ripple in lightness (and a hair of
 // warm/cool) keyed to radius makes the map read as concentric growth rings /
@@ -498,12 +513,13 @@ function applyGroundMaterial(
     shader.vertexShader = shader.vertexShader
       .replace(
         "#include <common>",
-        "#include <common>\nattribute float aEye;\nvarying float vEye;\nvarying float vGroundFade;\nvarying float vCloudDist;\nvarying vec3 vWorldPos;\nvarying vec2 vCloudXZ;",
+        "#include <common>\nattribute float aEye;\nattribute float aRelief;\nvarying float vEye;\nvarying float vRelief;\nvarying float vGroundFade;\nvarying float vCloudDist;\nvarying vec3 vWorldPos;\nvarying vec2 vCloudXZ;",
       )
       .replace(
         "#include <project_vertex>",
         `#include <project_vertex>
          vEye = aEye;
+         vRelief = aRelief;
          vCloudDist = length(mvPosition.xyz);
          vGroundFade = clamp(
            (vCloudDist - ${FADE_START.toFixed(1)}) / ${fadeSpan},
@@ -517,7 +533,7 @@ function applyGroundMaterial(
       );
     let frag = shader.fragmentShader.replace(
       "#include <common>",
-      "#include <common>\nvarying float vEye;\nvarying float vGroundFade;\nvarying float vCloudDist;\nvarying vec3 vWorldPos;\nvarying vec2 vCloudXZ;\nuniform vec2 uPlayer;\nuniform float uSkate;" +
+      "#include <common>\nvarying float vEye;\nvarying float vRelief;\nvarying float vGroundFade;\nvarying float vCloudDist;\nvarying vec3 vWorldPos;\nvarying vec2 vCloudXZ;\nuniform vec2 uPlayer;\nuniform float uSkate;" +
         CLOUD_FRAG_COMMON,
     );
     // Raking pool, additive after lighting (linear space, before the colorspace
@@ -545,6 +561,11 @@ function applyGroundMaterial(
          // vortex eye: additive glow (colour x mask), lighting-independent so it
          // reads in the barely-lit centre where an albedo tint would be crushed.
          gl_FragColor.rgb += vEye * ${EYE_EMISSIVE_RGB} * ${EYE_EMISSIVE_STRENGTH.toFixed(2)};
+         // crest/trough colour: same emissive trick, keyed to signed relief. Crests
+         // (vRelief > 0) catch a warm rim, troughs (vRelief < 0) pool a deep red glow,
+         // so the dunes carry colour under the raking sun that crushes the albedo tint.
+         gl_FragColor.rgb += ${CREST_EMIS_RGB} * (${CREST_EMIS_STRENGTH.toFixed(2)} * max(vRelief, 0.0));
+         gl_FragColor.rgb += ${TROUGH_EMIS_RGB} * (${TROUGH_EMIS_STRENGTH.toFixed(2)} * max(-vRelief, 0.0));
        }` +
         // drifting cloud shadow over the dunes, sinking toward the night floor into
         // the distance dissolve so the far ground darkens to meet the black storm dome.
@@ -697,6 +718,7 @@ export function buildGround(
   const positions = new Float32Array(vcount * 3);
   const colors = new Float32Array(vcount * 3);
   const eyes = new Float32Array(vcount); // per-vertex eye coverage, for the emissive glow
+  const reliefs = new Float32Array(vcount); // per-vertex signed relief k, for the crest/trough emissive
   const v3 = new THREE.Vector3();
   const c = new THREE.Color();
   const ro = RELIEF_CELLS * cell; // neighbour offset for the crest/trough relief read
@@ -719,6 +741,7 @@ export function buildGround(
         (RELIEF_SCALE * ro);
       const eye = eyeMask(v3.x, v3.z, relief);
       eyes[v] = eye;
+      reliefs[v] = relief < -1 ? -1 : relief > 1 ? 1 : relief; // clamped k for the emissive
       groundColor(v3.x, v3.z, c, relief, eye);
       colors[v * 3] = c.r;
       colors[v * 3 + 1] = c.g;
@@ -746,6 +769,7 @@ export function buildGround(
   geom.setAttribute("position", new THREE.BufferAttribute(positions, 3));
   geom.setAttribute("color", new THREE.BufferAttribute(colors, 3));
   geom.setAttribute("aEye", new THREE.BufferAttribute(eyes, 1));
+  geom.setAttribute("aRelief", new THREE.BufferAttribute(reliefs, 1));
   geom.setIndex(new THREE.BufferAttribute(indices, 1));
   const mat = new THREE.MeshLambertMaterial({
     vertexColors: true,
