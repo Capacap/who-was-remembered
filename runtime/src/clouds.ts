@@ -48,8 +48,10 @@ const WIND2 = 7;
 // centred near 0.5): smoothstep(LO, HI) is the day fraction; below LO is full night.
 // The LO..HI band is the terminator: widen it and night and day blend over a longer
 // gradient, tighten it for a starker divide.
-const COVER_LO = 0.50;
-const COVER_HI = 1.0;
+// exported so the sky dome can read the field through the EXACT same day/night band
+// the ground uses, locking the dome's day fraction to the lit patches below.
+export const COVER_LO = 0.50;
+export const COVER_HI = 1.0;
 
 // The night/day multipliers, LINEAR (gl_FragColor is linear before the colorspace
 // encode), so authored directly rather than through sRGB. This is no longer a cloud

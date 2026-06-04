@@ -2,235 +2,259 @@ import * as THREE from "three";
 import { CloudUniforms, SKY_CLOUD_COMMON } from "./clouds";
 
 // --- sky --------------------------------------------------------------------
-// A storm ceiling, not an open dusk. The dome is a near-black layer of cloud with
-// sparse breaks where light bursts through, and those breaks are cut by the SAME
-// drifting field that lights the ground (see clouds.ts): the sky opens where the
-// dunes beneath are lit, and the two pass over together as the weather drifts. The
-// references are Kuindzhi and the storm-light watercolours, where the sky and the
-// land are one system: a single break in a black deck lights a patch of meadow and
-// shows as a silver burst overhead. Sky and ground here share one cloud field for
-// exactly that.
+// Two layers, built to read as one weather over the desert without pretending to a
+// physical alignment a dome shader cannot give. A dome is direction-based (every pixel
+// an angle, infinitely far); the ground's day/night is place-based (a value at a world
+// XZ). There is no clean map between them, so casting the field onto a dome always
+// smears at the horizon or pinwheels at the zenith. The fix is to stop faking it on
+// the dome and put the OPENINGS on real geometry at a finite altitude:
 //
-// The dome still carries the world's one real axis, TIME, but only radially: the
-// whole thing dims as the player travels outward from the present (origin) into the
-// deep past (rim), so the light reads as your era. Azimuth carries no time cue, on
-// purpose; the angle around the disc is LONGITUDE (geography), so a bearing-steered
-// time cue would paint time onto the geography axis. The dusk warm/cool split and
-// the cloud breaks vary by bearing, but those are weather, not time.
+//   1. NIGHT DOME  - a stable inward sphere recentred on the camera: a dark gradient
+//      with a cube-face starfield. It is the backdrop; it does not move as you walk.
+//   2. DAY LAYER   - a large flat sheet at altitude CEIL_H, recentred on the camera's
+//      XZ but sampling the SAME drifting field the ground uses (clouds.ts), at the same
+//      scale, by true world XZ. Where the field opens it paints a day-sky glow; else it
+//      is transparent and the night dome shows through. Because it is real geometry the
+//      GPU's own perspective makes overhead openings large and distant ones recede to
+//      the horizon (no smear, no pole), and because the field is read at absolute world
+//      XZ the openings are world-locked: walking gives parallax, not a sliding sky.
 //
-// The warm glow low on the horizon sits WHERE THE SUN IS, sharing its bearing with
-// the scene's DirectionalLight (passed in), so the lit side of the sky and the lit
-// side of the dunes agree. The bearing is fixed in world space, so the sky never
-// rotates as you walk. A thin warm skyline strip survives under the black mass (the
-// sunset band both references hold); it is also what the far land dissolves into.
-//
-// The dome is a single inward-facing sphere recentred on the camera each frame (see
-// main's loop), so it sits at a fixed apparent distance and never clips. It is NOT
-// rotated, so a dome point's normalized local position is its world direction:
-// vDir.y is the sine of elevation and vDir.xz is the world bearing. To find where a
-// dome ray meets the cloud deck we cast it onto a plane at height CLOUD_H above the
-// viewer and sample the field at that world xz; uCamXZ (the camera's world xz) puts
-// that sample in the same world frame the ground samples, so the breaks register.
+// It does not matter that an opening is not exactly over its lit dune; both ride the
+// same field at the same scale and drift together, so the eye reads one system. The
+// dome carries TIME radially: into the past it dims and the day openings close toward
+// night (DEEP_NIGHT), so the deep past is a dark starfield.
 
-// Base vertical gradient of the OPEN sky revealed through a break: a pale warm
-// skyline easing up to a dusty indigo zenith. Eyeball knobs.
-const SKY_LOW = new THREE.Color(0xb8a6a0); // pale warm grey at the skyline
-const ZENITH = new THREE.Color(0x444d72); // dusty indigo overhead
+// --- night dome --------------------------------------------------------------
+const NIGHT_LOW = new THREE.Color(0x141a2e); // deep blue at the skyline
+const NIGHT_TOP = new THREE.Color(0x05060e); // near-black indigo overhead
+const STAR_COLOR = new THREE.Color(0xcfe0ff); // cool white
 
-// The dusk tints on the open sky. SUN_WARM blooms low toward the sun bearing;
-// SKY_COOL cools the anti-sun side.
-const SUN_WARM = new THREE.Color(0xffc27a); // warm glow toward the sun
-const SKY_COOL = new THREE.Color(0x1c2440); // cold dark away from it
+const HORIZON_Y = -0.12; // horizon line ~7deg below eye level
+const SKY_TOP = 0.9; // elevation over which the gradient reaches the zenith
 
-// The cloud ceiling itself: near-black and close to neutral (a warm base read as a
-// brown haze overhead, not pitch cloud). CEIL_LOW is the base, CEIL_TOP the zenith.
-// The two are kept close and dark; the breaks, not a steep gradient, carry the
-// variation. BREAK_HOT is the silver-warm core of a wide break. A dim warm
-// HORIZON_GLOW hugs the skyline so the far dunes read as silhouettes against a sky
-// that is barely lighter than they are.
-const CEIL_LOW = new THREE.Color(0x0d0c0b); // cloud base, near-black neutral
-const CEIL_TOP = new THREE.Color(0x040405); // pitch overhead
-const BREAK_HOT = new THREE.Color(0xffe9c4); // hot core where a break is widest
-const HORIZON_GLOW = new THREE.Color(0x3d2a1c); // dim warm sliver at the skyline
+// Stars on a cube-face grid (no pole, no seam). DENSITY is cells per face-uv unit
+// (face uv spans [-1,1], so cells across a face = 2*DENSITY); THRESH is how many cells
+// hold a star (higher = sparser); SIZE is the point radius in cell units; TW_SPEED is
+// the twinkle rate. Stars fade in off the skyline (STAR_RISE).
+const STAR_DENSITY = 22.0;
+const STAR_THRESH = 0.86;
+const STAR_SIZE = 0.03;
+const STAR_BRIGHT = 0.9;
+const STAR_TW_SPEED = 0.6;
+const STAR_RISE = 0.16;
 
-// Horizon line sits below eye level so looking level shows more sky than ground.
-// SKY_TOP is how far above the line the open sky takes to reach the zenith.
-const HORIZON_Y = -0.12; // ~7deg below eye level
-const SKY_TOP = 0.7;
+const DEPTH_DARKEN = 0.55; // how much the dome dims at the deepest past
 
-// Open-sky tint strengths and how tightly the warm glow hugs the horizon.
-const WARM_STRENGTH = 0.85;
-const COOL_STRENGTH = 0.55;
-const LOW_BAND = 0.5; // elevation over which the horizon glow fades out
-const DEPTH_DARKEN = 0.6; // how much the whole dome dims at the deepest past
-
-// The cloud deck. CLOUD_H is the layer height a dome ray is cast onto to find its
-// coverage sample (world units; lower = the breaks read closer and bigger overhead).
-// SKY_OPEN_LO/HI is the break threshold on the field's raw coverage: it is much
-// higher and narrower than the ground's day/night band (clouds COVER_LO = 0.5), so
-// only the brightest peaks open and the deck stays mostly black with sparse specks
-// of light. Any sky break therefore sits over ground that is already well lit.
-const CLOUD_H = 1200;
-const SKY_OPEN_LO = 0.62;
-const SKY_OPEN_HI = 0.92;
-
-// Breaks are faded out below this elevation band. Near the horizon the pierce point
-// races outward (t = CLOUD_H / vDir.y blows up), so a break smears radially into a
-// vertical streak; fading the breaks in only well above the skyline keeps them in
-// the upper sky where the geometry is stable and leaves the horizon a clean wall.
-const BREAK_RISE_LO = 0.08;
-const BREAK_RISE_HI = 0.32;
-
-// The ceiling gradient is spread over this elevation so it never saturates inside
-// the visible dome (max elevation above the horizon line is ~1.12 at the zenith).
-// A wider spread means a gentler ramp with no visible knee where it would flatten.
-const CEIL_SPREAD = 1.6;
-
-// The dim warm horizon glow: how far up the dome it reaches (HORIZON_BAND, tight to
-// the skyline) and how strongly it lifts the dark deck (HORIZON_STRENGTH, weak, so
-// the light is barely perceptible). It is biased a touch brighter toward the sun.
-const HORIZON_BAND = 0.1;
-const HORIZON_STRENGTH = 0.55;
-
-// Large enough that the farthest content (rim seen from the opposite rim,
-// ~14000u) stays inside it, and inside the camera's far plane (24000u).
+// Large enough that the farthest content stays inside it, and inside the far plane.
 const RADIUS = 20000;
 
+// --- day layer ---------------------------------------------------------------
+// The opening sky seen where the deck breaks: a bright warm pale at the rim easing to
+// a soft day blue overhead. Eyeball knobs.
+const DAY_LOW = new THREE.Color(0xf0e9d8); // warm pale near the horizon
+const DAY_TOP = new THREE.Color(0x9fc2ec); // soft day blue overhead
+// The day layer is blended ADDITIVELY so the openings read as illuminated sky bursting
+// through the night rather than opaque painted cloud: the colour adds to the dome and
+// its stars instead of covering them. DAY_GAIN pushes the open cores to bloom hot.
+const DAY_GAIN = 1.5;
+
+const CEIL_H = 1800; // layer altitude (world units; lower = openings read bigger/nearer)
+const CEIL_R = 15000; // layer half-size; reaches ~7deg elevation at this altitude
+
+// Where the field opens into day. The field is two noise layers clustered near 0.5,
+// so its real range is only ~0.35..0.65; the band must sit inside that or nothing ever
+// opens. Starting at the ground's day onset (clouds COVER_LO = 0.5) couples the
+// openings to the lit patches: a break sits where the ground below is already turning
+// to day, which reads as the two agreeing.
+const OPEN_LO = 0.55;
+const OPEN_HI = 0.75;
+
+// Fade the layer out toward its rim (as a fraction of CEIL_R) so the flat sheet
+// dissolves into the dome near the horizon instead of ending on a visible edge, and
+// the aliasing-prone grazing rim never shows.
+const FADE_FROM = 0.5;
+
+const DEEP_NIGHT = 0.25; // opening opacity multiplier at the rim (closes into the past)
+
+// Break the field's visible tile repeat (every SCALE1 = 1700u) with a domain warp:
+// the sample point is nudged by a lower-frequency reading of the same field, so the
+// regular lattice of openings dissolves into organic shapes. Seen wide and head-on at
+// altitude, the repeat reads far more than it does on the ground at a grazing angle.
+// WARP_SCALE shrinks the world xz for the warp source (smaller = larger, smoother
+// warp); WARP_AMT is the nudge in world units (larger = more break, looser coupling).
+const WARP_SCALE = 0.75;
+const WARP_AMT = 500;
+
 export interface Sky {
-  mesh: THREE.Mesh;
-  // depth: 0 at the present (origin), 1 at the rim (deepest past); dims the whole
-  // dome with era. camX/camZ: the camera's world xz, so the cloud breaks sample the
-  // same world frame the ground does and register with the lit patches below.
-  update: (depth: number, camX: number, camZ: number) => void;
+  group: THREE.Group;
+  // depth: 0 at the present (origin), 1 at the rim (deepest past). camPos: the camera
+  // world position, to recentre both layers (the day layer keeps the camera's XZ and
+  // sits at CEIL_H) so the dome wraps the viewer and the day field stays world-locked.
+  update: (depth: number, camPos: THREE.Vector3) => void;
 }
 
-// sunPos: the scene's DirectionalLight position; its xz bearing is where the warm
-// glow sits. cloud: the shared cloud uniforms (texture + drift time) so the dome's
-// breaks ride the same field as the ground's lit patches.
-export function buildSky(sunPos: THREE.Vector3, cloud: CloudUniforms): Sky {
-  const r = Math.hypot(sunPos.x, sunPos.z) || 1;
-  const uToSun = { value: new THREE.Vector2(sunPos.x / r, sunPos.z / r) };
+// cloud: the shared cloud uniforms (texture + drift time) so the day layer reads the
+// same field, time and wind as the ground's lit patches.
+export function buildSky(cloud: CloudUniforms): Sky {
   const uDepth = { value: 0 };
-  const uCamXZ = { value: new THREE.Vector2(0, 0) };
-  const mat = new THREE.ShaderMaterial({
+
+  // --- night dome ---
+  const domeMat = new THREE.ShaderMaterial({
     side: THREE.BackSide,
-    depthWrite: false, // pure backdrop; never occludes the world
+    depthWrite: false,
+    depthTest: false,
     fog: false,
     uniforms: {
-      // colours converted to linear working space so that, after the colorspace
-      // encode in the fragment shader, they render exactly as authored. A raw
-      // ShaderMaterial gets none of three's automatic colour management.
-      uSkyLow: { value: SKY_LOW.clone().convertSRGBToLinear() },
-      uZenith: { value: ZENITH.clone().convertSRGBToLinear() },
-      uWarm: { value: SUN_WARM.clone().convertSRGBToLinear() },
-      uCool: { value: SKY_COOL.clone().convertSRGBToLinear() },
-      uCeilLow: { value: CEIL_LOW.clone().convertSRGBToLinear() },
-      uCeilTop: { value: CEIL_TOP.clone().convertSRGBToLinear() },
-      uBreakHot: { value: BREAK_HOT.clone().convertSRGBToLinear() },
-      uHorizonGlow: { value: HORIZON_GLOW.clone().convertSRGBToLinear() },
-      uToSun, // world-xz bearing toward the sun (normalized, fixed)
-      uCamXZ, // camera world xz, for sampling the cloud field in world space
-      uDepth, // player's normalized radial depth into the past
+      uNightLow: { value: NIGHT_LOW.clone().convertSRGBToLinear() },
+      uNightTop: { value: NIGHT_TOP.clone().convertSRGBToLinear() },
+      uStarColor: { value: STAR_COLOR.clone().convertSRGBToLinear() },
+      uDepth,
       uHorizonY: { value: HORIZON_Y },
       uSkyTop: { value: SKY_TOP },
-      // shared with the ground's cloud shadows: same texture, same drift time, so
-      // the sky breaks and the lit dunes are one field. Must be the SAME objects.
-      uClouds: cloud.uClouds,
-      uCloudTime: cloud.uCloudTime,
+      uCloudTime: cloud.uCloudTime, // only for the star twinkle
     },
     vertexShader: /* glsl */ `
       varying vec3 vDir;
       void main() {
-        // local position is the direction from the dome centre (= the camera),
-        // so its normalized y is the sine of elevation and its xz is the world
-        // bearing (the dome is never rotated).
+        // the dome is never rotated, so the local position is the world direction.
         vDir = normalize(position);
         gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
       }
     `,
     fragmentShader: /* glsl */ `
       varying vec3 vDir;
-      uniform vec3 uSkyLow;
-      uniform vec3 uZenith;
-      uniform vec3 uWarm;
-      uniform vec3 uCool;
-      uniform vec3 uCeilLow;
-      uniform vec3 uCeilTop;
-      uniform vec3 uBreakHot;
-      uniform vec3 uHorizonGlow;
-      uniform vec2 uToSun;
-      uniform vec2 uCamXZ;
+      uniform vec3 uNightLow;
+      uniform vec3 uNightTop;
+      uniform vec3 uStarColor;
       uniform float uDepth;
       uniform float uHorizonY;
       uniform float uSkyTop;
-      ${SKY_CLOUD_COMMON}
+      uniform float uCloudTime;
+
+      float hash21(vec2 p) {
+        p = fract(p * vec2(123.34, 345.45));
+        p += dot(p, p + 34.345);
+        return fract(p.x * p.y);
+      }
+
+      // stars on a cube-face grid: pick the major axis, grid the face uv, take the
+      // brightest hashed point in the 3x3 neighbourhood. No pole, no back-seam.
+      float starField(vec3 dir) {
+        vec3 ad = abs(dir);
+        vec2 cuv; float face;
+        if (ad.x >= ad.y && ad.x >= ad.z) { cuv = dir.zy / ad.x; face = 0.0; }
+        else if (ad.y >= ad.z) { cuv = dir.xz / ad.y; face = 17.0; }
+        else { cuv = dir.xy / ad.z; face = 41.0; }
+        vec2 g = cuv * ${STAR_DENSITY.toFixed(1)};
+        vec2 base = floor(g);
+        float best = 0.0;
+        for (int j = -1; j <= 1; j++) {
+          for (int i = -1; i <= 1; i++) {
+            vec2 cell = base + vec2(float(i), float(j));
+            vec2 key = cell + face;
+            float h = hash21(key);
+            float present = step(${STAR_THRESH.toFixed(2)}, h);
+            vec2 jit = vec2(hash21(key + 5.0), hash21(key + 9.0));
+            float d = length(g - (cell + jit));
+            float pt = smoothstep(${STAR_SIZE.toFixed(2)}, 0.0, d);
+            float bright = 0.4 + 0.6 * hash21(key + 13.0);
+            float tw = 0.7 + 0.3 * sin(uCloudTime * ${STAR_TW_SPEED.toFixed(2)} + h * 31.0);
+            best = max(best, present * pt * bright * tw);
+          }
+        }
+        return best;
+      }
+
       void main() {
-        // elevation measured from the dome's horizon line (below eye level).
         float e = vDir.y - uHorizonY;
+        float t = smoothstep(0.0, uSkyTop, e);
+        vec3 col = mix(uNightLow, uNightTop, t);
 
-        // the OPEN sky revealed through a break: skyline -> zenith, with the warm
-        // glow toward the sun and a cool deepening away from it. This is the old
-        // dusk dome, now only seen through the holes in the deck.
-        vec3 open = mix(uSkyLow, uZenith, pow(smoothstep(0.0, uSkyTop, e), 1.3));
-        float az = dot(normalize(vDir.xz + vec2(1e-5)), uToSun);
-        float lowBand = 1.0 - smoothstep(0.0, ${LOW_BAND.toFixed(2)}, e);
-        float toward = smoothstep(0.0, 1.0, az);
-        open = mix(open, uWarm, lowBand * toward * ${WARM_STRENGTH.toFixed(2)});
-        float away = smoothstep(0.0, 1.0, -az);
-        open = mix(open, uCool, lowBand * away * ${COOL_STRENGTH.toFixed(2)});
+        float s = starField(vDir) * ${STAR_BRIGHT.toFixed(2)};
+        s *= smoothstep(0.0, ${STAR_RISE.toFixed(2)}, e);
+        col += uStarColor * s;
 
-        // the near-black cloud deck: a gentle near-neutral gradient spread wide
-        // enough that it never saturates inside the visible dome, so there is no
-        // hard knee overhead where it would otherwise flatten to a flat pitch.
-        vec3 ceiling = mix(uCeilLow, uCeilTop, smoothstep(0.0, ${CEIL_SPREAD.toFixed(2)}, e));
-
-        // cast this dome ray onto the cloud deck at height CLOUD_H and read the same
-        // drifting field that lights the ground. vDir.y is floored so rays toward the
-        // horizon pierce far out instead of dividing by ~0.
-        float t = ${CLOUD_H.toFixed(1)} / max(vDir.y, 0.04);
-        vec2 pierce = uCamXZ + vDir.xz * t;
-        // sparse, sharp breaks: only the field's brightest peaks open, so the deck
-        // stays mostly black with specks of light bursting through (the ground reads
-        // the same field with a far wider, softer day/night band, so a break here
-        // always sits over already-lit ground). Faded out toward the horizon, where
-        // the pierce geometry would smear each break into a vertical streak.
-        float openF = smoothstep(${SKY_OPEN_LO.toFixed(2)}, ${SKY_OPEN_HI.toFixed(2)}, skyCover(pierce));
-        openF *= smoothstep(${BREAK_RISE_LO.toFixed(2)}, ${BREAK_RISE_HI.toFixed(2)}, vDir.y);
-
-        vec3 col = mix(ceiling, open, openF);
-        // a hot silver-warm core in the widest part of a break, like the burst in
-        // the reference where the light is brightest at the centre of the opening.
-        col += uBreakHot * smoothstep(0.80, 1.0, openF);
-
-        // a dim warm glow hugging the horizon line, just enough to silhouette the far
-        // dunes against a sky barely lighter than they are. Tight to the skyline,
-        // weak, and a touch brighter toward the sun. This is also what the far land
-        // dissolves into below the horizon.
-        float strip = 1.0 - smoothstep(0.0, ${HORIZON_BAND.toFixed(2)}, e);
-        col = mix(col, uHorizonGlow, strip * ${HORIZON_STRENGTH.toFixed(2)} * (0.55 + 0.45 * toward));
-
-        // the whole dome dims as the player travels into the past, so the light
-        // reads as the era you are standing in.
         col = mix(col, col * (1.0 - ${DEPTH_DARKEN.toFixed(2)}), uDepth);
 
         gl_FragColor = vec4(col, 1.0);
         #include <colorspace_fragment>
-        // dither in display space to break 8-bit banding in the near-black deck,
-        // where the quantisation steps are large relative to the colour values. A
-        // static per-pixel hash of +/- half a code value, applied after the encode.
         float dither = fract(sin(dot(gl_FragCoord.xy, vec2(12.9898, 78.233))) * 43758.5453);
         gl_FragColor.rgb += (dither - 0.5) / 255.0;
       }
     `,
   });
+  const dome = new THREE.Mesh(new THREE.SphereGeometry(RADIUS, 48, 24), domeMat);
+  dome.frustumCulled = false;
+  dome.renderOrder = -10;
 
-  const mesh = new THREE.Mesh(new THREE.SphereGeometry(RADIUS, 48, 24), mat);
-  mesh.frustumCulled = false; // it wraps the camera; never cull it
+  // --- day layer ---
+  const dayMat = new THREE.ShaderMaterial({
+    side: THREE.DoubleSide, // seen from below
+    transparent: true,
+    depthWrite: false,
+    depthTest: true, // sit behind any terrain it passes behind near the horizon
+    blending: THREE.AdditiveBlending, // openings ADD light: illuminated sky, not cloud
+    fog: false,
+    uniforms: {
+      uDayLow: { value: DAY_LOW.clone().convertSRGBToLinear() },
+      uDayTop: { value: DAY_TOP.clone().convertSRGBToLinear() },
+      uDepth,
+      // shared with the ground's cloud shadows: same texture, same drift time, so the
+      // openings and the lit dunes are one field. Must be the SAME objects.
+      uClouds: cloud.uClouds,
+      uCloudTime: cloud.uCloudTime,
+    },
+    vertexShader: /* glsl */ `
+      varying vec2 vWorldXZ;
+      varying vec2 vLocalXY;
+      void main() {
+        // true world xz of this fragment (the sheet is recentred on the camera but the
+        // field is read at absolute world xz, so the openings are world-locked).
+        vWorldXZ = (modelMatrix * vec4(position, 1.0)).xz;
+        vLocalXY = position.xy; // local plane coords; length taken per fragment
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }
+    `,
+    fragmentShader: /* glsl */ `
+      varying vec2 vWorldXZ;
+      varying vec2 vLocalXY;
+      uniform vec3 uDayLow;
+      uniform vec3 uDayTop;
+      uniform float uDepth;
+      ${SKY_CLOUD_COMMON}
+      void main() {
+        // domain warp to break the tile lattice: nudge the sample by a lower-frequency
+        // reading of the same field. Still the same drifting field, so the openings
+        // keep belonging with the ground; they just no longer fall on a grid.
+        vec2 w = vec2(
+          skyCover(vWorldXZ * ${WARP_SCALE.toFixed(2)} + 11.3),
+          skyCover(vWorldXZ * ${WARP_SCALE.toFixed(2)} + 41.7)
+        ) - 0.5;
+        float open = smoothstep(${OPEN_LO.toFixed(2)}, ${OPEN_HI.toFixed(2)}, skyCover(vWorldXZ + w * ${WARP_AMT.toFixed(1)}));
+        float rt = clamp(length(vLocalXY) / ${CEIL_R.toFixed(1)}, 0.0, 1.0); // 0 overhead -> 1 rim
+        float fade = 1.0 - smoothstep(${FADE_FROM.toFixed(2)}, 1.0, rt);
+        // day-sky gradient: blue overhead easing to warm pale toward the horizon,
+        // pushed by DAY_GAIN so the open cores bloom hot under additive blending.
+        vec3 day = mix(uDayTop, uDayLow, rt) * ${DAY_GAIN.toFixed(2)} * (1.0 - ${DEPTH_DARKEN.toFixed(2)} * uDepth);
+        float a = open * fade * mix(1.0, ${DEEP_NIGHT.toFixed(2)}, uDepth);
+        gl_FragColor = vec4(day, a);
+        #include <colorspace_fragment>
+      }
+    `,
+  });
+  const day = new THREE.Mesh(new THREE.PlaneGeometry(CEIL_R * 2, CEIL_R * 2), dayMat);
+  day.rotation.x = -Math.PI / 2; // lay it flat overhead
+  day.frustumCulled = false;
+  day.renderOrder = -9;
 
-  function update(depth: number, camX: number, camZ: number): void {
+  const group = new THREE.Group();
+  group.add(dome, day);
+
+  function update(depth: number, camPos: THREE.Vector3): void {
     uDepth.value = depth;
-    uCamXZ.value.set(camX, camZ);
+    dome.position.copy(camPos); // wrap the viewer
+    day.position.set(camPos.x, CEIL_H, camPos.z); // ride overhead, field stays world-locked
   }
 
-  return { mesh, update };
+  return { group, update };
 }

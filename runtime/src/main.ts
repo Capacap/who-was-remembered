@@ -1342,8 +1342,8 @@ async function main() {
   // beneath are lit. A warm glow stays fixed at the sun bearing; the whole dome
   // deepens with the player's radial depth into the past. It recentres on the camera
   // each frame (see the loop) so it reads as infinitely far and never shows an edge.
-  const sky = buildSky(SUN_POS, clouds.uniforms);
-  scene.add(sky.mesh);
+  const sky = buildSky(clouds.uniforms);
+  scene.add(sky.group);
 
   const camera = new THREE.PerspectiveCamera(
     70,
@@ -1688,16 +1688,15 @@ async function main() {
     // drift the cloud shadows across the whole landscape (ground, books and
     // stones all sample the one shared mask + time).
     clouds.update(dt);
-    // keep the dome centred on the viewer (so it reads as infinitely far), and
-    // deepen it with radial depth into the past. The warm glow's bearing is fixed
-    // to the sun, so the dome no longer steers off the camera position.
-    sky.mesh.position.copy(camera.position);
+    // recentre the sky on the viewer (night dome wraps it, day layer rides overhead)
+    // and deepen it with radial depth into the past. The day layer reads the field at
+    // absolute world xz, so its openings stay world-locked as the player walks.
     const depth = clamp(
       Math.hypot(camera.position.x, camera.position.z) / world.R_MAX,
       0,
       1,
     );
-    sky.update(depth, camera.position.x, camera.position.z);
+    sky.update(depth, camera.position);
     renderer.render(scene, camera);
 
     // read renderer.info AFTER render (it resets per frame), throttled to ~4 Hz so
