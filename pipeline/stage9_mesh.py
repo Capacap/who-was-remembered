@@ -43,7 +43,7 @@ from matplotlib.colors import LightSource
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 
 from stage6_place import R_INNER, R_MAX, TIME_SPAN
-from stage9_heightmap import WIND_X, WIND_Z, _bilinear, year_to_radius
+from stage9_heightmap import _bilinear, year_to_radius
 
 ROOT = Path(__file__).resolve().parent
 HEIGHTMAP_PATH = ROOT / "cache" / "heightmap.npz"
@@ -394,13 +394,15 @@ def render_compare(H: np.ndarray, S: np.ndarray, verts: np.ndarray,
     # bottom-left: oblique faceted view of the crop
     n3d = _facet_view(ax_3d, verts, faces, crop, vert_exag)
 
-    # bottom-right: along-wind profile, source vs chord, through the crop centre.
-    # This is where the chord cutting the crests is unmistakable.
+    # bottom-right: radial profile, source vs chord, through the crop centre
+    # (radial crosses the dune ridges). This is where the chord cutting the
+    # crests is unmistakable.
     cx, cz, cs = crop["cx"], crop["cz"], crop["size"]
     n = 800
     s = np.linspace(-cs / 2, cs / 2, n)
-    px = cx + s * WIND_X
-    pz = cz + s * WIND_Z
+    cr = np.hypot(cx, cz) or 1.0
+    px = cx + s * (cx / cr)
+    pz = cz + s * (cz / cr)
     col = (px + half) / texel - 0.5
     rowi = (pz + half) / texel - 0.5
     src_line = _bilinear(H, rowi, col)

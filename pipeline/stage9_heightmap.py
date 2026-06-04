@@ -15,18 +15,18 @@ mesh; seating it on the baked artifact instead removes the divergence.
 For now this only bakes the heightmap and renders it for inspection. Mesh
 decimation and book-height seating build on this artifact in later steps.
 
-The height field starts from the runtime's analytic terrain
-(runtime/src/terrain.ts): a near-flat desert whose relief is a transverse dune
-field (anisotropic ridged Perlin, domain-warped, wind-aligned), a whisper of a
-central rise, and level plazas carved at the teleporter monuments. From there it
-adds slip-face asymmetry, which the runtime cannot: the symmetric ridged field is
-sheared downwind so each crest leans onto a steep lee face, then a thermal
-avalanche (a sand-slide that moves material between over-steep neighbouring
-cells) rounds the knife-edge crest, fills the toe and caps fold cliffs. Both are
-neighbour ops on the raster, which is exactly what a pointwise get_height
-function can't do and the reason terrain moved into the pipeline. So the baked
-field now deliberately diverges from terrain.ts; the runtime catches up by
-loading the baked mesh rather than by mirroring this code.
+The world is a spiral. The relief echoes the radial time axis at three scales:
+a whisper of a central rise (hill); fine dune TEXTURE that radiates from the
+centre (dune_spiral: ridged noise sampled in a spiral polar frame, so the ridges
+fork and merge organically while running outward); and a few broad cos spiral
+arms (spiral_swell) that rise into a central massif of peaks, dig gaps between
+them to break the crater rim, and fade to flat dune desert toward the bounds. The
+dunes are then run through a thermal avalanche (a sand-slide that moves material
+between over-steep neighbouring cells), a neighbour op on the raster that rounds
+the sharp crests and fills the toes -- exactly what a pointwise get_height
+function can't do and a reason terrain lives in the pipeline. Level plazas are
+carved at the teleporter monuments. The runtime catches up by loading the baked
+mesh, not by mirroring this code.
 
 Writes cache/heightmap.npz (the raw field + its world mapping) and a shaded-relief
 inspection render to cache/plots/heightmap.png.
@@ -62,7 +62,7 @@ OUT_PNG = ROOT / "cache" / "plots" / "heightmap.png"
 # TODO: once both sides read it from world.json this constant goes away.
 WORLD_SIZE = 18000.0
 
-# --- terrain constants (mirror runtime/src/terrain.ts) ----------------------
+# --- terrain constants ------------------------------------------------------
 PEAK_HEIGHT = 60.0  # a whisper of a central rise, not a summit
 PLATEAU_R = 700.0  # calm and level here (spawn + plaza + the year-2000 ring)
 BASE_R = 5200.0  # the rise has eased to the desert floor (0) by here
@@ -70,57 +70,60 @@ BASE_R = 5200.0  # the rise has eased to the desert floor (0) by here
 FLATTEN_R = 14.0  # level core of a teleporter plaza
 FLATTEN_FALLOFF = 50.0  # ... easing back to the dunes over this
 
-DUNE_AMP = 70.0  # crest height above the trough
-DUNE_SPACE = 260.0  # along-wind dune spacing (close)
-DUNE_LEN = 900.0  # crosswind ridge length scale (long)
-DUNE_OCTAVES = 3
-WARP_AMP = 120.0  # how far the crest lines meander off straight
-WARP_SCALE = 1100.0  # wavelength of that meander
-WIND_ANGLE = 0.7  # prevailing wind bearing, radians
-WIND_X = np.cos(WIND_ANGLE)
-WIND_Z = np.sin(WIND_ANGLE)
+FBM_OCTAVES = 3  # octaves of the ridged-noise fBm the dunes are built from
 NOISE_INNER = PLATEAU_R  # dunes start past the calm present plateau
 NOISE_FULL = 1400.0  # ... at full height by here
 
-# --- spiral twist (polar warp) ----------------------------------------------
-# The dune frame is twisted by an angle that grows with radius, so the straight
-# transverse bands wind into spirals emanating from the centre. The twist is a
-# pre-warp of the sample coordinates (not a rotating wind vector, which would
-# break the crest level-sets); straight bands in the twisted frame pull back to
-# spirals in world space. SWIRL = 0 leaves the original diagonal dune field.
-SWIRL = 0.4  # twist strength (radians of frame rotation per unit of the law)
-SWIRL_LAW = "log"  # "log": phi = SWIRL*ln(r/r0) (constant pitch, self-similar)
-#                    "linear": phi = SWIRL*(r-r0)/1000 (arms tighten outward)
-SWIRL_R0 = PLATEAU_R  # radius of zero twist; the spiral unwinds to nothing here
+# --- radial spiral dunes (the radiating texture) ----------------------------
+# The dunes read as TEXTURE that radiates from the centre. They are ridged noise
+# (ridges on the zero-set of fBm, which fork, merge and pinch off organically),
+# but sampled in a spiral polar frame: the angular coordinate is k*theta (k
+# ridges around the circle), the radial coordinate is r stretched by SP_ASPECT so
+# the dunes run radially, and a twist of SP_TWIST*ln(r) winds the field into a
+# spiral.
+#
+# Constant *arc* spacing across the radial range can't come from one arm count: a
+# fixed count spreads the ridges apart outward (barren at the rim where the books
+# are), a radius-varying count tears a ring seam where it steps. So we sum octave
+# harmonics whose arm counts double (SP_K0, 2*SP_K0, ...), each faded into the
+# annulus where its arc spacing matches SP_SPACE; adjacent octaves crossfade as a
+# partition of unity, so the dune scale stays constant and the two scales merge
+# where they overlap. The seam is closed by sampling each octave with a PERIODIC
+# Perlin whose angular axis wraps at exactly that octave's (integer) arm count.
+SP_AMP = 70.0  # radial dune crest height, world units (0 = off)
+SP_SPACE = 300.0  # target arc spacing between ridges (world u), held across radius
+SP_ASPECT = 4.5  # radial:angular cell ratio (>1 = dunes elongated radially, like real ridges)
+SP_TWIST = 0.6  # spiral winding: radians the whole field rotates per ln(r); 0 = radial spokes
+SP_R0 = PLATEAU_R  # winding anchor: zero rotation at this radius
+SP_K0 = 6  # innermost arm count (integer)
+SP_OCTAVES = 6  # doubling harmonics (6,12,24,48,96,192 for K0=6)
 
-# --- large-scale spiral arms (the readable vortex) --------------------------
-# Twisting the fine dunes alone reads as combed texture, not a vortex, and in
-# the game's flat dark light it washes out. So the vortex is carried by a second,
-# much larger scale: broad log-spiral swells laid over the normal dunes. The
-# dunes stay sand; these arms are the shape you read from a vantage. Gentle by
-# construction (big wavelength -> shallow slopes -> walkable, and broad enough to
-# catch flat light as sweeping tonal bands). psi = ARMS*theta + PITCH*ln(r); an
-# integer arm count keeps the atan2 branch cut seamless.
-SPIRAL_AMP = 55.0  # swell height, world units (0 = no arms)
-SPIRAL_ARMS = 2  # number of arms (must be integer for a seamless wrap)
-SPIRAL_PITCH = 2.8  # winding tightness: arms turn faster per ln(r) as this grows
-SPIRAL_R0 = PLATEAU_R  # arms phase-anchored here (where the dune envelope opens)
+# --- spiral swells (large-scale volume: balanced cos arms) -------------------
+# The fine dunes carry texture but the big picture stays flat, and the central
+# rim reads as a closed crater wall. The swells fix both: a few broad arms that
+# rise into peaks and dig BELOW between them (signed), breaking the rim into
+# SWELL_ARMS peaks with gaps, the way the original cos arms did. They are cos, not
+# the dune's ridged noise, on purpose: at three arms the noise comes out lopsided
+# (one peak dominant), while cos gives the balanced N-fold the rim needs. They
+# stay coherent with the texture by winding on the SAME SP_TWIST (so the arm
+# pitch follows the dune spiral), and a light world-space phase wobble keeps them
+# organic rather than ruled.
+SWELL_AMP = 60.0  # swell height, world units (0 = off); peaks +AMP, gaps -AMP
+SWELL_ARMS = 3  # number of arms / rim peaks (integer for a seamless wrap)
+SWELL_WOBBLE = 0.5  # world-space phase wobble (radians), so arms aren't ruled
+SWELL_WOBBLE_SCALE = 2600.0  # wavelength of that wobble, world units
+# Outer fade: the arms are a central massif, not disc-wide volume. They hold full
+# strength out to SWELL_FADE_R0, then ease to nothing by SWELL_FADE_R1, leaving a
+# flatter dune desert (texture only) from there to the bounds.
+SWELL_FADE_R0 = 2400.0  # arms at full strength within this radius
+SWELL_FADE_R1 = 5200.0  # ... faded to nothing by here (= BASE_R, where the hill also ends)
 
-# --- slip-face asymmetry (raster ops, no runtime equivalent) ----------------
-# The symmetric ridged field reads as sand waves. Real transverse dunes lean
-# downwind: a long gentle windward ramp, a short steep lee face. We get that in
-# two raster passes the pointwise function couldn't:
-#  1. a downwind shear that displaces each point along the wind by an amount
-#     proportional to its dune height, so crests migrate over the lee and pile
-#     the lee face steep while stretching the windward ramp. This is what creates
-#     the asymmetry, and it leaves the lee steeper than the repose angle by design.
-#  2. a thermal avalanche (sand-slide) that moves material between over-steep
-#     neighbouring cells. It is mass-conserving, so it does NOT flatten the
-#     uniform lee face to repose; it bites at curvature, rounding the crest,
-#     filling the toe and capping fold cliffs. A naturalising pass, not a clamp.
-LEE_SHEAR = 0.7  # downwind crest shift per unit dune height (world u per u)
-LEE_SHEAR_ITERS = 6  # fixed-point passes resolving the inverse warp (1 = no lean)
-REPOSE_DEG = 33.0  # sets the avalanche's stable step + the slip-face report threshold
+# --- avalanche (raster sand-slide, no runtime equivalent) -------------------
+# A thermal sand-slide that moves material between over-steep neighbouring cells.
+# Mass-conserving, so it does NOT flatten a uniform slope to repose; it bites at
+# curvature, rounding the crests the ridged noise leaves sharp, filling the toes
+# and capping the steepest fold cliffs. A naturalising pass, not a repose clamp.
+REPOSE_DEG = 33.0  # the avalanche's stable step (talus angle)
 AVALANCHE_ITERS = 18  # sand-slide passes: round the crest, fill the toe, cap cliffs
 AVALANCHE_RELAX = 0.5  # fraction of the over-steep excess moved each pass
 
@@ -174,14 +177,48 @@ def perlin(x: np.ndarray, y: np.ndarray) -> np.ndarray:
     return (1 - v) * x1 + v * x2
 
 
-def fbm_unit(x: np.ndarray, y: np.ndarray) -> np.ndarray:
-    """fBm in unit coordinate space (caller pre-scales), ~[-1, 1]."""
+def perlin_periodic(x: np.ndarray, y: np.ndarray, px: int) -> np.ndarray:
+    """Perlin noise periodic in x with integer period px, free in y.
+
+    Same gradient field as perlin(), but the x lattice index is wrapped modulo px
+    before the gradient hash, so noise(x + px, y) == noise(x, y) exactly. That is
+    what lets a ridge field sampled on an angular coordinate wrap seamlessly
+    around the circle (set px to the integer arm count). y is left unwrapped: the
+    radial axis is open, not a loop.
+    """
+    xi = np.floor(x)
+    yi = np.floor(y)
+    x0 = (np.mod(xi, px).astype(np.int64)) & 255  # lower x corner, wrapped at px
+    x1 = (np.mod(xi + 1, px).astype(np.int64)) & 255  # upper x corner, wrapped
+    Y = yi.astype(np.int64) & 255
+    xf = x - xi
+    yf = y - yi
+    u = smootherstep(xf)
+    v = smootherstep(yf)
+
+    def gdot(h: np.ndarray, dx: np.ndarray, dy: np.ndarray) -> np.ndarray:
+        g = PERM[h] & 7
+        return GRADX[g] * dx + GRADY[g] * dy
+
+    aa = PERM[x0] + Y
+    ba = PERM[x1] + Y
+    x1v = (1 - u) * gdot(aa, xf, yf) + u * gdot(ba, xf - 1, yf)
+    x2v = (1 - u) * gdot(aa + 1, xf, yf - 1) + u * gdot(ba + 1, xf - 1, yf - 1)
+    return (1 - v) * x1v + v * x2v
+
+
+def fbm_periodic(x: np.ndarray, y: np.ndarray, px: int) -> np.ndarray:
+    """fBm built from perlin_periodic, staying seamless in x at period px.
+
+    Each octave doubles the frequency and the period together (px, 2px, 4px ...),
+    so every octave wraps on the same circle; the sum does too.
+    """
     amp = 1.0
-    freq = 1.0
+    freq = 1
     out = np.zeros_like(x)
     norm = 0.0
-    for _ in range(DUNE_OCTAVES):
-        out = out + amp * perlin(x * freq, y * freq)
+    for _ in range(FBM_OCTAVES):
+        out = out + amp * perlin_periodic(x * freq, y * freq, px * freq)
         norm += amp
         amp *= 0.5
         freq *= 2
@@ -192,63 +229,6 @@ def fbm_unit(x: np.ndarray, y: np.ndarray) -> np.ndarray:
 def hill(r: np.ndarray) -> np.ndarray:
     """The bare radial rise: a whisper at the centre, eased to 0 by BASE_R."""
     return PEAK_HEIGHT * (1 - smootherstep((r - PLATEAU_R) / (BASE_R - PLATEAU_R)))
-
-
-def swirl_angle(r: np.ndarray) -> np.ndarray:
-    """Frame-rotation angle at each radius; 0 everywhere when SWIRL is off."""
-    if SWIRL == 0.0:
-        return np.zeros_like(r)
-    rr = np.maximum(r, 1.0)  # guard log/divide at the very centre
-    if SWIRL_LAW == "linear":
-        return SWIRL * (rr - SWIRL_R0) / 1000.0
-    return SWIRL * np.log(rr / SWIRL_R0)  # log spiral: constant pitch
-
-
-def swirl_coords(x: np.ndarray, z: np.ndarray, r: np.ndarray) -> tuple:
-    """Rotate (x, z) about the origin by swirl_angle(r), winding bands to spirals."""
-    phi = swirl_angle(r)
-    c, s = np.cos(phi), np.sin(phi)
-    return c * x - s * z, s * x + c * z
-
-
-def lee_wind(r: np.ndarray) -> tuple:
-    """Per-cell downwind direction for the slip-face lean, following each arm.
-
-    The dunes are built in the frame twisted by +swirl_angle, so the world-space
-    along-wind direction is the global wind rotated by -swirl_angle. With SWIRL
-    off this is just the constant (WIND_X, WIND_Z), broadcast over the grid.
-    """
-    phi = swirl_angle(r)
-    c, s = np.cos(-phi), np.sin(-phi)
-    return c * WIND_X - s * WIND_Z, s * WIND_X + c * WIND_Z
-
-
-def spiral_arms(x: np.ndarray, z: np.ndarray, r: np.ndarray) -> np.ndarray:
-    """Broad log-spiral swells: the large-scale vortex laid over the dunes."""
-    if SPIRAL_AMP == 0.0:
-        return np.zeros_like(r)
-    env = smootherstep((r - NOISE_INNER) / (NOISE_FULL - NOISE_INNER))
-    theta = np.arctan2(z, x)
-    psi = SPIRAL_ARMS * theta + SPIRAL_PITCH * np.log(np.maximum(r, 1.0) / SPIRAL_R0)
-    return env * SPIRAL_AMP * np.cos(psi)
-
-
-def dune_symmetric(x: np.ndarray, z: np.ndarray, r: np.ndarray) -> np.ndarray:
-    """Anisotropic ridged dune offset, faded in past the present plateau.
-
-    This is the symmetric field (before slip-face asymmetry). The shear and
-    avalanche passes turn it into leaning dunes; see dune_relief.
-    """
-    env = smootherstep((r - NOISE_INNER) / (NOISE_FULL - NOISE_INNER))
-    x, z = swirl_coords(x, z, r)  # twist the dune frame into a spiral (no-op if off)
-    # meander the crest lines so they aren't ruled straight
-    wx = x + WARP_AMP * perlin(x / WARP_SCALE, z / WARP_SCALE)
-    wz = z + WARP_AMP * perlin(x / WARP_SCALE + 41.3, z / WARP_SCALE + 17.9)
-    # rotate into wind-aligned axes and sample anisotropically
-    s = (wx * WIND_X + wz * WIND_Z) / DUNE_SPACE
-    t = (-wx * WIND_Z + wz * WIND_X) / DUNE_LEN
-    ridge = 1 - np.abs(fbm_unit(s, t))  # crease at the crest
-    return env * DUNE_AMP * ridge * ridge  # square: tight crest, flat troughs
 
 
 def _bilinear(F: np.ndarray, row: np.ndarray, col: np.ndarray) -> np.ndarray:
@@ -270,33 +250,6 @@ def _bilinear(F: np.ndarray, row: np.ndarray, col: np.ndarray) -> np.ndarray:
             + f10 * fr * (1 - fc) + f11 * fr * fc)
 
 
-def lee_shear(D: np.ndarray, texel: float,
-              wind_x: np.ndarray, wind_z: np.ndarray) -> np.ndarray:
-    """Shear the field downwind by LEE_SHEAR * height, so the dunes lean.
-
-    Models a forward warp p -> p + L*D(p)*wind: every column of sand slides
-    downwind by an amount proportional to its height, so a crest migrates over
-    the lee (steepening that face) while the windward ramp stretches gentle. We
-    apply it as the inverse map (gap-free, unlike a forward scatter): for each
-    output cell q solve p = q - L*D(p)*wind by fixed-point iteration, then read
-    D at p. A single pass leaves it symmetric; the iterations are what resolve
-    the lean, so LEE_SHEAR_ITERS must stay >= ~4. Columns index world x, rows
-    index world z. (wind_x, wind_z) is the downwind direction, per cell so the
-    slip faces can follow a spiralled field outward (a constant frame if off).
-    """
-    if LEE_SHEAR <= 0 or LEE_SHEAR_ITERS < 1:
-        return D
-    nr, nc = D.shape
-    qc, qr = np.meshgrid(np.arange(nc, dtype=np.float64),
-                         np.arange(nr, dtype=np.float64))
-    pc, pr = qc.copy(), qr.copy()
-    for _ in range(LEE_SHEAR_ITERS):
-        shift = LEE_SHEAR * _bilinear(D, pr, pc) / texel  # in texels, at source
-        pc = qc - shift * wind_x
-        pr = qr - shift * wind_z
-    return _bilinear(D, pr, pc)
-
-
 def avalanche(D: np.ndarray, texel: float) -> np.ndarray:
     """Thermal sand-slide: move material across over-steep adjacent cells.
 
@@ -304,8 +257,8 @@ def avalanche(D: np.ndarray, texel: float) -> np.ndarray:
     beyond the stable step (tan(repose) * texel) sheds a fraction of the excess
     to the lower cell. Because it is mass-conserving, a uniform over-steep face
     passes material straight through with no net change; it bites only where the
-    slope changes, so in practice it rounds the convex crest the shear leaves
-    knife-edged, fills the concave toe, and caps the steepest fold cliffs. It is
+    slope changes, so in practice it rounds the sharp convex crest the ridged
+    noise leaves, fills the concave toe, and caps the steepest fold cliffs. It is
     a naturalising pass, not a repose clamp. The wrap seam is held at zero flow
     so the square's far edges (deep void, past the clipped mesh) don't bleed.
     """
@@ -325,14 +278,89 @@ def avalanche(D: np.ndarray, texel: float) -> np.ndarray:
     return D
 
 
-def dune_relief(x: np.ndarray, z: np.ndarray, r: np.ndarray,
-                texel: float) -> np.ndarray:
-    """Asymmetric dune relief: symmetric field, sheared downwind, avalanched."""
-    D = dune_symmetric(x, z, r)
-    lwx, lwz = lee_wind(r)  # per-cell downwind dir (follows the spiral, or const)
-    D = lee_shear(D, texel, lwx, lwz)
-    D = avalanche(D, texel)
-    return D
+def _spiral_ridge(ang: np.ndarray, lnr: np.ndarray, k: int,
+                  aspect: float) -> np.ndarray:
+    """One scale of the spiral ridged field: k organic ridges around the circle.
+
+    The angular axis is k*ang sampled with a period-k Perlin (so it is seamless
+    around the circle); the radial axis is ln(r) scaled so cells stay aspect times
+    the (radius-growing) arc cell. Returns 1 - |fBm| squared, in [0, 1]: tight
+    crests, flat troughs. The shared generator for both the fine dunes and the
+    coarse swells, so the two scales spiral identically.
+    """
+    a = k * ang
+    b = k * lnr / (2 * np.pi * aspect)
+    ridge = 1.0 - np.abs(fbm_periodic(a, b, int(k)))
+    return ridge * ridge
+
+
+def dune_spiral(x: np.ndarray, z: np.ndarray, r: np.ndarray) -> np.ndarray:
+    """Radial spiral dunes: ridged fBm sampled in a spiral polar frame.
+
+    Each octave is a ridged-noise field (1 - |fBm|, squared for tight crests and
+    flat troughs) whose ridges fork, merge and pinch off organically, laid on the
+    angular axis k*theta so they radiate from the centre. The angular
+    axis is sampled with a PERIODIC Perlin wrapping at the integer arm count k, so
+    the field is seamless around the circle; the radial axis r is open and
+    stretched by SP_ASPECT so the dunes run radially rather than ring the centre.
+    Octaves (k doubling) are weighted into the annulus where their arc spacing ~
+    SP_SPACE and crossfade as a partition of unity, holding the dune scale
+    constant and letting neighbouring scales merge. The angle is twisted by
+    SP_TWIST*ln(r) to wind the field into a spiral (0 = straight radial spokes).
+    """
+    if SP_AMP == 0.0:
+        return np.zeros_like(r)
+    env = smootherstep((r - NOISE_INNER) / (NOISE_FULL - NOISE_INNER))
+    rr = np.maximum(r, 1.0)
+    theta = np.arctan2(z, x)
+    tp = theta - SP_TWIST * np.log(rr / SP_R0)  # spiralled angle, coherent across octaves
+    ang = tp / (2 * np.pi)  # turns; * k gives the per-octave angular sample coordinate
+    lnr = np.log(rr)
+    ln2 = np.log(2.0)
+    out = np.zeros_like(r)
+    wsum = np.zeros_like(r)
+    for n in range(SP_OCTAVES):
+        k = SP_K0 * (2 ** n)
+        r_n = k * SP_SPACE / (2 * np.pi)  # radius where this octave's arc spacing = SP_SPACE
+        u = (lnr - np.log(r_n)) / ln2  # octaves away from this harmonic's home annulus
+        w = np.where(np.abs(u) < 1.0, 0.5 * (1 + np.cos(np.pi * u)), 0.0)
+        out = out + w * _spiral_ridge(ang, lnr, k, SP_ASPECT)
+        wsum = wsum + w
+    out = np.where(wsum > 1e-6, out / np.maximum(wsum, 1e-6), out)  # full height at band edges
+    return env * SP_AMP * out
+
+
+def dune_spiral_relief(x: np.ndarray, z: np.ndarray, r: np.ndarray,
+                       texel: float) -> np.ndarray:
+    """Radial dunes, naturalised by the isotropic avalanche.
+
+    The avalanche is direction-free (it just sheds over-steep slope to lower
+    neighbours), so it rounds the sharp crests and fills the toes of the radial
+    ridges regardless of which way they run.
+    """
+    return avalanche(dune_spiral(x, z, r), texel)
+
+
+def spiral_swell(x: np.ndarray, z: np.ndarray, r: np.ndarray) -> np.ndarray:
+    """Balanced cos spiral arms: large-scale volume, peaks +AMP and gaps -AMP.
+
+    Signed cos of SWELL_ARMS*tp, where tp = theta - SP_TWIST*ln(r) is the same
+    twisted angle the dunes ride, so the arms wind with the texture. cos (not the
+    dune's ridged noise) keeps the arms balanced N-fold, which is what breaks the
+    central rim into evenly spaced peaks rather than one lopsided lump. A
+    world-space phase wobble (continuous in x/z, so seam-safe) bends the arms off
+    a ruled spiral. Disc-spanning, faded in only past the present plateau.
+    """
+    if SWELL_AMP == 0.0:
+        return np.zeros_like(r)
+    inner = smootherstep((r - NOISE_INNER) / (NOISE_FULL - NOISE_INNER))  # fade in past plateau
+    outer = 1.0 - smootherstep((r - SWELL_FADE_R0) / (SWELL_FADE_R1 - SWELL_FADE_R0))  # die off to bounds
+    env = inner * outer  # a central band: a massif in the middle, flat desert outside
+    rr = np.maximum(r, 1.0)
+    theta = np.arctan2(z, x)
+    tp = theta - SP_TWIST * np.log(rr / SP_R0)  # twisted angle, shared with the dunes
+    wob = SWELL_WOBBLE * perlin(x / SWELL_WOBBLE_SCALE, z / SWELL_WOBBLE_SCALE)
+    return env * SWELL_AMP * np.cos(SWELL_ARMS * tp + wob)
 
 
 def bake_heightmap(res: int, teleporters: np.ndarray) -> np.ndarray:
@@ -346,7 +374,7 @@ def bake_heightmap(res: int, teleporters: np.ndarray) -> np.ndarray:
     gx, gz = np.meshgrid(axis, axis)  # gx varies along columns, gz along rows
     r = np.hypot(gx, gz)
 
-    H = hill(r) + dune_relief(gx, gz, r, texel) + spiral_arms(gx, gz, r)
+    H = hill(r) + dune_spiral_relief(gx, gz, r, texel) + spiral_swell(gx, gz, r)
 
     # Carve a level plaza at each teleporter: blend the field toward the
     # monument's own local ground height inside FLATTEN_R, easing back to the
@@ -381,7 +409,7 @@ def bake_window(cx: float, cz: float, size: float, px: int) -> tuple[np.ndarray,
     az = cz - size / 2 + (np.arange(px) + 0.5) * texel
     gx, gz = np.meshgrid(ax, az)
     r = np.hypot(gx, gz)
-    return hill(r) + dune_relief(gx, gz, r, texel) + spiral_arms(gx, gz, r), texel
+    return hill(r) + dune_spiral_relief(gx, gz, r, texel) + spiral_swell(gx, gz, r), texel
 
 
 def report_asymmetry(H: np.ndarray, texel: float, wind: tuple) -> None:
@@ -535,50 +563,68 @@ def main() -> None:
     parser.add_argument("--crop-size", type=float, default=2400.0,
                         help="width of the high-res dune crop, world units")
     parser.add_argument("--dpi", type=int, default=110)
-    parser.add_argument("--lean", type=float, default=None,
-                        help="override LEE_SHEAR (downwind crest lean)")
     parser.add_argument("--repose", type=float, default=None,
-                        help="override REPOSE_DEG (lee-face stable angle)")
+                        help="override REPOSE_DEG (avalanche talus angle)")
     parser.add_argument("--aval-iters", type=int, default=None,
                         help="override AVALANCHE_ITERS (sand-slide passes)")
-    parser.add_argument("--swirl", type=float, default=None,
-                        help="override SWIRL (spiral twist strength; 0 = straight)")
-    parser.add_argument("--swirl-law", choices=("log", "linear"), default=None,
-                        help="override SWIRL_LAW (log = constant pitch)")
-    parser.add_argument("--swirl-r0", type=float, default=None,
-                        help="override SWIRL_R0 (radius of zero twist)")
-    parser.add_argument("--spiral-amp", type=float, default=None,
-                        help="override SPIRAL_AMP (large arm swell height; 0 = off)")
-    parser.add_argument("--spiral-arms", type=int, default=None,
-                        help="override SPIRAL_ARMS (number of arms, integer)")
-    parser.add_argument("--spiral-pitch", type=float, default=None,
-                        help="override SPIRAL_PITCH (arm winding tightness)")
+    parser.add_argument("--sp-amp", type=float, default=None,
+                        help="override SP_AMP (radial dune height; 0 = off)")
+    parser.add_argument("--sp-space", type=float, default=None,
+                        help="override SP_SPACE (target arc spacing between ridges)")
+    parser.add_argument("--sp-twist", type=float, default=None,
+                        help="override SP_TWIST (spiral winding; 0 = radial spokes)")
+    parser.add_argument("--sp-octaves", type=int, default=None,
+                        help="override SP_OCTAVES (doubling harmonics)")
+    parser.add_argument("--sp-k0", type=int, default=None,
+                        help="override SP_K0 (innermost arm count)")
+    parser.add_argument("--sp-aspect", type=float, default=None,
+                        help="override SP_ASPECT (radial:angular dune cell ratio)")
+    parser.add_argument("--swell-amp", type=float, default=None,
+                        help="override SWELL_AMP (swell height; peaks +AMP, gaps -AMP; 0 = off)")
+    parser.add_argument("--swell-arms", type=int, default=None,
+                        help="override SWELL_ARMS (number of arms / rim peaks)")
+    parser.add_argument("--swell-wobble", type=float, default=None,
+                        help="override SWELL_WOBBLE (arm phase wobble, radians)")
+    parser.add_argument("--swell-fade-r0", type=float, default=None,
+                        help="override SWELL_FADE_R0 (arms full-strength within this radius)")
+    parser.add_argument("--swell-fade-r1", type=float, default=None,
+                        help="override SWELL_FADE_R1 (arms faded to nothing by this radius)")
     args = parser.parse_args()
 
-    global LEE_SHEAR, REPOSE_DEG, AVALANCHE_ITERS, SWIRL, SWIRL_LAW, SWIRL_R0
-    global SPIRAL_AMP, SPIRAL_ARMS, SPIRAL_PITCH
-    if args.lean is not None:
-        LEE_SHEAR = args.lean
+    global REPOSE_DEG, AVALANCHE_ITERS
+    global SP_AMP, SP_SPACE, SP_TWIST, SP_OCTAVES, SP_K0, SP_ASPECT
+    global SWELL_AMP, SWELL_ARMS, SWELL_WOBBLE, SWELL_FADE_R0, SWELL_FADE_R1
     if args.repose is not None:
         REPOSE_DEG = args.repose
     if args.aval_iters is not None:
         AVALANCHE_ITERS = args.aval_iters
-    if args.swirl is not None:
-        SWIRL = args.swirl
-    if args.swirl_law is not None:
-        SWIRL_LAW = args.swirl_law
-    if args.swirl_r0 is not None:
-        SWIRL_R0 = args.swirl_r0
-    if args.spiral_amp is not None:
-        SPIRAL_AMP = args.spiral_amp
-    if args.spiral_arms is not None:
-        SPIRAL_ARMS = args.spiral_arms
-    if args.spiral_pitch is not None:
-        SPIRAL_PITCH = args.spiral_pitch
-    print(f"asymmetry: lean={LEE_SHEAR:g} repose={REPOSE_DEG:g}deg "
-          f"avalanche={AVALANCHE_ITERS} passes")
-    print(f"swirl: {SWIRL:g} ({SWIRL_LAW}, r0={SWIRL_R0:g})")
-    print(f"spiral arms: amp={SPIRAL_AMP:g} arms={SPIRAL_ARMS} pitch={SPIRAL_PITCH:g}")
+    if args.sp_amp is not None:
+        SP_AMP = args.sp_amp
+    if args.sp_space is not None:
+        SP_SPACE = args.sp_space
+    if args.sp_twist is not None:
+        SP_TWIST = args.sp_twist
+    if args.sp_octaves is not None:
+        SP_OCTAVES = args.sp_octaves
+    if args.sp_k0 is not None:
+        SP_K0 = args.sp_k0
+    if args.sp_aspect is not None:
+        SP_ASPECT = args.sp_aspect
+    if args.swell_amp is not None:
+        SWELL_AMP = args.swell_amp
+    if args.swell_arms is not None:
+        SWELL_ARMS = args.swell_arms
+    if args.swell_wobble is not None:
+        SWELL_WOBBLE = args.swell_wobble
+    if args.swell_fade_r0 is not None:
+        SWELL_FADE_R0 = args.swell_fade_r0
+    if args.swell_fade_r1 is not None:
+        SWELL_FADE_R1 = args.swell_fade_r1
+    print(f"avalanche: repose={REPOSE_DEG:g}deg {AVALANCHE_ITERS} passes")
+    print(f"radial dunes: amp={SP_AMP:g} space={SP_SPACE:g} twist={SP_TWIST:g} "
+          f"k0={SP_K0} octaves={SP_OCTAVES} aspect={SP_ASPECT:g}")
+    print(f"swells: amp={SWELL_AMP:g} arms={SWELL_ARMS} wobble={SWELL_WOBBLE:g} "
+          f"fade={SWELL_FADE_R0:g}..{SWELL_FADE_R1:g}")
 
     start = time.perf_counter()
 
@@ -606,10 +652,9 @@ def main() -> None:
 
     cx, cz = args.crop_center
     cH, ctexel = bake_window(cx, cz, args.crop_size, 1536)
-    # local downwind direction at the crop centre (rotates with the swirl), so
-    # the asymmetry transect runs across the dunes, not at a global-wind angle.
-    cwx, cwz = lee_wind(np.hypot(cx, cz))
-    cwind = (float(cwx), float(cwz))
+    # transect direction at the crop centre: radial, so it crosses the dune ridges
+    cr = np.hypot(cx, cz) or 1.0
+    cwind = (cx / cr, cz / cr)
     report_asymmetry(cH, ctexel, cwind)
     crop = {"H": cH, "texel": ctexel, "cx": cx, "cz": cz, "size": args.crop_size}
     render(H, teleporters, crop, args.out_png, args.vert_exag, args.dpi, cwind)
