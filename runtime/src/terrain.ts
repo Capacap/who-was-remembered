@@ -153,6 +153,30 @@ const COLOR_GREY = new THREE.Color(0x6e6860); // faded deep-past floor
 const ERA_GRADIENT_R = 7100;
 const COLOR_WAVELENGTH = 900; // patch-noise scale for the painted wobble
 
+// The vortex eye: a pale glacial teal gathered at the centre, the cold light of
+// the present where the knowledge piles up. It reads as EMISSIVE (added after
+// lighting), not albedo: the flat vantage centre catches almost none of the
+// raking sun, so an albedo tint there is crushed to black no matter how light
+// the colour, while an additive glow is lighting-independent and reads in the
+// dark. The coverage never makes a clean radial ring: a noise field (EYE_NOISE_*)
+// fingers the boundary in and out even across the flat calm zone where there are
+// no dunes to follow, a relief push (EYE_RELIEF_PUSH) lets it run down the dune
+// troughs where the terrain has relief, and EYE_VALLEY pools the glow in the
+// troughs and recedes it off the crests so it interfingers with the rising dunes.
+const COLOR_EYE = new THREE.Color(0xe8f3f1); // near-white with a whisper of cool: otherworldly bleached sand
+const EYE_R0 = 260; // full eye colour inside here (the vantage pocket)
+const EYE_R1 = 1900; // ... gone by here, reaching out into the rising dunes
+const EYE_ALBEDO_STRENGTH = 0.85; // albedo lerp toward the eye colour (only shows where lit)
+const EYE_EMISSIVE_STRENGTH = 0.6; // additive glow strength (carries the eye in the unlit centre)
+const EYE_RELIEF_PUSH = 320; // world units the boundary shifts per unit relief:
+// troughs (relief < 0) pull it inward (more eye), crests (relief > 0) push it out
+const EYE_NOISE_AMP = 680; // world units the boundary wanders by noise (breaks the ring)
+const EYE_NOISE_SCALE = 760; // coarse noise wavelength; a finer octave rides on top
+const EYE_VALLEY = 1.3; // pool the colour in the dune troughs, recede off the crests:
+// scales the mask by (1 - EYE_VALLEY * relief), so crests dim and troughs lift
+const _eye = COLOR_EYE.clone().convertSRGBToLinear();
+const EYE_EMISSIVE_RGB = `vec3(${_eye.r.toFixed(4)}, ${_eye.g.toFixed(4)}, ${_eye.b.toFixed(4)})`;
+
 // Crest/trough relief tint, layered on the radial base: crests read scoured pale
 // and a touch warm, troughs cooler and darker, so the dunes carry colour and not
 // just shading. The signal is the vertex height minus its neighbours RELIEF_CELLS out
@@ -329,18 +353,41 @@ export function peakHeight(): number {
 // the CPU by design (no texture, no baked raster), so the low-poly vertex-colour look
 // holds. `relief` is the signed, already-normalised local relief (+ on crests, - in
 // hollows) the caller reads from the grid; 0 leaves the base untouched.
+// The vortex-eye coverage at a world point, in [0, 1]: 1 at the gathered centre,
+// 0 past the band. The boundary radius is perturbed by two octaves of noise (so
+// the edge fingers organically rather than reading as a clean ring) and by local
+// relief (so it runs down the dune troughs where the terrain has relief to
+// follow). buildGround reads this once per vertex for both the albedo tint and
+// the emissive glow, so the two always agree.
+export function eyeMask(x: number, z: number, relief: number): number {
+  const r = Math.hypot(x, z);
+  const noise =
+    perlin(x / EYE_NOISE_SCALE, z / EYE_NOISE_SCALE) +
+    0.5 * perlin(x / (EYE_NOISE_SCALE * 0.4), z / (EYE_NOISE_SCALE * 0.4));
+  const rEff = r + EYE_RELIEF_PUSH * relief + EYE_NOISE_AMP * noise;
+  const radial = 1 - smootherstep((rEff - EYE_R0) / (EYE_R1 - EYE_R0));
+  // pool in the troughs, recede off the crests: relief > 0 (crest) dims, < 0 lifts
+  const valley = 1 - EYE_VALLEY * relief;
+  return Math.min(1, Math.max(0, radial * valley));
+}
+
 const _hsl = { h: 0, s: 0, l: 0 }; // scratch for groundColor's single HSL roundtrip
 export function groundColor(
   x: number,
   z: number,
   out: THREE.Color,
   relief = 0,
+  eye = 0,
 ): THREE.Color {
   // one continuous ramp: pale -> sand at the midpoint -> grey across [0, edge].
   const r = Math.hypot(x, z);
   const t = Math.min(1, r / ERA_GRADIENT_R);
   if (t < 0.5) out.copy(COLOR_PALE).lerp(COLOR_SAND, t * 2);
   else out.copy(COLOR_SAND).lerp(COLOR_GREY, (t - 0.5) * 2);
+  // Tint the albedo toward the eye colour (the glow that actually carries it in
+  // the dark centre is the emissive term, added in applyGroundMaterial). Folded
+  // under the HSL offsets below so the eye still picks up crest/trough shading.
+  if (eye > 0) out.lerp(COLOR_EYE, eye * EYE_ALBEDO_STRENGTH);
   const tone = perlin(x / COLOR_WAVELENGTH, z / COLOR_WAVELENGTH); // [-1, 1]
   // time rings: a smooth ripple, one cycle per RING_SPACING of radius.
   const ring = Math.cos((r / RING_SPACING) * Math.PI * 2);
@@ -451,11 +498,12 @@ function applyGroundMaterial(
     shader.vertexShader = shader.vertexShader
       .replace(
         "#include <common>",
-        "#include <common>\nvarying float vGroundFade;\nvarying float vCloudDist;\nvarying vec3 vWorldPos;\nvarying vec2 vCloudXZ;",
+        "#include <common>\nattribute float aEye;\nvarying float vEye;\nvarying float vGroundFade;\nvarying float vCloudDist;\nvarying vec3 vWorldPos;\nvarying vec2 vCloudXZ;",
       )
       .replace(
         "#include <project_vertex>",
         `#include <project_vertex>
+         vEye = aEye;
          vCloudDist = length(mvPosition.xyz);
          vGroundFade = clamp(
            (vCloudDist - ${FADE_START.toFixed(1)}) / ${fadeSpan},
@@ -469,7 +517,7 @@ function applyGroundMaterial(
       );
     let frag = shader.fragmentShader.replace(
       "#include <common>",
-      "#include <common>\nvarying float vGroundFade;\nvarying float vCloudDist;\nvarying vec3 vWorldPos;\nvarying vec2 vCloudXZ;\nuniform vec2 uPlayer;\nuniform float uSkate;" +
+      "#include <common>\nvarying float vEye;\nvarying float vGroundFade;\nvarying float vCloudDist;\nvarying vec3 vWorldPos;\nvarying vec2 vCloudXZ;\nuniform vec2 uPlayer;\nuniform float uSkate;" +
         CLOUD_FRAG_COMMON,
     );
     // Raking pool, additive after lighting (linear space, before the colorspace
@@ -494,6 +542,9 @@ function applyGroundMaterial(
          // ground reads as glowing beneath you rather than lit by a second sun.
          float bfall = 1.0 - smoothstep(${SKATE_GLOW_INNER.toFixed(1)}, ${SKATE_GLOW_RADIUS.toFixed(1)}, pdist);
          gl_FragColor.rgb += uSkate * ${SKATE_GLOW_RGB} * (${SKATE_GLOW_STRENGTH.toFixed(2)} * bfall * (0.45 + 0.55 * rake));
+         // vortex eye: additive glow (colour x mask), lighting-independent so it
+         // reads in the barely-lit centre where an albedo tint would be crushed.
+         gl_FragColor.rgb += vEye * ${EYE_EMISSIVE_RGB} * ${EYE_EMISSIVE_STRENGTH.toFixed(2)};
        }` +
         // drifting cloud shadow over the dunes, sinking toward the night floor into
         // the distance dissolve so the far ground darkens to meet the black storm dome.
@@ -645,6 +696,7 @@ export function buildGround(
   const vcount = stride * stride;
   const positions = new Float32Array(vcount * 3);
   const colors = new Float32Array(vcount * 3);
+  const eyes = new Float32Array(vcount); // per-vertex eye coverage, for the emissive glow
   const v3 = new THREE.Vector3();
   const c = new THREE.Color();
   const ro = RELIEF_CELLS * cell; // neighbour offset for the crest/trough relief read
@@ -665,7 +717,9 @@ export function buildGround(
               sampleHeight(v3.x, v3.z - ro) +
               sampleHeight(v3.x, v3.z + ro))) /
         (RELIEF_SCALE * ro);
-      groundColor(v3.x, v3.z, c, relief);
+      const eye = eyeMask(v3.x, v3.z, relief);
+      eyes[v] = eye;
+      groundColor(v3.x, v3.z, c, relief, eye);
       colors[v * 3] = c.r;
       colors[v * 3 + 1] = c.g;
       colors[v * 3 + 2] = c.b;
@@ -691,6 +745,7 @@ export function buildGround(
   const geom = new THREE.BufferGeometry();
   geom.setAttribute("position", new THREE.BufferAttribute(positions, 3));
   geom.setAttribute("color", new THREE.BufferAttribute(colors, 3));
+  geom.setAttribute("aEye", new THREE.BufferAttribute(eyes, 1));
   geom.setIndex(new THREE.BufferAttribute(indices, 1));
   const mat = new THREE.MeshLambertMaterial({
     vertexColors: true,
