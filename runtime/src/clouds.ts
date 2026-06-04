@@ -77,16 +77,19 @@ const DAY: [number, number, number] = [1.25, 1.08, 0.82];
 const ERA_R = 7100;
 const ERA_FLOOR = 0.55;
 
-// Cloud mip from camera DISTANCE, not the GPU's screen-derivative mip. The
-// derivative-driven mip is unstable where the cloud uv's screen footprint jumps: a
+// Ground mip from camera DISTANCE, not the GPU's screen-derivative mip. The
+// derivative-driven mip is unstable where the field's uv screen footprint jumps: a
 // near-vertical head/stone face has near-zero uv footprint, so the hardware picks the
 // finest, highest-frequency mip, and under the hard night/day contrast each mip flip
 // is a visible strobe. Camera distance is stable per object, so deriving the mip from
-// it removes that. LOD_REF is the distance still read at full detail (mip 0,
-// underfoot); the mask coarsens by one mip per doubling beyond it, up to LOD_MAX at
-// the dissolve horizon. Eyeball knobs.
-const LOD_REF = 120;
-const LOD_MAX = 6;
+// it removes that. LOD_REF is the distance still read at full detail (mip 0); the mask
+// coarsens by one mip per doubling beyond it, up to LOD_MAX. These are deliberately
+// gentle: the holes are broad and low-frequency (they barely alias), and coarsening too
+// fast averages the sparse holes into their dark mean within a few hundred units, so a
+// daylight pool only resolves once you walk on top of it. A far LOD_REF + a low LOD_MAX
+// keep the distant pools readable, so the holes overhead have answering light below.
+const LOD_REF = 600;
+const LOD_MAX = 3;
 
 export interface CloudUniforms {
   uClouds: { value: THREE.Texture };
@@ -179,21 +182,21 @@ function makeCloudTexture(): THREE.DataTexture {
   return tex;
 }
 
-// --- crack field (sky only) --------------------------------------------------
-// A separate field for the SKY openings, so they stop reading as clouds: instead of
-// the soft fbm blobs the ground uses, this is a periodic Voronoi web. The metric is
-// the cell-edge distance (F2 - F1, small where two cells are equidistant), which traces
-// a network of thin seams. Baked high on the seams, near zero inside the shards, so the
-// sky's threshold picks a fracture network and daylight shows through the cracks. Kept
-// out of the ground field on purpose (see the sky-vs-ground decision): the dunes keep
-// their soft dapple until we decide to extend the cracks down to them.
-const CRACK_CELLS = 3; // Voronoi cells across the tile (low = larger shards)
-const CRACK_EDGE = 0.1; // seam half-width in cell units; small = thin hairline cracks
-//                          (still smootherstep-ramped, so the edge stays soft/diffuse)
-const CRACK_KEEP = 0.55; // fraction of cells that keep a point; the rest merge into big
-//                          irregular shards (this is what gives shattered-glass variance)
-const CRACK_SCALE = 4800; // world units per crack tile (large = big shards, less repeat)
-const CRACK_WIND = 25; // seam drift speed, world units/sec (its own slow creep)
+// --- hole field --------------------------------------------------------------
+// The shared field that drives the sky openings AND the ground day/night. Once a Voronoi
+// crack web; now soft rounded HOLES, closer to the original cloud idea but with shape
+// instead of pure noise. One jittered point per cell (with ~half dropped, so the holes
+// scatter), and the field is the union of a soft disc around each kept point: 1 at the
+// point, smootherstep down to 0 at the disc rim. The sky opens and the ground lights
+// where the field is high, so daylight now pours through round windows, not cracks. The
+// domain warp (crackUV, shared) bends the discs so they read as irregular rounded blobs,
+// not stamped circles, and overlapping discs merge into larger lobed openings.
+const CRACK_CELLS = 3; // cells across the tile (low = fewer, larger holes)
+const HOLE_R = 0.2; // base hole radius in cell units; disc reaches 0 here (soft all the way)
+const HOLE_R_VAR = 0.1; // per-hole radius spread (hash-driven, so the holes vary in size)
+const CRACK_KEEP = 0.9; // fraction of cells that keep a hole; the rest are solid night sky
+const CRACK_SCALE = 4800; // world units per tile (large = big holes, less repeat)
+const CRACK_WIND = 25; // hole drift speed, world units/sec (its own slow creep)
 
 // Domain warp applied to the crack lookup, SHARED by the sky and the ground so both read
 // the identical wandering web at the same world XZ (the daylight that pours through a sky
@@ -202,20 +205,26 @@ const CRACK_WIND = 25; // seam drift speed, world units/sec (its own slow creep)
 const WARP_SCALE = 0.0015;
 const WARP_AMT = 500;
 
-// The ground's open band on the crack field: lit (day) along the seams, night in the
-// shards. Much wider/softer than the sky's hairline threshold so a seam is a broad diffuse
-// wash, not a strip: the low end is what stretches the lit skirt far out from the seam
-// core (the "light scatters further" read), the high end where it reaches full day.
-const GROUND_OPEN_LO = 0.25;
+// The ground's open band on the hole field: lit (day) inside a hole, night outside it.
+// Lower/wider than the sky's threshold so a hole casts a broad pool of daylight with a
+// long soft skirt: the low end stretches the lit pool far out toward the rim of the disc
+// (the "light scatters further" read), the high end is where it reaches full day at the core.
+const GROUND_OPEN_LO = 0.1;
 const GROUND_OPEN_HI = 0.9;
-// Extra mip bias on the ground's crack sample, so the seams blur and spread spatially
-// (more diffuse, scattering into the surrounding sand) without touching the sky, which
-// keeps its own crisp read. Higher = softer, wider, dimmer ground light.
+// Extra mip bias on the ground's hole sample, on top of the distance LOD. Held at 0 now:
+// the disc falloff already gives a soft-edged pool, and any bias here just blurs the
+// distant holes back toward their dark mean (the thing that was hiding them). Raise it
+// only if the near pools want softer edges. The sky keeps its own crisp auto-mip read.
 const GROUND_LOD_BIAS = 1.0;
 
 // per-cell hash, periodic over `per` so the tile wraps seamlessly. Returns the jittered
-// point (a, b) in [0,1)^2 and a `keep` roll used to drop ~half the points.
-function cellPoint(ix: number, iy: number, per: number): { a: number; b: number; keep: number } {
+// point (a, b) in [0,1)^2, a `keep` roll used to drop ~half the points, and an `r` roll
+// that varies each kept hole's radius.
+function cellPoint(
+  ix: number,
+  iy: number,
+  per: number,
+): { a: number; b: number; keep: number; r: number } {
   const wx = ((ix % per) + per) % per;
   const wy = ((iy % per) + per) % per;
   let h = (Math.imul(wx, 374761393) + Math.imul(wy, 668265263)) | 0;
@@ -224,7 +233,8 @@ function cellPoint(ix: number, iy: number, per: number): { a: number; b: number;
   const h2 = Math.imul(h ^ (h >>> 15), 1597334677) >>> 0;
   const b = (h2 % 4096) / 4096;
   const h3 = Math.imul(h2 ^ (h2 >>> 13), 951274213) >>> 0;
-  return { a, b, keep: (h3 % 4096) / 4096 };
+  const h4 = Math.imul(h3 ^ (h3 >>> 16), 2246822519) >>> 0;
+  return { a, b, keep: (h3 % 4096) / 4096, r: (h4 % 4096) / 4096 };
 }
 
 function makeCrackTexture(): THREE.DataTexture {
@@ -236,31 +246,25 @@ function makeCrackTexture(): THREE.DataTexture {
       const gy = (y / RES) * P;
       const cx = Math.floor(gx);
       const cy = Math.floor(gy);
-      let f1 = 1e9;
-      let f2 = 1e9; // nearest and second-nearest kept-point distances
-      // 5x5 search: with ~half the points dropped, the nearest can be two cells away.
+      let v = 0; // strongest hole membership at this texel (union of soft discs)
+      // 5x5 search: a hole's disc can reach in from a couple of cells away once dropped
+      // points push its nearest kept neighbour out.
       for (let j = -2; j <= 2; j++) {
         for (let i = -2; i <= 2; i++) {
           const p = cellPoint(cx + i, cy + j, P);
-          if (p.keep > CRACK_KEEP) continue; // dropped: this cell merges into its neighbours
+          if (p.keep > CRACK_KEEP) continue; // dropped: no hole, this stays solid night
           const dx = cx + i + p.a - gx;
           const dy = cy + j + p.b - gy;
           const d = Math.sqrt(dx * dx + dy * dy);
-          if (d < f1) {
-            f2 = f1;
-            f1 = d;
-          } else if (d < f2) {
-            f2 = d;
-          }
+          const radius = HOLE_R + (p.r - 0.5) * 2 * HOLE_R_VAR;
+          const t = Math.min(1, d / radius);
+          // smootherstep falloff: 1 at the point, 0 at the rim, soft all the way. Take the
+          // max across discs so overlapping holes union into larger lobed openings.
+          const hole = 1 - t * t * t * (t * (t * 6 - 15) + 10);
+          if (hole > v) v = hole;
         }
       }
-      // edge metric: 0 on a Voronoi boundary, growing inward. Ramp to 1 at the seam,
-      // 0 by CRACK_EDGE, then smootherstep it so the seam is a soft diffuse gradient
-      // (smooth light when this drives the dunes) rather than a hard line. The sky picks
-      // the final width with its own threshold, so it retunes without a rebake.
-      let crack = 1 - Math.min(1, (f2 - f1) / CRACK_EDGE);
-      crack = crack * crack * crack * (crack * (crack * 6 - 15) + 10);
-      data[y * RES + x] = Math.round(Math.max(0, Math.min(1, crack)) * 255);
+      data[y * RES + x] = Math.round(Math.max(0, Math.min(1, v)) * 255);
     }
   }
   const tex = new THREE.DataTexture(data, RES, RES, THREE.RedFormat);
