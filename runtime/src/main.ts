@@ -1186,8 +1186,8 @@ function escapeHtml(s: string): string {
   );
 }
 
-// Look-at picker: each tick, find the book nearest the camera whose centre falls
-// within a narrow cone of the view direction. A distance cull rejects almost all
+// Look-at picker: each tick, find the book nearest the camera whose seat lies
+// within a thin cylinder around the view ray. A distance cull rejects almost all
 // 576k instances before the alignment test, so the brute-force sweep is cheap at
 // the throttled cadence. Aims at jittered positions (matching what's drawn).
 function createPicker(
@@ -1197,15 +1197,17 @@ function createPicker(
 ) {
   // reading is close-up only: you have to travel and walk up to a book to learn
   // who it is. Long-range legibility (landmarks visible from afar) is a separate
-  // problem for a beacon VFX, not for this radius. ~6 u ≈ 4 m at 1.4 u/m.
+  // problem for a beacon VFX, not for this reach. ~6 u ≈ 4 m at 1.4 u/m.
   const MAX_DIST = 6;
   const MAX_DIST2 = MAX_DIST * MAX_DIST;
-  // wider cone than a precise crosshair: once you're standing at a book, facing
-  // its general direction should read it without pixel-perfect aim.
-  const COS_CONE = Math.cos((11 * Math.PI) / 180);
-  // books lie flat on the sand, so the pick point sits just above the ground;
-  // you read a book by walking up and looking down at it.
-  const PICK_HEIGHT = 0.2;
+  // The tolerance is a world-space radius around the aim ray, not an angle: a
+  // fixed angle holds a constant SCREEN tolerance while the book shrinks with
+  // distance, so a cone that fits up close balloons to several book-widths at
+  // MAX_DIST. A fixed world radius subtends a shrinking angle, so its screen
+  // tolerance tracks the book's own. Sized a touch over the cover half-length
+  // (BOOK_LENGTH·BOOK_FOOTPRINT/2 ≈ 0.2u) for forgiveness without pixel-aim.
+  const PICK_RADIUS = 0.45;
+  const PICK_RADIUS2 = PICK_RADIUS * PICK_RADIUS;
   const n = px.length;
   const fwd = new THREE.Vector3();
 
@@ -1214,9 +1216,6 @@ function createPicker(
     const cx = camera.position.x;
     const cy = camera.position.y;
     const cz = camera.position.z;
-    // books within reach share the player's local ground, so aim a fixed height
-    // above it rather than y=0 (which the hill makes wrong by hundreds of units).
-    const dyAll = sampleHeight(cx, cz) + PICK_HEIGHT - cy;
     let best = -1;
     let bestDist2 = Infinity;
     for (let i = 0; i < n; i++) {
@@ -1224,10 +1223,19 @@ function createPicker(
       const dz = pz[i] - cz;
       const horiz2 = dx * dx + dz * dz;
       if (horiz2 > MAX_DIST2) continue;
-      const dy = dyAll;
+      // each book sits on its own ground, not the player's: on a slope a book a
+      // few units away can be a couple of units higher or lower than underfoot,
+      // so sampling the player's feet (or y=0) mis-aims it. Aim at the book's own
+      // seat. Only the handful within MAX_DIST survive the cull, so this is cheap.
+      const dy = sampleHeight(px[i], pz[i]) - cy;
+      // split the offset into along-ray (t, how far ahead) and perpendicular
+      // (how far off the aim line). Reject anything behind the eye, beyond reach,
+      // or outside the cylinder radius, then keep the nearest survivor.
+      const t = dx * fwd.x + dy * fwd.y + dz * fwd.z;
+      if (t <= 0 || t > MAX_DIST) continue;
       const dist2 = horiz2 + dy * dy;
-      const dot = (dx * fwd.x + dy * fwd.y + dz * fwd.z) / Math.sqrt(dist2);
-      if (dot < COS_CONE) continue;
+      const perp2 = dist2 - t * t;
+      if (perp2 > PICK_RADIUS2) continue;
       if (dist2 < bestDist2) {
         bestDist2 = dist2;
         best = i;
