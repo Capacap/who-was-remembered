@@ -21,43 +21,19 @@ import * as THREE from "three";
 // neutral into the distance dissolve so the far field keeps its clean fade into the
 // dome.
 
-// Texture: power-of-two so it mipmaps (the ground samples it at grazing angles
-// where the uv derivatives explode; without mips that aliases into a crawling
-// moire). BASE_PERIOD is the base-octave cycles across the tile (low = big soft
-// blobs); OCT adds finer structure. The noise is periodic over BASE_PERIOD so the
-// tile is seamless.
+// Texture resolution: power-of-two so it mipmaps (the ground samples the field at grazing
+// angles where the uv derivatives explode; without mips that aliases into a crawling moire).
 const RES = 256;
-const BASE_PERIOD = 6;
-const OCT = 3;
 
-// Two sampling layers in world space: a mid layer that carries the read and a
-// larger, slower underlay that de-correlates the tiling. World units per tile.
-const SCALE1 = 1700;
-const SCALE2 = 3900;
-const WEIGHT1 = 0.62; // the two layers' mix (sums to 1)
-const WEIGHT2 = 0.38;
-
-// Wind: drift aligned with the dune wind (terrain WIND_ANGLE = 0.7) so the weather
-// and the sand agree on a prevailing direction. Speeds in world units/sec; the
-// underlay drifts slower for parallax.
+// Wind angle: the prevailing drift direction, aligned with the dune wind (terrain
+// WIND_ANGLE = 0.7) so the weather and the sand agree on a direction.
 const WIND_ANGLE = 0.7;
-const WIND1 = 25;
-const WIND2 = 7;
 
 // The prevailing wind as a unit vector, exported so the sky's cloud decks drift along the
 // EXACT same world axis as the ground shadows (one shared source of truth: they cannot
-// disagree on direction). The ground field's own drift (_cv below) is this same vector
-// scaled by speed; the sky multiplies it by its per-deck speeds.
+// disagree on direction). The ground field's own per-layer drift (see _groundLayers below)
+// is this same vector scaled by speed; the sky multiplies it by its per-deck speeds.
 export const WIND_DIR: [number, number] = [Math.cos(WIND_ANGLE), Math.sin(WIND_ANGLE)];
-
-// Coverage shaping on the sampled mask (a weighted sum of two [0,1] layers, so
-// centred near 0.5): smoothstep(LO, HI) is the day fraction; below LO is full night.
-// The LO..HI band is the terminator: widen it and night and day blend over a longer
-// gradient, tighten it for a starker divide.
-// exported so the sky dome can read the field through the EXACT same day/night band
-// the ground uses, locking the dome's day fraction to the lit patches below.
-export const COVER_LO = 0.50;
-export const COVER_HI = 1.0;
 
 // The night/day multipliers, LINEAR (gl_FragColor is linear before the colorspace
 // encode), so authored directly rather than through sRGB. This is no longer a cloud
@@ -70,20 +46,6 @@ export const COVER_HI = 1.0;
 // between the warm light and the cold dark is the surreal Kuindzhi contrast. Eyeball knobs.
 const NIGHT: [number, number, number] = [0.011, 0.016, 0.032];
 const DAY: [number, number, number] = [1.25, 1.08, 0.82];
-
-// Props (heads, stones) carry a fixed sandstone albedo everywhere, but the GROUND
-// ramps its OWN albedo from pale at the present to a dark grey in the deep past
-// (terrain.groundColor: pale->sand at half-radius, sand->grey at the rim). With the
-// props held flat, a drifting DAY patch out in the deep past lifts a bright sandstone
-// monument far above the grey ground around it, so it reads as a glowing aura that
-// pulses on the cloud's cycle while the ground stays dark. Ramping the prop's
-// brightness toward the same deep-past floor by radius removes the differential: a far
-// monument darkens with the sand it stands in and only pulses as much as the ground.
-// ERA_R mirrors terrain.ERA_GRADIENT_R (= world.json R_MAX); the ramp starts at the
-// half-radius (where the ground's own ramp turns sand->grey, so inner props, already
-// sand-coloured, are untouched). ERA_FLOOR is grey/sand lightness (~0.55). Eyeball knobs.
-const ERA_R = 7100;
-const ERA_FLOOR = 0.55;
 
 // Ground mip from camera DISTANCE, not the GPU's screen-derivative mip. The
 // derivative-driven mip is unstable where the field's uv screen footprint jumps: a
@@ -100,7 +62,6 @@ const LOD_REF = 600;
 const LOD_MAX = 3;
 
 export interface CloudUniforms {
-  uClouds: { value: THREE.Texture };
   // the diffuse fbm day/night field: drives the ground / books / props day-night.
   uCrack: { value: THREE.Texture };
   uCloudTime: { value: number };
@@ -156,40 +117,6 @@ function pnoise(x: number, y: number, per: number): number {
   return nx0 + v * (nx1 - nx0); // ~[-1, 1]
 }
 
-function fbm(x: number, y: number): number {
-  let amp = 1;
-  let freq = 1;
-  let sum = 0;
-  let norm = 0;
-  for (let o = 0; o < OCT; o++) {
-    sum += amp * pnoise(x * freq, y * freq, BASE_PERIOD * freq);
-    norm += amp;
-    amp *= 0.5;
-    freq *= 2;
-  }
-  return sum / norm;
-}
-
-function makeCloudTexture(): THREE.DataTexture {
-  const data = new Uint8Array(RES * RES);
-  for (let y = 0; y < RES; y++) {
-    for (let x = 0; x < RES; x++) {
-      // texel -> lattice coord spanning exactly BASE_PERIOD, so the tile wraps.
-      const n = fbm((x / RES) * BASE_PERIOD, (y / RES) * BASE_PERIOD);
-      const v = n * 0.5 + 0.5; // [-1,1] -> [0,1]
-      data[y * RES + x] = Math.max(0, Math.min(255, Math.round(v * 255)));
-    }
-  }
-  const tex = new THREE.DataTexture(data, RES, RES, THREE.RedFormat);
-  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
-  tex.minFilter = THREE.LinearMipmapLinearFilter;
-  tex.magFilter = THREE.LinearFilter;
-  tex.generateMipmaps = true;
-  tex.colorSpace = THREE.NoColorSpace; // a data mask, not colour; sample raw
-  tex.needsUpdate = true;
-  return tex;
-}
-
 // --- ground day/night field --------------------------------------------------
 // Drives the ground / books / props day-night (the sky no longer reads it). The field has
 // been a Voronoi crack web, then soft rounded holes; now diffuse fbm OCTAVES. The lit
@@ -216,7 +143,7 @@ const GROUND_LAYERS: [number, number, number][] = [
   [0.3, 2.2, 0.15], // fine: small satellite islands, fastest
 ];
 
-// Domain warp applied to the field lookup (crackUV). fbm is already organic, but a gentle
+// Domain warp applied to the field lookup (crackWarp). fbm is already organic, but a gentle
 // warp breaks the tile's grid alignment and gives the swaths turbulent, wind-sheared
 // edges. WARP_SCALE is world xz -> warp-fbm coords (smaller = longer, smoother warp);
 // WARP_AMT the nudge in world units.
@@ -282,12 +209,7 @@ function makeCrackTexture(): THREE.DataTexture {
 export { makeCrackTexture };
 
 // --- shader injection --------------------------------------------------------
-// Wind as uv-space velocity per layer (direction * speed / scale), baked as GLSL
-// literals so the shadow needs only the two shared uniforms (texture + time).
 const _dir = WIND_DIR;
-const _v1 = [(_dir[0] * WIND1) / SCALE1, (_dir[1] * WIND1) / SCALE1];
-const _v2 = [(_dir[0] * WIND2) / SCALE2, (_dir[1] * WIND2) / SCALE2];
-const _cv = [(_dir[0] * CRACK_WIND) / CRACK_SCALE, (_dir[1] * CRACK_WIND) / CRACK_SCALE];
 
 // Per ground layer: the uv scale (1 / world-units-per-tile), the drift velocity in uv/sec
 // (world wind * speed mul, converted to uv by the layer's own scale), the blend weight,
@@ -305,10 +227,10 @@ const _groundLayers = GROUND_LAYERS.map(([sm, vm, w]) => {
   };
 });
 
-// Shared crack-field reader: declares the crack sampler + clock, a small value-noise fbm
-// for the domain warp (uniquely named so it never clashes with a host shader's own
-// noise), and crackUV() which warps in world space then scales + drifts into the tile.
-// Spliced into BOTH the sky day layer and the grounded materials, so they sample one web.
+// Shared field-reader helpers: declares the field sampler + clock, a small value-noise fbm
+// for the domain warp (uniquely named so it never clashes with a host shader's own noise),
+// and crackWarp() which warps world xz before the per-layer scale + drift is applied.
+// Spliced into the grounded materials' fragment <common>.
 const _crackHelpers = /* glsl */ `
   uniform sampler2D uCrack;
   uniform float uCloudTime;
@@ -324,9 +246,6 @@ const _crackHelpers = /* glsl */ `
   vec2 crackWarp(vec2 wxz){
     vec2 w = vec2(_cwFbm(wxz * ${WARP_SCALE.toFixed(5)} + 11.3), _cwFbm(wxz * ${WARP_SCALE.toFixed(5)} + 41.7)) - 0.5;
     return wxz + w * ${WARP_AMT.toFixed(1)};
-  }
-  vec2 crackUV(vec2 wxz){
-    return crackWarp(wxz) * ${(1 / CRACK_SCALE).toFixed(7)} + vec2(${_cv[0].toFixed(7)}, ${_cv[1].toFixed(7)}) * uCloudTime;
   }
 `;
 const NIGHT_GLSL = `vec3(${NIGHT[0].toFixed(3)}, ${NIGHT[1].toFixed(3)}, ${NIGHT[2].toFixed(3)})`;
@@ -360,40 +279,6 @@ export const CLOUD_FRAG_COMMON = /* glsl */ `
   }
 `;
 
-// The sky-side reader of the SAME drifting field. Declares the shared uniforms and
-// skyCover(worldXZ), the raw weighted coverage [0,1] (NOT run through the ground's
-// day/night smoothstep, so the sky can pick its own, much narrower open threshold).
-// Splice into the sky dome's fragment <common>; the dome passes shared uClouds and
-// uCloudTime so its breaks drift in lockstep with the ground's lit patches. It uses
-// auto-mip texture2D rather than the explicit-LOD fetch the ground needs: the dome is
-// a smooth surface with no grazing-angle uv blow-up to dodge, and toward the horizon
-// the pierce point races outward, where auto-mip coarsening is exactly what keeps the
-// far breaks from aliasing. The uv math reuses the same JS-computed scale and wind
-// literals as cloudShadow, so the two fields cannot drift apart numerically.
-export const SKY_CLOUD_COMMON = /* glsl */ `
-  uniform sampler2D uClouds;
-  uniform float uCloudTime;
-  float skyCover(vec2 wxz) {
-    vec2 uv1 = wxz * ${(1 / SCALE1).toFixed(7)} + vec2(${_v1[0].toFixed(7)}, ${_v1[1].toFixed(7)}) * uCloudTime;
-    vec2 uv2 = wxz * ${(1 / SCALE2).toFixed(7)} + vec2(${_v2[0].toFixed(7)}, ${_v2[1].toFixed(7)}) * uCloudTime;
-    return texture2D(uClouds, uv1).r * ${WEIGHT1.toFixed(2)} + texture2D(uClouds, uv2).r * ${WEIGHT2.toFixed(2)};
-  }
-`;
-
-// The sky-side reader of the CRACK field: the SAME warped web the ground reads (via the
-// shared _crackHelpers / crackUV), so a sky crack and the daylight seam on the ground
-// below share one shape and drift. crackField(worldXZ) is the raw seam intensity [0,1]
-// (high on a crack), shaped into an opening by the sky's own threshold. Uses auto-mip
-// texture2D (not the ground's explicit-LOD fetch): the day plane is smooth and toward the
-// horizon the auto-mip coarsening is exactly what the fwidth AA wants. Splice into the
-// day layer's fragment <common>.
-export const SKY_CRACK_COMMON = /* glsl */ `
-  ${_crackHelpers}
-  float crackField(vec2 wxz) {
-    return texture2D(uCrack, crackUV(wxz)).r;
-  }
-`;
-
 // The apply block: blend the night/day multiplier by the mask at the given world xz,
 // faded toward the NIGHT floor by fadeExpr as the surface recedes into the distance
 // dissolve, so the far field sinks into darkness to meet the near-black storm dome at
@@ -417,67 +302,7 @@ export function cloudApplyGLSL(
     }`;
 }
 
-// Darken a prop toward the deep-past floor by its radius, mirroring the ground's
-// own pale->sand->grey era ramp (see the ERA_* note). Ramps in only over the outer
-// half-radius, where the ground turns sand->grey; inner props (already sand-coloured)
-// keep full brightness. Splice before the cloud apply so the day/night tint multiplies
-// the era-correct base, exactly as it does on the ground (which ramps its albedo first).
-export function eraDarkenGLSL(xzExpr: string): string {
-  return /* glsl */ `
-    {
-      float _eraT = clamp((length(${xzExpr}) / ${ERA_R.toFixed(1)} - 0.5) * 2.0, 0.0, 1.0);
-      gl_FragColor.rgb *= mix(1.0, ${ERA_FLOOR.toFixed(2)}, _eraT);
-    }`;
-}
-
-// Patch a plain material (no other world-xz varying) to take cloud shadow: the
-// opaque props, heads (instanced) and teleporter stones (model). Chains onto any
-// existing onBeforeCompile. Books and the ground inject inline instead, reusing the
-// world-xz varying their glow/relief patches already carry. instanced books/heads
-// fold instanceMatrix into the world position; stones use modelMatrix alone. The
-// two forms share onBeforeCompile's source text, so they need distinct cache keys
-// or three would hand both whichever program compiled first (same defence the book
-// and ground materials use).
-export function applyCloudShadow(
-  mat: THREE.Material,
-  cloud: CloudUniforms,
-  instanced: boolean,
-): void {
-  const worldXZ = instanced
-    ? "(modelMatrix * instanceMatrix * vec4(transformed, 1.0)).xz"
-    : "(modelMatrix * vec4(transformed, 1.0)).xz";
-  mat.customProgramCacheKey = () => (instanced ? "cloud:inst" : "cloud:model");
-  const prev = mat.onBeforeCompile;
-  mat.onBeforeCompile = (shader, renderer) => {
-    if (prev) prev.call(mat, shader, renderer);
-    shader.uniforms.uCrack = cloud.uCrack;
-    shader.uniforms.uCloudTime = cloud.uCloudTime;
-    shader.uniforms.uCloudMix = cloud.uCloudMix;
-    shader.vertexShader = shader.vertexShader
-      .replace(
-        "#include <common>",
-        "#include <common>\nvarying vec2 vCloudXZ;\nvarying float vCloudDist;",
-      )
-      .replace(
-        "#include <project_vertex>",
-        `#include <project_vertex>\nvCloudXZ = ${worldXZ};\nvCloudDist = length(mvPosition.xyz);`,
-      );
-    shader.fragmentShader = shader.fragmentShader
-      .replace(
-        "#include <common>",
-        "#include <common>\nvarying vec2 vCloudXZ;\nvarying float vCloudDist;\n" +
-          CLOUD_FRAG_COMMON,
-      )
-      .replace(
-        "#include <opaque_fragment>",
-        "#include <opaque_fragment>\n" +
-          eraDarkenGLSL("vCloudXZ") +
-          cloudApplyGLSL("vCloudXZ", "0.0", "vCloudDist"),
-      );
-  };
-}
-
-// Build the cloud system: bake the tiling mask, hand back the shared uniforms and a
+// Build the cloud system: bake the field texture, hand back the shared uniforms and a
 // per-frame time advance. uCloudTime wraps at a large value so float precision in
 // the scroll never degrades across a long session.
 export function buildClouds(): {
@@ -485,7 +310,6 @@ export function buildClouds(): {
   update: (dt: number) => void;
 } {
   const uniforms: CloudUniforms = {
-    uClouds: { value: makeCloudTexture() },
     uCrack: { value: makeCrackTexture() },
     uCloudTime: { value: 0 },
     uCloudMix: { value: 1 },
