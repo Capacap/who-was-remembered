@@ -44,6 +44,12 @@ const WIND_ANGLE = 0.7;
 const WIND1 = 25;
 const WIND2 = 7;
 
+// The prevailing wind as a unit vector, exported so the sky's cloud decks drift along the
+// EXACT same world axis as the ground shadows (one shared source of truth: they cannot
+// disagree on direction). The ground field's own drift (_cv below) is this same vector
+// scaled by speed; the sky multiplies it by its per-deck speeds.
+export const WIND_DIR: [number, number] = [Math.cos(WIND_ANGLE), Math.sin(WIND_ANGLE)];
+
 // Coverage shaping on the sampled mask (a weighted sum of two [0,1] layers, so
 // centred near 0.5): smoothstep(LO, HI) is the day fraction; below LO is full night.
 // The LO..HI band is the terminator: widen it and night and day blend over a longer
@@ -56,11 +62,13 @@ export const COVER_HI = 1.0;
 // The night/day multipliers, LINEAR (gl_FragColor is linear before the colorspace
 // encode), so authored directly rather than through sRGB. This is no longer a cloud
 // filtering sunlight; it is night and day themselves drifting across the world and
-// blending where they meet. NIGHT crushes the surface to a near-black cold blue; DAY
-// lifts it past neutral into a bright warm cast (channels >1 intentionally clip hot
-// in the working space). The wide gap between them is the surreal contrast. Eyeball
-// knobs.
-const NIGHT: [number, number, number] = [0.005, 0.007, 0.016];
+// blending where they meet. NIGHT is a deep COLD tone, not pure black: the storm's shadow
+// keeps a blue-green dark (the thin overcast still casts a little ambient), so the
+// light-to-dark falloff reads as a continuous gradient instead of dropping into a void.
+// DAY lifts past neutral into a warm cast; with the gamma response veiling the peaks it now
+// rarely clips, so the lit ground glows golden rather than blowing to white. The gap
+// between the warm light and the cold dark is the surreal Kuindzhi contrast. Eyeball knobs.
+const NIGHT: [number, number, number] = [0.011, 0.016, 0.032];
 const DAY: [number, number, number] = [1.25, 1.08, 0.82];
 
 // Props (heads, stones) carry a fixed sandstone albedo everywhere, but the GROUND
@@ -93,7 +101,7 @@ const LOD_MAX = 3;
 
 export interface CloudUniforms {
   uClouds: { value: THREE.Texture };
-  // the Voronoi crack web (shared): drives the sky openings AND the ground day/night.
+  // the diffuse fbm day/night field: drives the ground / books / props day-night.
   uCrack: { value: THREE.Texture };
   uCloudTime: { value: number };
   // DIAGNOSTIC kill switch: 1 = full night/day tint, 0 = neutral (effect off).
@@ -182,89 +190,83 @@ function makeCloudTexture(): THREE.DataTexture {
   return tex;
 }
 
-// --- hole field --------------------------------------------------------------
-// The shared field that drives the sky openings AND the ground day/night. Once a Voronoi
-// crack web; now soft rounded HOLES, closer to the original cloud idea but with shape
-// instead of pure noise. One jittered point per cell (with ~half dropped, so the holes
-// scatter), and the field is the union of a soft disc around each kept point: 1 at the
-// point, smootherstep down to 0 at the disc rim. The sky opens and the ground lights
-// where the field is high, so daylight now pours through round windows, not cracks. The
-// domain warp (crackUV, shared) bends the discs so they read as irregular rounded blobs,
-// not stamped circles, and overlapping discs merge into larger lobed openings.
-const CRACK_CELLS = 3; // cells across the tile (low = fewer, larger holes)
-const HOLE_R = 0.2; // base hole radius in cell units; disc reaches 0 here (soft all the way)
-const HOLE_R_VAR = 0.1; // per-hole radius spread (hash-driven, so the holes vary in size)
-const CRACK_KEEP = 0.9; // fraction of cells that keep a hole; the rest are solid night sky
-const CRACK_SCALE = 4800; // world units per tile (large = big holes, less repeat)
-const CRACK_WIND = 25; // hole drift speed, world units/sec (its own slow creep)
+// --- ground day/night field --------------------------------------------------
+// Drives the ground / books / props day-night (the sky no longer reads it). The field has
+// been a Voronoi crack web, then soft rounded holes; now diffuse fbm OCTAVES. The lit
+// ground reads as broad soft swaths of daylight under the dark storm (Kuindzhi's lit
+// meadow), not stamped circular pools, and it shares the same noise CHARACTER as the sky's
+// fbm cloud decks overhead. The dome can't register positionally to a world-XZ field, but
+// the shared octave texture + the shared uCloudTime drift make the storm above and the lit
+// breaks below read as one weather system.
+const FIELD_PERIOD = 4; // base-octave cycles across the tile (low = large soft swaths)
+const FIELD_OCT = 4; // octaves layered onto the base swaths (matches the sky fbm's depth)
+const CRACK_SCALE = 3200; // world units per tile for the base layer (smaller = smaller islands)
+const CRACK_WIND = 22; // base field drift speed, world units/sec (its own slow creep)
 
-// Domain warp applied to the crack lookup, SHARED by the sky and the ground so both read
-// the identical wandering web at the same world XZ (the daylight that pours through a sky
-// crack lands on the matching ground seam). WARP_SCALE is world xz -> warp-fbm coords
-// (smaller = longer, smoother warp); WARP_AMT is the nudge in world units.
+// Ground islands are a SUM of several samples of the one field texture at different scales
+// and drift speeds, mirroring the sky's stacked cloud decks: a dominant base layer carries
+// the read while finer, faster layers fragment its big islands into smaller, more numerous
+// ones and make the whole field evolve (islands morph and split) rather than rigidly slide.
+// Each row: [scale x CRACK_SCALE (smaller = finer islands), speed x CRACK_WIND, weight].
+// Weights sum to 1 so the summed field stays centred ~0.5 for the day band below. The finer
+// layers get an automatic extra mip (their smaller features would otherwise alias far off).
+const GROUND_LAYERS: [number, number, number][] = [
+  [1.0, 1.0, 0.55], // base: the large islands, slow
+  [0.52, 1.5, 0.3], // mid: fragments the base, half the size, faster
+  [0.3, 2.2, 0.15], // fine: small satellite islands, fastest
+];
+
+// Domain warp applied to the field lookup (crackUV). fbm is already organic, but a gentle
+// warp breaks the tile's grid alignment and gives the swaths turbulent, wind-sheared
+// edges. WARP_SCALE is world xz -> warp-fbm coords (smaller = longer, smoother warp);
+// WARP_AMT the nudge in world units.
 const WARP_SCALE = 0.0015;
-const WARP_AMT = 500;
+const WARP_AMT = 400;
 
-// The ground's open band on the hole field: lit (day) inside a hole, night outside it.
-// Lower/wider than the sky's threshold so a hole casts a broad pool of daylight with a
-// long soft skirt: the low end stretches the lit pool far out toward the rim of the disc
-// (the "light scatters further" read), the high end is where it reaches full day at the core.
-const GROUND_OPEN_LO = 0.1;
-const GROUND_OPEN_HI = 0.9;
-// Extra mip bias on the ground's hole sample, on top of the distance LOD. Held at 0 now:
-// the disc falloff already gives a soft-edged pool, and any bias here just blurs the
-// distant holes back toward their dark mean (the thing that was hiding them). Raise it
-// only if the near pools want softer edges. The sky keeps its own crisp auto-mip read.
+// The ground's day response on the summed field [0,1] (centred ~0.5). NOT a smoothstep
+// band: that snapped from black to full day over a short range and flattened at both ends,
+// giving hard-edged bright blobs on a flat-black plateau. Instead a WIDE linear ramp from
+// LO (night) to HI (full day) shaped by GAMMA, so the light eases out of the dark over a
+// long gradient (Kuindzhi's light-to-dark falloff) instead of a defined edge. GAMMA > 1
+// feathers the low end (light creeps in slowly) and holds the midtones dim, so the world
+// stays mostly dark; because the summed field rarely reaches HI, the brightest islands land
+// BELOW full day and read as light filtered through thin cloud, not a clean opening. Eyeball
+// knobs: lower LO/HI to light more, widen the gap or raise GAMMA for a softer, more diffuse
+// falloff.
+const GROUND_OPEN_LO = 0.5;
+const GROUND_OPEN_HI = 0.76;
+const GROUND_GAMMA = 2.1;
+// Extra mip bias on the ground sample, on top of the distance LOD: softens the swath edges
+// a touch and lets the field settle toward its mid (dusk) mean far off rather than
+// flickering. fbm has energy everywhere, so unlike the sparse holes it never averages to a
+// dark void with distance; the far ground just eases to an even half-lit dusk.
 const GROUND_LOD_BIAS = 1.0;
 
-// per-cell hash, periodic over `per` so the tile wraps seamlessly. Returns the jittered
-// point (a, b) in [0,1)^2, a `keep` roll used to drop ~half the points, and an `r` roll
-// that varies each kept hole's radius.
-function cellPoint(
-  ix: number,
-  iy: number,
-  per: number,
-): { a: number; b: number; keep: number; r: number } {
-  const wx = ((ix % per) + per) % per;
-  const wy = ((iy % per) + per) % per;
-  let h = (Math.imul(wx, 374761393) + Math.imul(wy, 668265263)) | 0;
-  h = Math.imul(h ^ (h >>> 13), 1274126177) >>> 0;
-  const a = (h % 4096) / 4096;
-  const h2 = Math.imul(h ^ (h >>> 15), 1597334677) >>> 0;
-  const b = (h2 % 4096) / 4096;
-  const h3 = Math.imul(h2 ^ (h2 >>> 13), 951274213) >>> 0;
-  const h4 = Math.imul(h3 ^ (h3 >>> 16), 2246822519) >>> 0;
-  return { a, b, keep: (h3 % 4096) / 4096, r: (h4 % 4096) / 4096 };
+// Periodic fbm for the ground field, wrapping over FIELD_PERIOD so the baked tile is
+// seamless. Reuses the periodic Perlin lattice (pnoise/pgrad) the cloud mask uses, so the
+// ground field and the original mask share one noise basis. Returns ~[-1, 1].
+function fieldFbm(x: number, y: number): number {
+  let amp = 1;
+  let freq = 1;
+  let sum = 0;
+  let norm = 0;
+  for (let o = 0; o < FIELD_OCT; o++) {
+    sum += amp * pnoise(x * freq, y * freq, FIELD_PERIOD * freq);
+    norm += amp;
+    amp *= 0.5;
+    freq *= 2;
+  }
+  return sum / norm;
 }
 
 function makeCrackTexture(): THREE.DataTexture {
   const data = new Uint8Array(RES * RES);
-  const P = CRACK_CELLS;
   for (let y = 0; y < RES; y++) {
     for (let x = 0; x < RES; x++) {
-      const gx = (x / RES) * P;
-      const gy = (y / RES) * P;
-      const cx = Math.floor(gx);
-      const cy = Math.floor(gy);
-      let v = 0; // strongest hole membership at this texel (union of soft discs)
-      // 5x5 search: a hole's disc can reach in from a couple of cells away once dropped
-      // points push its nearest kept neighbour out.
-      for (let j = -2; j <= 2; j++) {
-        for (let i = -2; i <= 2; i++) {
-          const p = cellPoint(cx + i, cy + j, P);
-          if (p.keep > CRACK_KEEP) continue; // dropped: no hole, this stays solid night
-          const dx = cx + i + p.a - gx;
-          const dy = cy + j + p.b - gy;
-          const d = Math.sqrt(dx * dx + dy * dy);
-          const radius = HOLE_R + (p.r - 0.5) * 2 * HOLE_R_VAR;
-          const t = Math.min(1, d / radius);
-          // smootherstep falloff: 1 at the point, 0 at the rim, soft all the way. Take the
-          // max across discs so overlapping holes union into larger lobed openings.
-          const hole = 1 - t * t * t * (t * (t * 6 - 15) + 10);
-          if (hole > v) v = hole;
-        }
-      }
-      data[y * RES + x] = Math.round(Math.max(0, Math.min(1, v)) * 255);
+      // texel -> lattice coord spanning exactly FIELD_PERIOD, so the tile wraps.
+      const n = fieldFbm((x / RES) * FIELD_PERIOD, (y / RES) * FIELD_PERIOD);
+      const v = n * 0.5 + 0.5; // [-1,1] -> [0,1]
+      data[y * RES + x] = Math.max(0, Math.min(255, Math.round(v * 255)));
     }
   }
   const tex = new THREE.DataTexture(data, RES, RES, THREE.RedFormat);
@@ -282,10 +284,26 @@ export { makeCrackTexture };
 // --- shader injection --------------------------------------------------------
 // Wind as uv-space velocity per layer (direction * speed / scale), baked as GLSL
 // literals so the shadow needs only the two shared uniforms (texture + time).
-const _dir = [Math.cos(WIND_ANGLE), Math.sin(WIND_ANGLE)];
+const _dir = WIND_DIR;
 const _v1 = [(_dir[0] * WIND1) / SCALE1, (_dir[1] * WIND1) / SCALE1];
 const _v2 = [(_dir[0] * WIND2) / SCALE2, (_dir[1] * WIND2) / SCALE2];
 const _cv = [(_dir[0] * CRACK_WIND) / CRACK_SCALE, (_dir[1] * CRACK_WIND) / CRACK_SCALE];
+
+// Per ground layer: the uv scale (1 / world-units-per-tile), the drift velocity in uv/sec
+// (world wind * speed mul, converted to uv by the layer's own scale), the blend weight,
+// and a mip bias so a finer layer is sampled one-plus mips coarser (it would otherwise
+// alias at distance). Baked to GLSL literals in cloudShadow so the sum needs no per-frame
+// work beyond the texture taps.
+const _groundLayers = GROUND_LAYERS.map(([sm, vm, w]) => {
+  const inv = 1 / (CRACK_SCALE * sm);
+  return {
+    inv,
+    dx: _dir[0] * CRACK_WIND * vm * inv,
+    dy: _dir[1] * CRACK_WIND * vm * inv,
+    w,
+    lodAdj: -Math.log2(sm),
+  };
+});
 
 // Shared crack-field reader: declares the crack sampler + clock, a small value-noise fbm
 // for the domain warp (uniquely named so it never clashes with a host shader's own
@@ -301,10 +319,14 @@ const _crackHelpers = /* glsl */ `
     return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
   }
   float _cwFbm(vec2 p){ float v = 0.0, a = 0.5; for (int i = 0; i < 4; i++){ v += a * _cwN(p); p *= 2.03; a *= 0.5; } return v; }
-  vec2 crackUV(vec2 wxz){
+  // warp world xz once (shared by every ground layer, so they all bend together); the
+  // per-layer scale + drift are applied after this.
+  vec2 crackWarp(vec2 wxz){
     vec2 w = vec2(_cwFbm(wxz * ${WARP_SCALE.toFixed(5)} + 11.3), _cwFbm(wxz * ${WARP_SCALE.toFixed(5)} + 41.7)) - 0.5;
-    vec2 wx = wxz + w * ${WARP_AMT.toFixed(1)};
-    return wx * ${(1 / CRACK_SCALE).toFixed(7)} + vec2(${_cv[0].toFixed(7)}, ${_cv[1].toFixed(7)}) * uCloudTime;
+    return wxz + w * ${WARP_AMT.toFixed(1)};
+  }
+  vec2 crackUV(vec2 wxz){
+    return crackWarp(wxz) * ${(1 / CRACK_SCALE).toFixed(7)} + vec2(${_cv[0].toFixed(7)}, ${_cv[1].toFixed(7)}) * uCloudTime;
   }
 `;
 const NIGHT_GLSL = `vec3(${NIGHT[0].toFixed(3)}, ${NIGHT[1].toFixed(3)}, ${NIGHT[2].toFixed(3)})`;
@@ -314,19 +336,27 @@ export const DAY_GLSL = `vec3(${DAY[0].toFixed(3)}, ${DAY[1].toFixed(3)}, ${DAY[
 
 // Uniform declarations + the cloudShadow() sampler. Splice into a fragment shader's
 // <common>. cloudShadow(worldXZ, camDist) returns 1 in full day, 0 in full night. The
-// day/night driver is now the CRACK web (the same one the sky opens through), so the
-// grounded world is mostly night with thin daylight seams drifting across it, matching
-// the sky overhead. The mip is taken explicitly from camDist (see the LOD_REF note) via
-// texture2DLodEXT (three's WebGL2-safe alias for textureLod) so the thin seams never flip
-// on a seam or a face and never alias at grazing distance; far off they mip to their dark
-// average and the ground sinks to night to meet the storm dome.
+// day/night driver is the diffuse fbm field, so the grounded world reads as broad soft
+// swaths of daylight drifting under the dark storm, echoing the fbm clouds overhead. The
+// mip is taken explicitly from camDist (see the LOD_REF note) via texture2DLodEXT (three's
+// WebGL2-safe alias for textureLod) so the swaths never flip on a face and never alias at
+// grazing distance; far off the field eases to its mid mean and the ground settles to an
+// even dusk against the storm dome.
 export const CLOUD_FRAG_COMMON = /* glsl */ `
   ${_crackHelpers}
   uniform float uCloudMix;
   float cloudShadow(vec2 wxz, float camDist) {
-    float lod = clamp(log2(max(camDist, 1.0) / ${LOD_REF.toFixed(1)}) + ${GROUND_LOD_BIAS.toFixed(1)}, 0.0, ${LOD_MAX.toFixed(1)});
-    float c = texture2DLodEXT(uCrack, crackUV(wxz), lod).r;
-    return smoothstep(${GROUND_OPEN_LO.toFixed(2)}, ${GROUND_OPEN_HI.toFixed(2)}, c);
+    float baseLod = clamp(log2(max(camDist, 1.0) / ${LOD_REF.toFixed(1)}) + ${GROUND_LOD_BIAS.toFixed(2)}, 0.0, ${LOD_MAX.toFixed(1)});
+    vec2 ww = crackWarp(wxz);
+    float c = 0.0;
+    ${_groundLayers
+      .map(
+        (L) =>
+          `c += texture2DLodEXT(uCrack, ww * ${L.inv.toFixed(8)} + vec2(${L.dx.toFixed(8)}, ${L.dy.toFixed(8)}) * uCloudTime, clamp(baseLod + ${L.lodAdj.toFixed(3)}, 0.0, ${LOD_MAX.toFixed(1)})).r * ${L.w.toFixed(3)};`,
+      )
+      .join("\n    ")}
+    float t = clamp((c - ${GROUND_OPEN_LO.toFixed(2)}) / ${(GROUND_OPEN_HI - GROUND_OPEN_LO).toFixed(2)}, 0.0, 1.0);
+    return pow(t, ${GROUND_GAMMA.toFixed(2)});
   }
 `;
 

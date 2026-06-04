@@ -1,16 +1,19 @@
 import * as THREE from "three";
-import { CloudUniforms } from "./clouds";
+import { CloudUniforms, WIND_DIR } from "./clouds";
 
 // --- sky --------------------------------------------------------------------
-// Being rebuilt as a brooding overcast after Kuindzhi: a dark cloud ceiling where the
-// only bright thing in the world is the selective light on the ground below. Split in
-// two so each part stays simple:
+// A brooding overcast after Kuindzhi: a dark cloud ceiling where the only bright thing in
+// the world is the selective light on the ground below. It is ONE dome carrying two
+// things, kept conceptually separate:
 //
-//   1. DOME        - a stable inward sphere recentred on the camera: the storm GRADIENT
-//      (a muted glow toward the zenith easing to a dark horizon) plus a cube-face
-//      starfield. It is the infinite backdrop and does not move as you walk.
-//   2. CLOUD LAYER - (still to come) a finite sheet carrying the dark drifting cloud
-//      masses on top of the dome's gradient.
+//   1. GRADIENT    - a muted glow toward the zenith easing to a dark horizon. The infinite
+//      backdrop; it does not move as you walk.
+//   2. CLOUD DECKS - dark drifting masses composited over the gradient. These are NOT a
+//      separate finite quad: each deck is a flat-overhead-sheet projection of the view
+//      direction (dir.xz / dir.y, the ray-through-a-horizontal-plane), so the dome already
+//      behaves like an infinite cloud sheet hung above the player, with none of a finite
+//      quad's edge to hide. The decks drift along the SHARED ground wind (WIND_DIR), so the
+//      clouds overhead and the lit swaths below move the same world direction.
 //
 // The dome carries TIME radially: into the past it dims, so the deep past is a darker,
 // emptier sky.
@@ -39,12 +42,15 @@ const CLOUD_DARK = new THREE.Color(0x0a0a0e); // near-black brooding masses
 const CLOUD_LO = 0.35; // fbm below this is a clear break (shared by all decks)
 const CLOUD_HI = 0.78; // fbm above this is a full mass
 
-// Each deck: [projection scale (smaller = larger masses), driftX, driftY, height floor,
-// height ceil, darkening amount]. Listed far (large, slow, low) to near (fine, fast, high);
-// composited in that order so the near deck sits on top.
-const CLOUD_LAYERS: [number, number, number, number, number, number][] = [
-  [1.2, 0.005, -0.003, 0.13, 0.42, 0.9], // far: broad, slow, hugs lower
-  [2.3, 0.012, -0.009, 0.2, 0.55, 0.78], // near: finer, faster, sits higher
+// Each deck: [projection scale (smaller = larger masses), drift SPEED along the shared
+// wind, height floor, height ceil, darkening amount]. The drift vector is WIND_DIR * speed,
+// computed in the GLSL splice below, so every deck moves along the same world axis as the
+// ground shadows, only at its own speed. Listed far (large, slow, low) to near (fine, fast,
+// high) and composited in that order so the near deck sits on top.
+const CLOUD_LAYERS: [number, number, number, number, number][] = [
+  [1.0, 0.004, 0.1, 0.4, 0.85], // far: broadest, slowest, hugs the horizon band
+  [1.7, 0.008, 0.16, 0.5, 0.8], // mid
+  [2.6, 0.014, 0.24, 0.6, 0.72], // near: finest, fastest, sits highest
 ];
 
 // Large enough that the farthest content stays inside it, and inside the far plane.
@@ -126,10 +132,11 @@ export function buildSky(cloud: CloudUniforms, _sunPos: THREE.Vector3): Sky {
 
         // dark drifting storm decks, composited far to near; each recedes toward the horizon
         // and fades out near it. The gradient glow shows through the breaks.
-        ${CLOUD_LAYERS.map(
-          ([sc, dx, dy, fl, cl, amt]) =>
-            `col = mix(col, uCloudDark, cloudDeck(vDir, ${sc.toFixed(2)}, vec2(${dx.toFixed(4)}, ${dy.toFixed(4)}), ${fl.toFixed(2)}, ${cl.toFixed(2)}) * ${amt.toFixed(2)});`,
-        ).join("\n        ")}
+        ${CLOUD_LAYERS.map(([sc, sp, fl, cl, amt]) => {
+          const dx = WIND_DIR[0] * sp;
+          const dy = WIND_DIR[1] * sp;
+          return `col = mix(col, uCloudDark, cloudDeck(vDir, ${sc.toFixed(2)}, vec2(${dx.toFixed(5)}, ${dy.toFixed(5)}), ${fl.toFixed(2)}, ${cl.toFixed(2)}) * ${amt.toFixed(2)});`;
+        }).join("\n        ")}
 
         col = mix(col, col * (1.0 - ${DEPTH_DARKEN.toFixed(2)}), uDepth);
 
