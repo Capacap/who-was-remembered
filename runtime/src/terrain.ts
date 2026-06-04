@@ -565,7 +565,7 @@ function applyGroundMaterial(
   mat.onBeforeCompile = (shader) => {
     shader.uniforms.uPlayer = uPlayer;
     shader.uniforms.uSkate = uSkate;
-    shader.uniforms.uClouds = cloud.uClouds;
+    shader.uniforms.uCrack = cloud.uCrack;
     shader.uniforms.uCloudTime = cloud.uCloudTime;
     shader.uniforms.uCloudMix = cloud.uCloudMix;
     if (tpPos.length) shader.uniforms.uTpPos = { value: tpPos };
@@ -606,6 +606,27 @@ function applyGroundMaterial(
       "#include <opaque_fragment>",
       `#include <opaque_fragment>
        {
+         // crest/trough colour and the vortex eye, all keyed to baked masks. These sit
+         // BEFORE the day/night multiply, so they are part of the lit sand and the crack
+         // field modulates them: dark dunes inside a night shard, coloured relief and a
+         // glowing centre only where a daylight seam crosses. (Added after the multiply they
+         // paint full-strength over the crushed night albedo and read as a garish neon
+         // smear, with no sand under them to be a subtle tint of.) They are emissive so
+         // they survive the low raking SUN that leaves the centre unlit; they do not also
+         // need to survive the night, which is the storm passing over them.
+         gl_FragColor.rgb += ${CREST_EMIS_RGB} * (${CREST_EMIS_STRENGTH.toFixed(2)} * max(vRelief, 0.0));
+         gl_FragColor.rgb += ${TROUGH_EMIS_RGB} * (${TROUGH_EMIS_STRENGTH.toFixed(2)} * max(-vRelief, 0.0));
+         // vortex eye: additive glow (colour x mask) pooled in the centre troughs.
+         gl_FragColor.rgb += vEye * ${EYE_EMISSIVE_RGB} * ${EYE_EMISSIVE_STRENGTH.toFixed(2)};
+       }` +
+        // day/night: multiply the lit sand (albedo + relief) by the crack web (night in
+        // the shards, daylight along the seams), sinking toward the night floor into the
+        // distance dissolve so the far ground darkens to meet the black storm dome.
+        cloudApplyGLSL("vCloudXZ", "vGroundFade", "vCloudDist") +
+        `{
+         // these run AFTER the multiply so they survive a night shard: the player's own
+         // light has to read for navigation through the mostly-night desert, and the
+         // vortex eye is a glow meant to read in the unlit centre.
          vec3 wn = normalize(cross(dFdx(vWorldPos), dFdy(vWorldPos)));
          if (wn.y < 0.0) wn = -wn;
          vec3 toP = vec3(uPlayer.x - vWorldPos.x, ${PLAYER_LIGHT_HEIGHT.toFixed(1)}, uPlayer.y - vWorldPos.z);
@@ -618,18 +639,7 @@ function applyGroundMaterial(
          // ground reads as glowing beneath you rather than lit by a second sun.
          float bfall = 1.0 - smoothstep(${SKATE_GLOW_INNER.toFixed(1)}, ${SKATE_GLOW_RADIUS.toFixed(1)}, pdist);
          gl_FragColor.rgb += uSkate * ${SKATE_GLOW_RGB} * (${SKATE_GLOW_STRENGTH.toFixed(2)} * bfall * (0.45 + 0.55 * rake));
-         // vortex eye: additive glow (colour x mask), lighting-independent so it
-         // reads in the barely-lit centre where an albedo tint would be crushed.
-         gl_FragColor.rgb += vEye * ${EYE_EMISSIVE_RGB} * ${EYE_EMISSIVE_STRENGTH.toFixed(2)};
-         // crest/trough colour: same emissive trick, keyed to signed relief. Crests
-         // (vRelief > 0) catch a warm rim, troughs (vRelief < 0) pool a deep red glow,
-         // so the dunes carry colour under the raking sun that crushes the albedo tint.
-         gl_FragColor.rgb += ${CREST_EMIS_RGB} * (${CREST_EMIS_STRENGTH.toFixed(2)} * max(vRelief, 0.0));
-         gl_FragColor.rgb += ${TROUGH_EMIS_RGB} * (${TROUGH_EMIS_STRENGTH.toFixed(2)} * max(-vRelief, 0.0));
        }` +
-        // drifting cloud shadow over the dunes, sinking toward the night floor into
-        // the distance dissolve so the far ground darkens to meet the black storm dome.
-        cloudApplyGLSL("vCloudXZ", "vGroundFade", "vCloudDist") +
         // teleporter floor glow last, AFTER the cloud multiply, so the powered pad
         // holds steady instead of dimming as a shadow drifts over the plaza.
         tpGlow,

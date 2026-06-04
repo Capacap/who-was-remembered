@@ -350,7 +350,7 @@ function applyProximityGlow(
     shader.uniforms.uGlowBoost = uni.uGlowBoost;
     shader.uniforms.uEmissive = uni.uEmissive;
     shader.uniforms.uEmissiveNear = uni.uEmissiveNear;
-    shader.uniforms.uClouds = cloud.uClouds;
+    shader.uniforms.uCrack = cloud.uCrack;
     shader.uniforms.uCloudTime = cloud.uCloudTime;
     shader.uniforms.uCloudMix = cloud.uCloudMix;
     shader.vertexShader = shader.vertexShader
@@ -1342,14 +1342,16 @@ async function main() {
   // beneath are lit. A warm glow stays fixed at the sun bearing; the whole dome
   // deepens with the player's radial depth into the past. It recentres on the camera
   // each frame (see the loop) so it reads as infinitely far and never shows an edge.
-  const sky = buildSky(clouds.uniforms);
+  const sky = buildSky(clouds.uniforms, SUN_POS);
   scene.add(sky.group);
 
   const camera = new THREE.PerspectiveCamera(
     70,
     window.innerWidth / window.innerHeight,
     0.1,
-    24000,
+    // far plane must clear the day sky layer's diagonal corner (sky.ts CEIL_R*sqrt2 ~ 37k)
+    // so the enlarged layer reaches near the horizon without its corners being clipped.
+    40000,
   );
 
   const renderer = new THREE.WebGLRenderer({ antialias: true });
@@ -1359,6 +1361,9 @@ async function main() {
 
   const { controls, update, stop } = createController(camera, renderer.domElement);
   scene.add(controls.object);
+  // dev hook, same convention as window.MOVE: lets the camera be posed/inspected from the
+  // devtools console (or a headless screenshot) without pointer lock or a rebuild.
+  (window as unknown as { CAM: THREE.PerspectiveCamera }).CAM = camera;
 
   // perf monitor: stats.js panel (click to cycle FPS / ms / MB) plus a text
   // readout of the numbers that actually tell us if the book LOD is working,

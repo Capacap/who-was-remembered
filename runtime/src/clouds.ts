@@ -90,6 +90,8 @@ const LOD_MAX = 6;
 
 export interface CloudUniforms {
   uClouds: { value: THREE.Texture };
+  // the Voronoi crack web (shared): drives the sky openings AND the ground day/night.
+  uCrack: { value: THREE.Texture };
   uCloudTime: { value: number };
   // DIAGNOSTIC kill switch: 1 = full night/day tint, 0 = neutral (effect off).
   // Lets a key disable the whole lighting effect at runtime to localise the flicker.
@@ -177,12 +179,130 @@ function makeCloudTexture(): THREE.DataTexture {
   return tex;
 }
 
+// --- crack field (sky only) --------------------------------------------------
+// A separate field for the SKY openings, so they stop reading as clouds: instead of
+// the soft fbm blobs the ground uses, this is a periodic Voronoi web. The metric is
+// the cell-edge distance (F2 - F1, small where two cells are equidistant), which traces
+// a network of thin seams. Baked high on the seams, near zero inside the shards, so the
+// sky's threshold picks a fracture network and daylight shows through the cracks. Kept
+// out of the ground field on purpose (see the sky-vs-ground decision): the dunes keep
+// their soft dapple until we decide to extend the cracks down to them.
+const CRACK_CELLS = 3; // Voronoi cells across the tile (low = larger shards)
+const CRACK_EDGE = 0.1; // seam half-width in cell units; small = thin hairline cracks
+//                          (still smootherstep-ramped, so the edge stays soft/diffuse)
+const CRACK_KEEP = 0.55; // fraction of cells that keep a point; the rest merge into big
+//                          irregular shards (this is what gives shattered-glass variance)
+const CRACK_SCALE = 4800; // world units per crack tile (large = big shards, less repeat)
+const CRACK_WIND = 25; // seam drift speed, world units/sec (its own slow creep)
+
+// Domain warp applied to the crack lookup, SHARED by the sky and the ground so both read
+// the identical wandering web at the same world XZ (the daylight that pours through a sky
+// crack lands on the matching ground seam). WARP_SCALE is world xz -> warp-fbm coords
+// (smaller = longer, smoother warp); WARP_AMT is the nudge in world units.
+const WARP_SCALE = 0.0015;
+const WARP_AMT = 500;
+
+// The ground's open band on the crack field: lit (day) along the seams, night in the
+// shards. Much wider/softer than the sky's hairline threshold so a seam is a broad diffuse
+// wash, not a strip: the low end is what stretches the lit skirt far out from the seam
+// core (the "light scatters further" read), the high end where it reaches full day.
+const GROUND_OPEN_LO = 0.25;
+const GROUND_OPEN_HI = 0.9;
+// Extra mip bias on the ground's crack sample, so the seams blur and spread spatially
+// (more diffuse, scattering into the surrounding sand) without touching the sky, which
+// keeps its own crisp read. Higher = softer, wider, dimmer ground light.
+const GROUND_LOD_BIAS = 1.0;
+
+// per-cell hash, periodic over `per` so the tile wraps seamlessly. Returns the jittered
+// point (a, b) in [0,1)^2 and a `keep` roll used to drop ~half the points.
+function cellPoint(ix: number, iy: number, per: number): { a: number; b: number; keep: number } {
+  const wx = ((ix % per) + per) % per;
+  const wy = ((iy % per) + per) % per;
+  let h = (Math.imul(wx, 374761393) + Math.imul(wy, 668265263)) | 0;
+  h = Math.imul(h ^ (h >>> 13), 1274126177) >>> 0;
+  const a = (h % 4096) / 4096;
+  const h2 = Math.imul(h ^ (h >>> 15), 1597334677) >>> 0;
+  const b = (h2 % 4096) / 4096;
+  const h3 = Math.imul(h2 ^ (h2 >>> 13), 951274213) >>> 0;
+  return { a, b, keep: (h3 % 4096) / 4096 };
+}
+
+function makeCrackTexture(): THREE.DataTexture {
+  const data = new Uint8Array(RES * RES);
+  const P = CRACK_CELLS;
+  for (let y = 0; y < RES; y++) {
+    for (let x = 0; x < RES; x++) {
+      const gx = (x / RES) * P;
+      const gy = (y / RES) * P;
+      const cx = Math.floor(gx);
+      const cy = Math.floor(gy);
+      let f1 = 1e9;
+      let f2 = 1e9; // nearest and second-nearest kept-point distances
+      // 5x5 search: with ~half the points dropped, the nearest can be two cells away.
+      for (let j = -2; j <= 2; j++) {
+        for (let i = -2; i <= 2; i++) {
+          const p = cellPoint(cx + i, cy + j, P);
+          if (p.keep > CRACK_KEEP) continue; // dropped: this cell merges into its neighbours
+          const dx = cx + i + p.a - gx;
+          const dy = cy + j + p.b - gy;
+          const d = Math.sqrt(dx * dx + dy * dy);
+          if (d < f1) {
+            f2 = f1;
+            f1 = d;
+          } else if (d < f2) {
+            f2 = d;
+          }
+        }
+      }
+      // edge metric: 0 on a Voronoi boundary, growing inward. Ramp to 1 at the seam,
+      // 0 by CRACK_EDGE, then smootherstep it so the seam is a soft diffuse gradient
+      // (smooth light when this drives the dunes) rather than a hard line. The sky picks
+      // the final width with its own threshold, so it retunes without a rebake.
+      let crack = 1 - Math.min(1, (f2 - f1) / CRACK_EDGE);
+      crack = crack * crack * crack * (crack * (crack * 6 - 15) + 10);
+      data[y * RES + x] = Math.round(Math.max(0, Math.min(1, crack)) * 255);
+    }
+  }
+  const tex = new THREE.DataTexture(data, RES, RES, THREE.RedFormat);
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  tex.minFilter = THREE.LinearMipmapLinearFilter;
+  tex.magFilter = THREE.LinearFilter;
+  tex.generateMipmaps = true;
+  tex.colorSpace = THREE.NoColorSpace;
+  tex.needsUpdate = true;
+  return tex;
+}
+
+export { makeCrackTexture };
+
 // --- shader injection --------------------------------------------------------
 // Wind as uv-space velocity per layer (direction * speed / scale), baked as GLSL
 // literals so the shadow needs only the two shared uniforms (texture + time).
 const _dir = [Math.cos(WIND_ANGLE), Math.sin(WIND_ANGLE)];
 const _v1 = [(_dir[0] * WIND1) / SCALE1, (_dir[1] * WIND1) / SCALE1];
 const _v2 = [(_dir[0] * WIND2) / SCALE2, (_dir[1] * WIND2) / SCALE2];
+const _cv = [(_dir[0] * CRACK_WIND) / CRACK_SCALE, (_dir[1] * CRACK_WIND) / CRACK_SCALE];
+
+// Shared crack-field reader: declares the crack sampler + clock, a small value-noise fbm
+// for the domain warp (uniquely named so it never clashes with a host shader's own
+// noise), and crackUV() which warps in world space then scales + drifts into the tile.
+// Spliced into BOTH the sky day layer and the grounded materials, so they sample one web.
+const _crackHelpers = /* glsl */ `
+  uniform sampler2D uCrack;
+  uniform float uCloudTime;
+  float _cwH(vec2 p){ p = fract(p * vec2(123.34, 345.45)); p += dot(p, p + 34.345); return fract(p.x * p.y); }
+  float _cwN(vec2 p){
+    vec2 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.0 * f);
+    float a = _cwH(i), b = _cwH(i + vec2(1,0)), c = _cwH(i + vec2(0,1)), d = _cwH(i + vec2(1,1));
+    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+  }
+  float _cwFbm(vec2 p){ float v = 0.0, a = 0.5; for (int i = 0; i < 4; i++){ v += a * _cwN(p); p *= 2.03; a *= 0.5; } return v; }
+  vec2 crackUV(vec2 wxz){
+    vec2 w = vec2(_cwFbm(wxz * ${WARP_SCALE.toFixed(5)} + 11.3), _cwFbm(wxz * ${WARP_SCALE.toFixed(5)} + 41.7)) - 0.5;
+    vec2 wx = wxz + w * ${WARP_AMT.toFixed(1)};
+    return wx * ${(1 / CRACK_SCALE).toFixed(7)} + vec2(${_cv[0].toFixed(7)}, ${_cv[1].toFixed(7)}) * uCloudTime;
+  }
+`;
 const NIGHT_GLSL = `vec3(${NIGHT[0].toFixed(3)}, ${NIGHT[1].toFixed(3)}, ${NIGHT[2].toFixed(3)})`;
 // exported so the books can cast their sun-reveal in the EXACT daylight colour the
 // ground tints to (see main.ts applyProximityGlow), locking the two to one palette.
@@ -190,18 +310,19 @@ export const DAY_GLSL = `vec3(${DAY[0].toFixed(3)}, ${DAY[1].toFixed(3)}, ${DAY[
 
 // Uniform declarations + the cloudShadow() sampler. Splice into a fragment shader's
 // <common>. cloudShadow(worldXZ, camDist) returns 1 in full day, 0 in full night. The
-// mip is taken explicitly from camDist (see the LOD_REF note) via texture2DLodEXT
-// (three's WebGL2-safe alias for textureLod), so it never flips on a seam or a face.
+// day/night driver is now the CRACK web (the same one the sky opens through), so the
+// grounded world is mostly night with thin daylight seams drifting across it, matching
+// the sky overhead. The mip is taken explicitly from camDist (see the LOD_REF note) via
+// texture2DLodEXT (three's WebGL2-safe alias for textureLod) so the thin seams never flip
+// on a seam or a face and never alias at grazing distance; far off they mip to their dark
+// average and the ground sinks to night to meet the storm dome.
 export const CLOUD_FRAG_COMMON = /* glsl */ `
-  uniform sampler2D uClouds;
-  uniform float uCloudTime;
+  ${_crackHelpers}
   uniform float uCloudMix;
   float cloudShadow(vec2 wxz, float camDist) {
-    float lod = clamp(log2(max(camDist, 1.0) / ${LOD_REF.toFixed(1)}), 0.0, ${LOD_MAX.toFixed(1)});
-    vec2 uv1 = wxz * ${(1 / SCALE1).toFixed(7)} + vec2(${_v1[0].toFixed(7)}, ${_v1[1].toFixed(7)}) * uCloudTime;
-    vec2 uv2 = wxz * ${(1 / SCALE2).toFixed(7)} + vec2(${_v2[0].toFixed(7)}, ${_v2[1].toFixed(7)}) * uCloudTime;
-    float n = texture2DLodEXT(uClouds, uv1, lod).r * ${WEIGHT1.toFixed(2)} + texture2DLodEXT(uClouds, uv2, lod).r * ${WEIGHT2.toFixed(2)};
-    return smoothstep(${COVER_LO.toFixed(2)}, ${COVER_HI.toFixed(2)}, n);
+    float lod = clamp(log2(max(camDist, 1.0) / ${LOD_REF.toFixed(1)}) + ${GROUND_LOD_BIAS.toFixed(1)}, 0.0, ${LOD_MAX.toFixed(1)});
+    float c = texture2DLodEXT(uCrack, crackUV(wxz), lod).r;
+    return smoothstep(${GROUND_OPEN_LO.toFixed(2)}, ${GROUND_OPEN_HI.toFixed(2)}, c);
   }
 `;
 
@@ -222,6 +343,20 @@ export const SKY_CLOUD_COMMON = /* glsl */ `
     vec2 uv1 = wxz * ${(1 / SCALE1).toFixed(7)} + vec2(${_v1[0].toFixed(7)}, ${_v1[1].toFixed(7)}) * uCloudTime;
     vec2 uv2 = wxz * ${(1 / SCALE2).toFixed(7)} + vec2(${_v2[0].toFixed(7)}, ${_v2[1].toFixed(7)}) * uCloudTime;
     return texture2D(uClouds, uv1).r * ${WEIGHT1.toFixed(2)} + texture2D(uClouds, uv2).r * ${WEIGHT2.toFixed(2)};
+  }
+`;
+
+// The sky-side reader of the CRACK field: the SAME warped web the ground reads (via the
+// shared _crackHelpers / crackUV), so a sky crack and the daylight seam on the ground
+// below share one shape and drift. crackField(worldXZ) is the raw seam intensity [0,1]
+// (high on a crack), shaped into an opening by the sky's own threshold. Uses auto-mip
+// texture2D (not the ground's explicit-LOD fetch): the day plane is smooth and toward the
+// horizon the auto-mip coarsening is exactly what the fwidth AA wants. Splice into the
+// day layer's fragment <common>.
+export const SKY_CRACK_COMMON = /* glsl */ `
+  ${_crackHelpers}
+  float crackField(vec2 wxz) {
+    return texture2D(uCrack, crackUV(wxz)).r;
   }
 `;
 
@@ -281,7 +416,7 @@ export function applyCloudShadow(
   const prev = mat.onBeforeCompile;
   mat.onBeforeCompile = (shader, renderer) => {
     if (prev) prev.call(mat, shader, renderer);
-    shader.uniforms.uClouds = cloud.uClouds;
+    shader.uniforms.uCrack = cloud.uCrack;
     shader.uniforms.uCloudTime = cloud.uCloudTime;
     shader.uniforms.uCloudMix = cloud.uCloudMix;
     shader.vertexShader = shader.vertexShader
@@ -317,6 +452,7 @@ export function buildClouds(): {
 } {
   const uniforms: CloudUniforms = {
     uClouds: { value: makeCloudTexture() },
+    uCrack: { value: makeCrackTexture() },
     uCloudTime: { value: 0 },
     uCloudMix: { value: 1 },
   };

@@ -1,5 +1,5 @@
 import * as THREE from "three";
-import { CloudUniforms, SKY_CLOUD_COMMON } from "./clouds";
+import { CloudUniforms, SKY_CRACK_COMMON } from "./clouds";
 
 // --- sky --------------------------------------------------------------------
 // Two layers, built to read as one weather over the desert without pretending to a
@@ -49,41 +49,55 @@ const DEPTH_DARKEN = 0.55; // how much the dome dims at the deepest past
 const RADIUS = 20000;
 
 // --- day layer ---------------------------------------------------------------
-// The opening sky seen where the deck breaks: a bright warm pale at the rim easing to
-// a soft day blue overhead. Eyeball knobs.
-const DAY_LOW = new THREE.Color(0xf0e9d8); // warm pale near the horizon
-const DAY_TOP = new THREE.Color(0x9fc2ec); // soft day blue overhead
-// The day layer is blended ADDITIVELY so the openings read as illuminated sky bursting
-// through the night rather than opaque painted cloud: the colour adds to the dome and
-// its stars instead of covering them. DAY_GAIN pushes the open cores to bloom hot.
-const DAY_GAIN = 1.5;
+// The day sky seen THROUGH the cracks in the night, not a glow laid over it. The
+// earlier version blended ADDITIVELY, which let the stars shine through the bright
+// patches: luminous blobs over a dark sky read as clouds, never as holes. This layer
+// instead paints the day OPAQUE inside each opening, so it covers the night dome and
+// its stars behind a hard-edged rim. That occlusion is the cue that flips the read
+// from "cloud deck" to "window into a daytime sky".
+const DAY_LOW = new THREE.Color(0xcfdcef); // pale blue toward the horizon
+const DAY_TOP = new THREE.Color(0x5b8fd6); // clear day blue overhead
+const DAY_CLOUD = new THREE.Color(0xfdfbf4); // warm white of the day clouds in the gap
+const SUN_COL = new THREE.Color(0xfff1cf); // the sun disc + halo glimpsed in a crack
+
+// Puffy day clouds glimpsed inside the windows. They are NOT painted on this plane: that
+// glued them to the openings (coplanar world-locked fields shift together under walking,
+// so the cloud read as paint on the glass). Instead the puffs are sampled in VIEW
+// DIRECTION, a far cloudscape locked to where you look, not where you stand. The
+// world-locked openings then slide across this near-static sky as you walk, which is the
+// parallax of distant cloud seen behind a near window.
+const DAY_CLOUD_DIR_SCALE = 2.0; // view-direction -> cloud uv (smaller = larger puffs)
+const DAY_CLOUD_LO = 0.46; // coverage below this is clear blue
+const DAY_CLOUD_HI = 0.78; // coverage above this is solid white cloud
+const DAY_CLOUD_AMT = 0.85; // how far the puffs push the blue toward white
+
+// The glimpsed sun's elevation, DECOUPLED from the terrain's sun. The world sun sits low
+// (~9deg) for the raking dune relief and the unlit vortex centre; glimpsed at that angle
+// it lands in the fading horizon rim and reads wrong. The sky sun keeps the world sun's
+// azimuth but is lifted here so it reads as a sun up in the day sky. Surreal by design.
+const SKY_SUN_ELEV = 0.5; // radians (~29deg)
 
 const CEIL_H = 1800; // layer altitude (world units; lower = openings read bigger/nearer)
-const CEIL_R = 15000; // layer half-size; reaches ~7deg elevation at this altitude
+// Layer half-size. Kept large so the plane's rim sits only ~4deg above the horizon (a
+// flat plane asymptotes to 0deg and its geometry ends at the rim, so the rim elevation is
+// how low the cracks can reach). The diagonal corner (CEIL_R*sqrt2) must stay inside the
+// camera's far plane, which is sized to suit in main.ts.
+const CEIL_R = 26000;
 
-// Where the field opens into day. The field is two noise layers clustered near 0.5,
-// so its real range is only ~0.35..0.65; the band must sit inside that or nothing ever
-// opens. Starting at the ground's day onset (clouds COVER_LO = 0.5) couples the
-// openings to the lit patches: a break sits where the ground below is already turning
-// to day, which reads as the two agreeing.
-const OPEN_LO = 0.55;
-const OPEN_HI = 0.75;
+// Where the crack opens into day. The crack field is ~0 inside the shards and ~1 on
+// the seams, so the band selects the seam WIDTH: a low LO catches the broad approach to
+// a crack, HI the hairline core. Widen the band for fat cracks, tighten it for hairline
+// fractures.
+const OPEN_LO = 0.78;
+const OPEN_HI = 0.95;
 
 // Fade the layer out toward its rim (as a fraction of CEIL_R) so the flat sheet
-// dissolves into the dome near the horizon instead of ending on a visible edge, and
-// the aliasing-prone grazing rim never shows.
-const FADE_FROM = 0.5;
+// dissolves into the dome instead of ending on a visible edge, and the aliasing-prone
+// grazing rim never shows. Pushed close to the rim so the cracks carry almost all the
+// way down to the horizon and only the final sliver dissolves.
+const FADE_FROM = 0.92;
 
 const DEEP_NIGHT = 0.25; // opening opacity multiplier at the rim (closes into the past)
-
-// Break the field's visible tile repeat (every SCALE1 = 1700u) with a domain warp:
-// the sample point is nudged by a lower-frequency reading of the same field, so the
-// regular lattice of openings dissolves into organic shapes. Seen wide and head-on at
-// altitude, the repeat reads far more than it does on the ground at a grazing angle.
-// WARP_SCALE shrinks the world xz for the warp source (smaller = larger, smoother
-// warp); WARP_AMT is the nudge in world units (larger = more break, looser coupling).
-const WARP_SCALE = 0.75;
-const WARP_AMT = 500;
 
 export interface Sky {
   group: THREE.Group;
@@ -95,8 +109,16 @@ export interface Sky {
 
 // cloud: the shared cloud uniforms (texture + drift time) so the day layer reads the
 // same field, time and wind as the ground's lit patches.
-export function buildSky(cloud: CloudUniforms): Sky {
+export function buildSky(cloud: CloudUniforms, sunPos: THREE.Vector3): Sky {
   const uDepth = { value: 0 };
+
+  // the glimpsed sun: world sun's azimuth, but lifted to SKY_SUN_ELEV (see above).
+  const sunH = Math.hypot(sunPos.x, sunPos.z);
+  const skySunDir = new THREE.Vector3(
+    sunPos.x,
+    Math.tan(SKY_SUN_ELEV) * sunH,
+    sunPos.z,
+  ).normalize();
 
   // --- night dome ---
   const domeMat = new THREE.ShaderMaterial({
@@ -193,24 +215,34 @@ export function buildSky(cloud: CloudUniforms): Sky {
     transparent: true,
     depthWrite: false,
     depthTest: true, // sit behind any terrain it passes behind near the horizon
-    blending: THREE.AdditiveBlending, // openings ADD light: illuminated sky, not cloud
+    // NORMAL blending, not additive: the day is painted OPAQUE inside an opening so it
+    // covers the night dome and its stars, and the opening edge is a hard rim. That
+    // occlusion is what reads as a hole punched through the night, not a glowing cloud.
+    blending: THREE.NormalBlending,
     fog: false,
     uniforms: {
       uDayLow: { value: DAY_LOW.clone().convertSRGBToLinear() },
       uDayTop: { value: DAY_TOP.clone().convertSRGBToLinear() },
+      uDayCloud: { value: DAY_CLOUD.clone().convertSRGBToLinear() },
+      uSunCol: { value: SUN_COL.clone().convertSRGBToLinear() },
+      uSunDir: { value: skySunDir },
+      uCamPos: { value: new THREE.Vector3() },
       uDepth,
-      // shared with the ground's cloud shadows: same texture, same drift time, so the
-      // openings and the lit dunes are one field. Must be the SAME objects.
-      uClouds: cloud.uClouds,
+      // the shared Voronoi crack field: the SAME web the ground now lights through, so the
+      // openings overhead and the daylight seams below read as one system.
+      uCrack: cloud.uCrack,
       uCloudTime: cloud.uCloudTime,
     },
     vertexShader: /* glsl */ `
       varying vec2 vWorldXZ;
       varying vec2 vLocalXY;
+      varying vec3 vWorldPos;
       void main() {
-        // true world xz of this fragment (the sheet is recentred on the camera but the
-        // field is read at absolute world xz, so the openings are world-locked).
-        vWorldXZ = (modelMatrix * vec4(position, 1.0)).xz;
+        // true world position of this fragment (the sheet is recentred on the camera but
+        // the field is read at absolute world xz, so the openings are world-locked). The
+        // full 3D position feeds the view ray for the sun glimpse.
+        vWorldPos = (modelMatrix * vec4(position, 1.0)).xyz;
+        vWorldXZ = vWorldPos.xz;
         vLocalXY = position.xy; // local plane coords; length taken per fragment
         gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
       }
@@ -218,25 +250,65 @@ export function buildSky(cloud: CloudUniforms): Sky {
     fragmentShader: /* glsl */ `
       varying vec2 vWorldXZ;
       varying vec2 vLocalXY;
+      varying vec3 vWorldPos;
       uniform vec3 uDayLow;
       uniform vec3 uDayTop;
+      uniform vec3 uDayCloud;
+      uniform vec3 uSunCol;
+      uniform vec3 uSunDir;
+      uniform vec3 uCamPos;
       uniform float uDepth;
-      ${SKY_CLOUD_COMMON}
+      ${SKY_CRACK_COMMON}
+
+      // value-noise fbm: used both to warp the crack lattice and to paint the day clouds
+      // glimpsed inside a gap (its own field, separate from the crack mask).
+      float h21(vec2 p){ p = fract(p * vec2(123.34, 345.45)); p += dot(p, p + 34.345); return fract(p.x * p.y); }
+      float vnoise(vec2 p){
+        vec2 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.0 * f);
+        float a = h21(i), b = h21(i + vec2(1,0)), c = h21(i + vec2(0,1)), d = h21(i + vec2(1,1));
+        return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+      }
+      float fbm2(vec2 p){ float v = 0.0, a = 0.5; for (int i = 0; i < 4; i++){ v += a * vnoise(p); p *= 2.03; a *= 0.5; } return v; }
+
       void main() {
-        // domain warp to break the tile lattice: nudge the sample by a lower-frequency
-        // reading of the same field. Still the same drifting field, so the openings
-        // keep belonging with the ground; they just no longer fall on a grid.
-        vec2 w = vec2(
-          skyCover(vWorldXZ * ${WARP_SCALE.toFixed(2)} + 11.3),
-          skyCover(vWorldXZ * ${WARP_SCALE.toFixed(2)} + 41.7)
-        ) - 0.5;
-        float open = smoothstep(${OPEN_LO.toFixed(2)}, ${OPEN_HI.toFixed(2)}, skyCover(vWorldXZ + w * ${WARP_AMT.toFixed(1)}));
+        // analytic antialiasing: thresholding the crack field sparkles where many cells
+        // fall in one pixel (grazing angles near the horizon, thin sub-pixel seams). Widen
+        // the smoothstep band by the field's own screen-space rate of change, so the edge
+        // is always at least ~a pixel wide: crisp and thin up close (tiny fwidth), softly
+        // dissolved at distance (large fwidth) instead of breaking into sparkles. The warp
+        // that makes the seams wander now lives inside crackField (shared with the ground).
+        float cf = crackField(vWorldXZ);
+        float aa = fwidth(cf);
+        float open = smoothstep(${OPEN_LO.toFixed(2)} - aa, ${OPEN_HI.toFixed(2)} + aa, cf);
         float rt = clamp(length(vLocalXY) / ${CEIL_R.toFixed(1)}, 0.0, 1.0); // 0 overhead -> 1 rim
         float fade = 1.0 - smoothstep(${FADE_FROM.toFixed(2)}, 1.0, rt);
-        // day-sky gradient: blue overhead easing to warm pale toward the horizon,
-        // pushed by DAY_GAIN so the open cores bloom hot under additive blending.
-        vec3 day = mix(uDayTop, uDayLow, rt) * ${DAY_GAIN.toFixed(2)} * (1.0 - ${DEPTH_DARKEN.toFixed(2)} * uDepth);
+
+        // the view ray for this fragment: drives both the direction-locked far cloudscape
+        // and the sun glimpse, so both stay fixed to where you look while the world-locked
+        // openings slide across them as you walk.
+        vec3 viewDir = normalize(vWorldPos - uCamPos);
+
+        // day-sky behind the gap: clear blue overhead easing to pale toward the horizon.
+        vec3 day = mix(uDayTop, uDayLow, rt);
+        // puffy white day clouds, sampled in VIEW DIRECTION (a far cloudscape), not on this
+        // plane: a gnomonic projection so they compress toward the horizon and parallax
+        // against the near openings instead of being glued to them.
+        float vy = max(viewDir.y, 0.12); // clamp the grazing rim so coords don't blow up
+        vec2 cuv = (viewDir.xz / vy) * ${DAY_CLOUD_DIR_SCALE.toFixed(2)} + vec2(0.013, -0.007) * uCloudTime;
+        float puff = smoothstep(${DAY_CLOUD_LO.toFixed(2)}, ${DAY_CLOUD_HI.toFixed(2)}, fbm2(cuv));
+        day = mix(day, uDayCloud, puff * ${DAY_CLOUD_AMT.toFixed(2)});
+
+        // the sun, glimpsed only through a crack toward its bearing. Direction-based, so
+        // the disc stays fixed while the world-locked openings slide across it.
+        float sd = max(dot(viewDir, uSunDir), 0.0);
+        float disc = smoothstep(0.9986, 0.9997, sd);
+        float halo = pow(sd, 220.0);
+        day += uSunCol * (disc + halo * 0.5);
+
+        day *= (1.0 - ${DEPTH_DARKEN.toFixed(2)} * uDepth);
         float a = open * fade * mix(1.0, ${DEEP_NIGHT.toFixed(2)}, uDepth);
+        // let the sun disc punch through the rim fade so a low gap can still show it.
+        a = max(a, open * disc * mix(1.0, ${DEEP_NIGHT.toFixed(2)}, uDepth));
         gl_FragColor = vec4(day, a);
         #include <colorspace_fragment>
       }
@@ -254,6 +326,7 @@ export function buildSky(cloud: CloudUniforms): Sky {
     uDepth.value = depth;
     dome.position.copy(camPos); // wrap the viewer
     day.position.set(camPos.x, CEIL_H, camPos.z); // ride overhead, field stays world-locked
+    (dayMat.uniforms.uCamPos.value as THREE.Vector3).copy(camPos); // view ray for the sun
   }
 
   return { group, update };
