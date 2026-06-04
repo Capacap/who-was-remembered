@@ -15,12 +15,15 @@ mesh; seating it on the baked artifact instead removes the divergence.
 For now this only bakes the heightmap and renders it for inspection. Mesh
 decimation and book-height seating build on this artifact in later steps.
 
-The world is a spiral. The relief echoes the radial time axis at three scales:
-a whisper of a central rise (hill); fine dune TEXTURE that radiates from the
-centre (dune_spiral: ridged noise sampled in a spiral polar frame, so the ridges
-fork and merge organically while running outward); and a few broad cos spiral
-arms (spiral_swell) that rise into a central massif of peaks, dig gaps between
-them to break the crater rim, and fade to flat dune desert toward the bounds. The
+The world is a spiral. The relief echoes the radial time axis: a central vantage
+crater (hill: a hill to spawn on, ringed by a shallow moat) whose bookless basin
+is broken up by gentle low-amplitude ripples (center_texture) right out to where
+the books start; fine dune TEXTURE that radiates from the
+centre out past the rim (dune_spiral: ridged noise sampled in a spiral polar
+frame, so the ridges fork and merge organically while running outward); and a few
+broad cos spiral arms (spiral_swell) that rise into a central massif of peaks, dig
+gaps between them to break the crater rim, and fade to flat dune desert toward the
+bounds. The big dunes stay out past the plateau, so the basin reads clean. The
 dunes are then run through a thermal avalanche (a sand-slide that moves material
 between over-steep neighbouring cells), a neighbour op on the raster that rounds
 the sharp crests and fills the toes -- exactly what a pointwise get_height
@@ -49,13 +52,16 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pyarrow.parquet as pq
 from matplotlib.colors import LightSource
+from scipy.ndimage import gaussian_filter
 
 from stage6_place import R_INNER, R_MAX, RADIUS_ALPHA, TIME_SPAN
 
 ROOT = Path(__file__).resolve().parent
 TELEPORTERS_PATH = ROOT / "cache" / "teleporters.parquet"
+BOOKS_PATH = ROOT / "cache" / "layout.parquet"
 OUT_NPZ = ROOT / "cache" / "heightmap.npz"
 OUT_PNG = ROOT / "cache" / "plots" / "heightmap.png"
+OUT_DENSITY_PNG = ROOT / "cache" / "plots" / "density.png"
 
 # World extent. The runtime ground mesh is an 18000u square centred on the
 # origin (runtime/src/terrain.ts SIZE), so the heightmap covers the same square.
@@ -67,12 +73,50 @@ PEAK_HEIGHT = 60.0  # a whisper of a central rise, not a summit
 PLATEAU_R = 700.0  # calm and level here (spawn + plaza + the year-2000 ring)
 BASE_R = 5200.0  # the rise has eased to the desert floor (0) by here
 
+# --- central vantage (the spawn crater) -------------------------------------
+# The inner disc (r < PLATEAU_R) is otherwise featureless: no dunes, no swells,
+# just the flat top of the broad rise. Instead of a barren plateau the player
+# spawns on, shape it into a shallow crater with a central hill: a dome to stand
+# on and survey from, a ring moat around it, easing back to the plateau level by
+# PLATEAU_R so the dune/swell massif beyond is untouched. The dune wall at r >
+# PLATEAU_R reads as the outer crater rim.
+VANTAGE_PEAK = 35.0  # central summit height above the plateau level (0 = flat)
+VANTAGE_PEAK_R = 220.0  # radius of the central hill's foot
+CRATER_DEPTH = 18.0  # moat depth below the plateau level, between hill and rim
+
 FLATTEN_R = 14.0  # level core of a teleporter plaza
 FLATTEN_FALLOFF = 50.0  # ... easing back to the dunes over this
 
 FBM_OCTAVES = 3  # octaves of the ridged-noise fBm the dunes are built from
-NOISE_INNER = PLATEAU_R  # dunes start past the calm present plateau
+NOISE_INNER = PLATEAU_R  # the swell/massif starts past the calm present plateau
 NOISE_FULL = 1400.0  # ... at full height by here
+
+# The big spiral dunes are far too tall (SP_AMP) for the basin: from eye height a
+# ring of them at a few hundred units becomes a wall that swallows the book circle
+# and the horizon. So the centre gets its own, much smaller texture instead: gentle
+# low-amplitude ripples across the whole bookless basin (full within
+# CENTER_TEX_FULL_R, gone by CENTER_TEX_FADE_R ~ R_INNER), so the empty centre is
+# broken up right out to where the books start, with no smooth flatland ring in
+# between. It stops at the books so it never competes with them.
+# Disabled: isotropic ripples read as static against the radial spiral, and at the
+# 70u mesh resolution any wavelength fine enough to feel like texture is below
+# Nyquist anyway. The centre is being rethought as a calm vortex eye with the real
+# spiral dunes winding in; this knob stays at 0 pending that.
+CENTER_TEX_AMP = 0.0  # ripple height, world units (0 = off)
+CENTER_TEX_SCALE = 110.0  # ripple wavelength, world units
+CENTER_TEX_FULL_R = R_INNER - 120.0  # full strength across the bookless basin
+CENTER_TEX_FADE_R = R_INNER + 60.0  # ... faded to nothing where the books start
+
+# --- book-density smoothing -------------------------------------------------
+# Books make the busy, well-documented eras; their mass should read as a visible
+# mass, not hide behind dunes. So calm the dune height wherever books cluster:
+# blur the book positions into a density field and use it to attenuate the dune
+# amplitude. Dense recent shelves settle onto readable ground; the sparse deep
+# past keeps churning at full height -- the thesis, written into the terrain.
+SMOOTH_STRENGTH = 0.85  # max dune attenuation under the densest clusters (0 = off)
+SMOOTH_BLUR = 220.0  # density blur radius, world units (~the dune scale)
+SMOOTH_PCTL = 98.0  # density percentile mapped to full attenuation
+SMOOTH_BLUR2 = 400.0  # post-clip blur, world units: feathers the saturated rim, spreads the mask
 
 # --- radial spiral dunes (the radiating texture) ----------------------------
 # The dunes read as TEXTURE that radiates from the centre. They are ridged noise
@@ -227,8 +271,29 @@ def fbm_periodic(x: np.ndarray, y: np.ndarray, px: int) -> np.ndarray:
 
 # --- height field -----------------------------------------------------------
 def hill(r: np.ndarray) -> np.ndarray:
-    """The bare radial rise: a whisper at the centre, eased to 0 by BASE_R."""
-    return PEAK_HEIGHT * (1 - smootherstep((r - PLATEAU_R) / (BASE_R - PLATEAU_R)))
+    """The broad radial rise plus the central vantage crater.
+
+    The rise is a whisper at the centre easing to 0 by BASE_R, as before. Onto
+    the inner disc (r < PLATEAU_R) we add a vantage feature: a central dome the
+    player spawns on, ringed by a shallow moat, both vanishing by PLATEAU_R so
+    the dune/swell massif beyond is untouched.
+    """
+    rise = PEAK_HEIGHT * (1 - smootherstep((r - PLATEAU_R) / (BASE_R - PLATEAU_R)))
+    return rise + vantage_centre(r)
+
+
+def vantage_centre(r: np.ndarray) -> np.ndarray:
+    """Central hill in a shallow ring moat, confined to r < PLATEAU_R.
+
+    Two pieces, each easing to 0 at its outer edge so the feature joins the
+    plateau level flush at PLATEAU_R: a dome from +VANTAGE_PEAK at the centre to
+    0 by VANTAGE_PEAK_R, and a raised-cosine moat dipping to -CRATER_DEPTH across
+    the disc (zero at the centre and at the rim).
+    """
+    dome = VANTAGE_PEAK * (1 - smootherstep(r / VANTAGE_PEAK_R))
+    t = np.clip(r / PLATEAU_R, 0.0, 1.0)
+    moat = CRATER_DEPTH * np.sin(np.pi * t) ** 2
+    return dome - moat
 
 
 def _bilinear(F: np.ndarray, row: np.ndarray, col: np.ndarray) -> np.ndarray:
@@ -363,18 +428,70 @@ def spiral_swell(x: np.ndarray, z: np.ndarray, r: np.ndarray) -> np.ndarray:
     return env * SWELL_AMP * np.cos(SWELL_ARMS * tp + wob)
 
 
-def bake_heightmap(res: int, teleporters: np.ndarray) -> np.ndarray:
+def center_texture(x: np.ndarray, z: np.ndarray, r: np.ndarray) -> np.ndarray:
+    """Subtle low-amplitude ripples that give the central vantage hill character.
+
+    Two octaves of world-space fBm at small amplitude (CENTER_TEX_AMP) across the
+    bookless basin (full within CENTER_TEX_FULL_R, gone by CENTER_TEX_FADE_R ~
+    R_INNER) so the empty centre isn't dead-smooth, stopping where the books start
+    so it never competes with them. Plain isotropic noise, not the radiating spiral
+    dunes, precisely because the dunes were too tall here.
+    """
+    if CENTER_TEX_AMP == 0.0:
+        return np.zeros_like(r)
+    n = perlin(x / CENTER_TEX_SCALE, z / CENTER_TEX_SCALE)
+    n = n + 0.5 * perlin(x / (CENTER_TEX_SCALE * 0.5), z / (CENTER_TEX_SCALE * 0.5))
+    n = n / 1.5
+    env = 1.0 - smootherstep((r - CENTER_TEX_FULL_R) / (CENTER_TEX_FADE_R - CENTER_TEX_FULL_R))
+    return CENTER_TEX_AMP * env * n
+
+
+def book_density_field(books: np.ndarray, res: int, texel: float) -> np.ndarray:
+    """Smooth, normalised book density on the bake grid, in [0, 1].
+
+    Histogram the book positions into the grid, blur to a smooth falloff (SMOOTH_BLUR
+    wide), and normalise against the SMOOTH_PCTL percentile so the densest clusters
+    sit near 1 without a few extreme cells dominating. Grid is aligned with the
+    height field: row i = world z/y, col j = world x.
+
+    The clip to [0, 1] leaves a flat-topped plateau with a hard rim where the density
+    crosses the percentile, which reads as a sharp boundary around the dense core on
+    the terrain. A second gaussian blur (SMOOTH_BLUR2) after the clip rounds that rim
+    and feathers the mask outward, softening the boundary and spreading the calm zone
+    rather than concentrating it.
+    """
+    if books.size == 0:
+        return np.zeros((res, res))
+    edges = -WORLD_SIZE / 2 + np.arange(res + 1) * texel
+    counts, _, _ = np.histogram2d(books[:, 1], books[:, 0], bins=[edges, edges])
+    dens = gaussian_filter(counts, SMOOTH_BLUR / texel)
+    norm = np.percentile(dens, SMOOTH_PCTL)
+    if norm <= 0:
+        return np.zeros((res, res))
+    mask = np.clip(dens / norm, 0.0, 1.0)
+    return gaussian_filter(mask, SMOOTH_BLUR2 / texel)
+
+
+def bake_heightmap(res: int, teleporters: np.ndarray,
+                   books: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """Sample the height field on a res x res grid over the world square.
 
-    Returns H[i, j] where j indexes world x and i indexes world z, both at
-    pixel centres: x = -W/2 + (j + 0.5) * texel, z = -W/2 + (i + 0.5) * texel.
+    Returns (H, density). H[i, j] has j indexing world x and i indexing world z,
+    both at pixel centres: x = -W/2 + (j + 0.5) * texel, z = -W/2 + (i + 0.5) *
+    texel. density is the same-shaped normalised book-density field used to calm the
+    dunes, returned for inspection.
     """
     texel = WORLD_SIZE / res
     axis = -WORLD_SIZE / 2 + (np.arange(res) + 0.5) * texel
     gx, gz = np.meshgrid(axis, axis)  # gx varies along columns, gz along rows
     r = np.hypot(gx, gz)
 
-    H = hill(r) + dune_spiral_relief(gx, gz, r, texel) + spiral_swell(gx, gz, r)
+    # Calm the dunes where books cluster (the hill, swell and centre are structure,
+    # left untouched; only the occluding dune texture is attenuated).
+    dens = book_density_field(books, res, texel)
+    atten = 1.0 - SMOOTH_STRENGTH * dens
+    H = (hill(r) + atten * dune_spiral_relief(gx, gz, r, texel)
+         + spiral_swell(gx, gz, r) + center_texture(gx, gz, r))
 
     # Carve a level plaza at each teleporter: blend the field toward the
     # monument's own local ground height inside FLATTEN_R, easing back to the
@@ -395,7 +512,7 @@ def bake_heightmap(res: int, teleporters: np.ndarray) -> np.ndarray:
             blend = 1 - smootherstep((d - FLATTEN_R) / FLATTEN_FALLOFF)
             H += (th[k] - H) * blend
 
-    return H
+    return H, dens
 
 
 def bake_window(cx: float, cz: float, size: float, px: int) -> tuple[np.ndarray, float]:
@@ -409,7 +526,8 @@ def bake_window(cx: float, cz: float, size: float, px: int) -> tuple[np.ndarray,
     az = cz - size / 2 + (np.arange(px) + 0.5) * texel
     gx, gz = np.meshgrid(ax, az)
     r = np.hypot(gx, gz)
-    return hill(r) + dune_spiral_relief(gx, gz, r, texel) + spiral_swell(gx, gz, r), texel
+    return (hill(r) + dune_spiral_relief(gx, gz, r, texel) + spiral_swell(gx, gz, r)
+            + center_texture(gx, gz, r)), texel
 
 
 def report_asymmetry(H: np.ndarray, texel: float, wind: tuple) -> None:
@@ -549,11 +667,72 @@ def render(H: np.ndarray, teleporters: np.ndarray, crop: dict, out: Path,
     plt.close(fig)
 
 
+def _overlay_structure(ax, teleporters: np.ndarray) -> None:
+    """Draw the world rings, teleporters and centre on a top-down axis."""
+    half = WORLD_SIZE / 2
+    theta = np.linspace(0, 2 * np.pi, 400)
+    for r, c in ((R_INNER, "#ffd24d"), (R_MAX, "#ff5d5d")):
+        ax.plot(r * np.cos(theta), r * np.sin(theta), color=c, lw=0.8, alpha=0.7)
+    for yr in (1900, 1700, 1500, 1000, 500, 1):
+        if yr <= 2000 - TIME_SPAN:
+            continue
+        r = year_to_radius(yr)
+        ax.plot(r * np.cos(theta), r * np.sin(theta), color="#dddddd", lw=0.4,
+                ls=(0, (4, 4)), alpha=0.4)
+    if teleporters.size:
+        ax.scatter(teleporters[:, 0], teleporters[:, 1], s=18, marker="o",
+                   facecolors="none", edgecolors="#39d0ff", linewidths=0.8)
+    ax.scatter([0], [0], marker="+", c="#ffffff", s=70, linewidths=1.0)
+    ax.set_xlim(-half, half)
+    ax.set_ylim(-half, half)
+    ax.set_aspect("equal")
+
+
+def render_density(density: np.ndarray, teleporters: np.ndarray, out: Path,
+                   dpi: int) -> None:
+    """Inspect the book-density smoothing: the density field and the dune
+    attenuation it produces, side by side with the world structure overlaid."""
+    res = density.shape[0]
+    half = WORLD_SIZE / 2
+    extent = [-half, half, -half, half]
+    atten = 1.0 - SMOOTH_STRENGTH * density
+
+    fig = plt.figure(figsize=(26, 13), dpi=dpi)
+    fig.subplots_adjust(left=0.04, right=0.97, top=0.9, bottom=0.05, wspace=0.16)
+    axd = fig.add_subplot(1, 2, 1)
+    axa = fig.add_subplot(1, 2, 2)
+
+    im = axd.imshow(density, extent=extent, origin="lower", cmap="magma",
+                    vmin=0, vmax=1)
+    fig.colorbar(im, ax=axd, fraction=0.046, pad=0.04, label="normalised density")
+    axd.set_title(f"book density (blur={SMOOTH_BLUR:g}u, pctl={SMOOTH_PCTL:g})")
+
+    im = axa.imshow(atten, extent=extent, origin="lower", cmap="viridis",
+                    vmin=1 - SMOOTH_STRENGTH, vmax=1)
+    fig.colorbar(im, ax=axa, fraction=0.046, pad=0.04, label="dune amplitude x")
+    axa.set_title(f"dune attenuation (strength={SMOOTH_STRENGTH:g}): "
+                  f"dark = calmed to {1 - SMOOTH_STRENGTH:.0%}")
+
+    for ax in (axd, axa):
+        _overlay_structure(ax, teleporters)
+
+    fig.suptitle(
+        f"Stage 9 book-density smoothing: {res}x{res}. Dense (recent) shelves "
+        f"calm the dunes; sparse deep past stays wild. "
+        f"Yellow = R_INNER, red = R_MAX.",
+        fontsize=13,
+    )
+    out.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out, dpi=dpi, facecolor="white")
+    plt.close(fig)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--teleporters", type=Path, default=TELEPORTERS_PATH)
     parser.add_argument("--out-npz", type=Path, default=OUT_NPZ)
     parser.add_argument("--out-png", type=Path, default=OUT_PNG)
+    parser.add_argument("--out-density-png", type=Path, default=OUT_DENSITY_PNG)
     parser.add_argument("--res", type=int, default=2048,
                         help="heightmap resolution (square); 18000/res = u/texel")
     parser.add_argument("--vert-exag", type=float, default=2.0,
@@ -567,6 +746,20 @@ def main() -> None:
                         help="override REPOSE_DEG (avalanche talus angle)")
     parser.add_argument("--aval-iters", type=int, default=None,
                         help="override AVALANCHE_ITERS (sand-slide passes)")
+    parser.add_argument("--vantage-peak", type=float, default=None,
+                        help="override VANTAGE_PEAK (central summit height; 0 = flat)")
+    parser.add_argument("--vantage-peak-r", type=float, default=None,
+                        help="override VANTAGE_PEAK_R (central hill foot radius)")
+    parser.add_argument("--crater-depth", type=float, default=None,
+                        help="override CRATER_DEPTH (moat depth below plateau level)")
+    parser.add_argument("--center-tex-amp", type=float, default=None,
+                        help="override CENTER_TEX_AMP (basin ripple height; 0 = off)")
+    parser.add_argument("--center-tex-scale", type=float, default=None,
+                        help="override CENTER_TEX_SCALE (ripple wavelength)")
+    parser.add_argument("--center-tex-full-r", type=float, default=None,
+                        help="override CENTER_TEX_FULL_R (ripple full-strength radius)")
+    parser.add_argument("--center-tex-fade-r", type=float, default=None,
+                        help="override CENTER_TEX_FADE_R (ripple fade-out radius)")
     parser.add_argument("--sp-amp", type=float, default=None,
                         help="override SP_AMP (radial dune height; 0 = off)")
     parser.add_argument("--sp-space", type=float, default=None,
@@ -589,11 +782,36 @@ def main() -> None:
                         help="override SWELL_FADE_R0 (arms full-strength within this radius)")
     parser.add_argument("--swell-fade-r1", type=float, default=None,
                         help="override SWELL_FADE_R1 (arms faded to nothing by this radius)")
+    parser.add_argument("--books", type=Path, default=BOOKS_PATH,
+                        help="book layout parquet for density smoothing")
+    parser.add_argument("--smooth-strength", type=float, default=None,
+                        help="override SMOOTH_STRENGTH (max dune attenuation under books; 0 = off)")
+    parser.add_argument("--smooth-blur", type=float, default=None,
+                        help="override SMOOTH_BLUR (density blur radius, world units)")
+    parser.add_argument("--smooth-pctl", type=float, default=None,
+                        help="override SMOOTH_PCTL (density percentile mapped to full attenuation)")
     args = parser.parse_args()
 
     global REPOSE_DEG, AVALANCHE_ITERS
+    global VANTAGE_PEAK, VANTAGE_PEAK_R, CRATER_DEPTH
+    global CENTER_TEX_AMP, CENTER_TEX_SCALE, CENTER_TEX_FULL_R, CENTER_TEX_FADE_R
     global SP_AMP, SP_SPACE, SP_TWIST, SP_OCTAVES, SP_K0, SP_ASPECT
     global SWELL_AMP, SWELL_ARMS, SWELL_WOBBLE, SWELL_FADE_R0, SWELL_FADE_R1
+    global SMOOTH_STRENGTH, SMOOTH_BLUR, SMOOTH_PCTL
+    if args.vantage_peak is not None:
+        VANTAGE_PEAK = args.vantage_peak
+    if args.vantage_peak_r is not None:
+        VANTAGE_PEAK_R = args.vantage_peak_r
+    if args.crater_depth is not None:
+        CRATER_DEPTH = args.crater_depth
+    if args.center_tex_amp is not None:
+        CENTER_TEX_AMP = args.center_tex_amp
+    if args.center_tex_scale is not None:
+        CENTER_TEX_SCALE = args.center_tex_scale
+    if args.center_tex_full_r is not None:
+        CENTER_TEX_FULL_R = args.center_tex_full_r
+    if args.center_tex_fade_r is not None:
+        CENTER_TEX_FADE_R = args.center_tex_fade_r
     if args.repose is not None:
         REPOSE_DEG = args.repose
     if args.aval_iters is not None:
@@ -620,6 +838,12 @@ def main() -> None:
         SWELL_FADE_R0 = args.swell_fade_r0
     if args.swell_fade_r1 is not None:
         SWELL_FADE_R1 = args.swell_fade_r1
+    if args.smooth_strength is not None:
+        SMOOTH_STRENGTH = args.smooth_strength
+    if args.smooth_blur is not None:
+        SMOOTH_BLUR = args.smooth_blur
+    if args.smooth_pctl is not None:
+        SMOOTH_PCTL = args.smooth_pctl
     print(f"avalanche: repose={REPOSE_DEG:g}deg {AVALANCHE_ITERS} passes")
     print(f"radial dunes: amp={SP_AMP:g} space={SP_SPACE:g} twist={SP_TWIST:g} "
           f"k0={SP_K0} octaves={SP_OCTAVES} aspect={SP_ASPECT:g}")
@@ -639,9 +863,21 @@ def main() -> None:
         teleporters = np.empty((0, 2))
         print("no teleporters parquet; baking without plazas")
 
+    if SMOOTH_STRENGTH > 0 and args.books.exists():
+        bt = pq.read_table(args.books, columns=["x", "y"])
+        books = np.column_stack([
+            np.asarray(bt["x"].to_pylist(), dtype=np.float64),
+            np.asarray(bt["y"].to_pylist(), dtype=np.float64),
+        ])
+        print(f"loaded {books.shape[0]} books for density smoothing "
+              f"(strength={SMOOTH_STRENGTH:g} blur={SMOOTH_BLUR:g} pctl={SMOOTH_PCTL:g})")
+    else:
+        books = np.empty((0, 2))
+        print("density smoothing off (no books or strength=0)")
+
     texel = WORLD_SIZE / args.res
     print(f"baking {args.res}x{args.res} heightmap ({texel:.2f}u/texel)...")
-    H = bake_heightmap(args.res, teleporters)
+    H, density = bake_heightmap(args.res, teleporters, books)
     print(f"  elevation range {H.min():.1f}..{H.max():.1f}u")
 
     args.out_npz.parent.mkdir(parents=True, exist_ok=True)
@@ -659,6 +895,10 @@ def main() -> None:
     crop = {"H": cH, "texel": ctexel, "cx": cx, "cz": cz, "size": args.crop_size}
     render(H, teleporters, crop, args.out_png, args.vert_exag, args.dpi, cwind)
     print(f"  wrote {args.out_png}")
+
+    if books.size:
+        render_density(density, teleporters, args.out_density_png, args.dpi)
+        print(f"  wrote {args.out_density_png}")
     print(f"done in {time.perf_counter() - start:.1f}s")
 
 
