@@ -15,12 +15,12 @@ import {
 } from "./terrain";
 import { buildSky } from "./sky";
 import {
-  buildClouds,
-  CLOUD_FRAG_COMMON,
-  cloudApplyGLSL,
+  buildDaylight,
+  DAYLIGHT_FRAG_COMMON,
+  applyDaylightGLSL,
   DAY_GLSL,
-  type CloudUniforms,
-} from "./clouds";
+  type DaylightUniforms,
+} from "./daylight";
 
 // --- walkable field --------------------------------------------------------
 // One instanced box per figure, placed straight from the pipeline's (x, y), with
@@ -127,7 +127,7 @@ const GLOW_BOOST = 0.6; // additive bloom at the pool centre
 // Self-emission so a book is a coloured speck even where the night lighting and the
 // proximity dim would otherwise lose it in the dark (the whole field had sunk into
 // the black storm scene). EMISSIVE is a fraction of the book's own geo hue added as
-// true self-light AFTER the cloud tint, so it pierces the storm shadow rather than
+// true self-light AFTER the daylight tint, so it pierces the storm shadow rather than
 // being multiplied to black under it (a speck bursting through the dark, like the
 // sky). EMISSIVE_NEAR is the extra emission the proximity pool adds, so a book by the
 // player burns brighter than the distant field (see applyProximityGlow).
@@ -137,18 +137,18 @@ const GLOW_EMISSIVE_NEAR = 0.5; // extra emission at the pool centre
 // The field is never quite still, so it reads as alive rather than as plotted data.
 // The life is MOTION, not a brightness flicker (scaling the emissive made dim-hued
 // books barely move while bright ones winked hard, an inconsistent read). Two effects
-// layer onto the player's proximity pool, both driven by the shared uCloudTime (seconds)
+// layer onto the player's proximity pool, both driven by the shared uDriftTime (seconds)
 // so they stay in step with the drifting weather:
 //   - BOB: each book hovers gently above its seat on its OWN hashed phase, so the field
 //     shimmers with uncoordinated motion rather than a marching swell. Strictly positive
 //     (0..AMP) so a book never dips below the sand, where it would clip and read as the
 //     dark "waves" a signed swell produced.
 //   - REVEAL: the sun-reveal. Where a daylight break drifts over a book it lights up in
-//     step with the sand it stands on: a second tap of the SAME cloudShadow field the
+//     step with the sand it stands on: a second tap of the SAME daylightAt field the
 //     ground reads for its day/night tint, cast in the SAME warm DAY colour, so the two
 //     are locked to one sky. The ground swings its whole albedo from near-black to bright
 //     daylight, so to keep the books from looking flat by comparison the reveal is strong
-//     (a book in full sun emits close to its own hue, warmed). It is gated by cloudShadow,
+//     (a book in full sun emits close to its own hue, warmed). It is gated by daylightAt,
 //     so at night it falls to zero and only the steady uEmissive floor remains, the floor
 //     that keeps books visible in the dark in the first place.
 const BOB_AMP = 0.07; // world units a book hovers above its seat (0..AMP, never below)
@@ -337,7 +337,7 @@ function applyPageMask(mat: THREE.Material): void {
 function applyProximityGlow(
   mat: THREE.Material,
   uni: GlowUniforms,
-  cloud: CloudUniforms,
+  daylight: DaylightUniforms,
 ): void {
   const prev = mat.onBeforeCompile;
   mat.onBeforeCompile = (shader, renderer) => {
@@ -350,14 +350,14 @@ function applyProximityGlow(
     shader.uniforms.uGlowBoost = uni.uGlowBoost;
     shader.uniforms.uEmissive = uni.uEmissive;
     shader.uniforms.uEmissiveNear = uni.uEmissiveNear;
-    shader.uniforms.uCrack = cloud.uCrack;
-    shader.uniforms.uCloudTime = cloud.uCloudTime;
-    shader.uniforms.uCloudMix = cloud.uCloudMix;
+    shader.uniforms.uDaylight = daylight.uDaylight;
+    shader.uniforms.uDriftTime = daylight.uDriftTime;
+    shader.uniforms.uDaylightMix = daylight.uDaylightMix;
     shader.vertexShader = shader.vertexShader
       .replace(
         "#include <common>",
-        "#include <common>\nvarying vec2 vGlowXZ;\nvarying float vCloudDist;\n" +
-          "uniform float uCloudTime;\n" +
+        "#include <common>\nvarying vec2 vGlowXZ;\nvarying float vViewDist;\n" +
+          "uniform float uDriftTime;\n" +
           // Dave Hoskins hash12: scales the coord down before any fract, so it keeps
           // precision out at the disc's ~7000u edge where fract(sin(dot)*43758) aliases
           // adjacent books to the same value. Drives each book's own bob phase. Returns 0..1.
@@ -374,19 +374,19 @@ function applyProximityGlow(
          vec4 _O = modelMatrix * instanceMatrix * vec4(0.0, 0.0, 0.0, 1.0);
          vec4 _wpos = modelMatrix * instanceMatrix * vec4(transformed, 1.0);
          vGlowXZ = _wpos.xz;
-         float _bob = (0.5 + 0.5 * sin(uCloudTime * ${BOB_SPEED.toFixed(3)} + bookHash(_O.xz) * 6.2831853)) * ${BOB_AMP.toFixed(3)};
+         float _bob = (0.5 + 0.5 * sin(uDriftTime * ${BOB_SPEED.toFixed(3)} + bookHash(_O.xz) * 6.2831853)) * ${BOB_AMP.toFixed(3)};
          _wpos.y += _bob;
          gl_Position = projectionMatrix * viewMatrix * _wpos;
-         vCloudDist = length(mvPosition.xyz);`,
+         vViewDist = length(mvPosition.xyz);`,
       );
     shader.fragmentShader = shader.fragmentShader
       .replace(
         "#include <common>",
-        "#include <common>\nvarying vec2 vGlowXZ;\nvarying float vCloudDist;\nuniform vec2 uPlayer;\n" +
+        "#include <common>\nvarying vec2 vGlowXZ;\nvarying float vViewDist;\nuniform vec2 uPlayer;\n" +
           "uniform float uGlowRadius;\nuniform float uGlowInner;\n" +
           "uniform float uRestDim;\nuniform float uRestFar;\nuniform float uGlowBoost;\n" +
           "uniform float uEmissive;\nuniform float uEmissiveNear;\n" +
-          CLOUD_FRAG_COMMON,
+          DAYLIGHT_FRAG_COMMON,
       )
       .replace(
         "#include <opaque_fragment>",
@@ -398,19 +398,19 @@ function applyProximityGlow(
          float restFloor = mix(uRestDim, uRestFar, vGroundFade);
          gl_FragColor.rgb *= mix(restFloor, 1.0, glow);
          gl_FragColor.rgb += gl_FragColor.rgb * glow * uGlowBoost;` +
-          // the same drifting cloud shadow the ground takes, so a book darkens with
+          // the same drifting daylight the ground takes, so a book darkens with
           // the sand it stands in; faded out into the distance dissolve (vGroundFade).
-          cloudApplyGLSL("vGlowXZ", "vGroundFade", "vCloudDist") +
-          // self-emission, added AFTER the cloud tint so it is true self-light: it
-          // survives cloud shadow (a book is a speck bursting through the dark, like the
+          applyDaylightGLSL("vGlowXZ", "vGroundFade", "vViewDist") +
+          // self-emission, added AFTER the daylight tint so it is true self-light: it
+          // survives the night (a book is a speck bursting through the dark, like the
           // sky) instead of being multiplied to black under the storm. The steady floor
           // (uEmissive) plus the proximity pool (uEmissiveNear) carry the book's own hue.
-          // The sun-reveal rides on top: where the SAME cloudShadow field that lights the
+          // The sun-reveal rides on top: where the SAME daylightAt field that lights the
           // ground reads daylight, the book emits its hue warmed by the SAME DAY colour
           // the ground tints to, so a passing sun patch lights book and sand together. It
           // falls to zero at night, leaving only the floor that keeps books visible there.
           `gl_FragColor.rgb += diffuseColor.rgb * (uEmissive + glow * uEmissiveNear);
-           float _sun = cloudShadow(vGlowXZ, vCloudDist);
+           float _sun = daylightAt(vGlowXZ, vViewDist);
            gl_FragColor.rgb += diffuseColor.rgb * ${DAY_GLSL} * (_sun * ${GLOW_REVEAL.toFixed(3)});`,
       );
   };
@@ -421,7 +421,7 @@ function buildField(
   bookNear: THREE.BufferGeometry, // LOD00, full detail, drawn closest
   bookMid: THREE.BufferGeometry, // LOD01, drawn across the mid band
   uPlayer: PlayerUniform, // shared player-position uniform (also drives the ground rake)
-  cloud: CloudUniforms, // shared cloud-shadow uniforms (also drift over the ground)
+  daylight: DaylightUniforms, // shared daylight uniforms (also drift over the ground)
 ) {
   const { n, x, y, tier, geo, lon, scale } = field;
   // the scale byte is the normalized article length (export_runtime quantized the
@@ -490,24 +490,24 @@ function buildField(
   };
   const farMat = new THREE.MeshLambertMaterial();
   applyDistanceFade(farMat);
-  applyProximityGlow(farMat, glow, cloud);
+  applyProximityGlow(farMat, glow, daylight);
   const midMat = new THREE.MeshLambertMaterial();
   applyDistanceFade(midMat);
   applyPageMask(midMat);
-  applyProximityGlow(midMat, glow, cloud);
+  applyProximityGlow(midMat, glow, daylight);
   const nearMat = new THREE.MeshLambertMaterial();
   applyDistanceFade(nearMat);
   applyPageMask(nearMat);
-  applyProximityGlow(nearMat, glow, cloud);
+  applyProximityGlow(nearMat, glow, daylight);
   // All three now share applyProximityGlow as their outermost onBeforeCompile, so
   // their default program-cache keys (= onBeforeCompile.toString(), closure vars
   // excluded) collide. far has no page mask while mid/near do, so without a
   // distinguishing key three would hand all three whichever program compiled
   // first. Key on the actual patch stack: mid/near are identical (share a program,
   // correct), far is its own. Same defence the ground material uses for its holes.
-  farMat.customProgramCacheKey = () => "book:fade+glow+cloud";
-  midMat.customProgramCacheKey = () => "book:fade+page+glow+cloud";
-  nearMat.customProgramCacheKey = () => "book:fade+page+glow+cloud";
+  farMat.customProgramCacheKey = () => "book:fade+glow+daylight";
+  midMat.customProgramCacheKey = () => "book:fade+page+glow+daylight";
+  nearMat.customProgramCacheKey = () => "book:fade+page+glow+daylight";
 
   // Explicit renderOrder. The books are transparent (distance fade) and were all left
   // at renderOrder 0, tied with each other and with the ground, so Three's distance sort
@@ -1330,19 +1330,19 @@ async function main() {
   // dunes. Used below for the DirectionalLight too.
   const SUN_POS = new THREE.Vector3(-700, 130, 380);
 
-  // drifting cloud shadows (see clouds.ts): one shared mask + time, sampled at the
+  // drifting daylight (see daylight.ts): one shared field + time, sampled at the
   // world xz of the ground, books and stones so the same shadow falls on a
   // book and the sand under it, AND at the sky dome's pierce points so the storm's
   // breaks open over the lit patches. The scene's main source of large-scale motion.
   // Built before the sky because the dome shares its uniforms.
-  const clouds = buildClouds();
+  const daylight = buildDaylight();
 
   // storm sky dome (see sky.ts): a near-black cloud ceiling whose breaks are cut by
   // the same drifting field that lights the ground, so the sky opens where the dunes
   // beneath are lit. A warm glow stays fixed at the sun bearing; the whole dome
   // deepens with the player's radial depth into the past. It recentres on the camera
   // each frame (see the loop) so it reads as infinitely far and never shows an edge.
-  const sky = buildSky(clouds.uniforms, SUN_POS);
+  const sky = buildSky(daylight.uniforms, SUN_POS);
   scene.add(sky.group);
 
   const camera = new THREE.PerspectiveCamera(
@@ -1437,14 +1437,14 @@ async function main() {
   const uSkate = { value: 0 };
   // the ground is one static mesh tessellated from the heightmap (terrain.buildGround):
   // no camera-following, no rebuild, no LOD seams. It just sits there; the raking light
-  // and cloud shadow ride on shared uniforms updated in the loop.
-  const ground = buildGround(uPlayer, uSkate, clouds.uniforms);
+  // and daylight ride on shared uniforms updated in the loop.
+  const ground = buildGround(uPlayer, uSkate, daylight.uniforms);
   scene.add(ground);
   // settle the eye onto the baked surface now the heightmap is loaded (spawn was
   // placed on the analytic fallback before the fetch resolved).
   camera.position.y = sampleHeight(camera.position.x, camera.position.z) + EYE_HEIGHT;
   mark("terrain");
-  const built = buildField(field, bookLods[0], bookLods[1], uPlayer, clouds.uniforms);
+  const built = buildField(field, bookLods[0], bookLods[1], uPlayer, daylight.uniforms);
   mark("seat books");
 
   // Wall the player just past the outermost book. R_MAX (the nominal time-radius) is
@@ -1690,9 +1690,9 @@ async function main() {
     // ease the skate glow toward on/off so the blue pool blooms in and out instead of
     // popping with the Shift key (time-constant filter, same shape as the eye-lift).
     uSkate.value += ((mode === "skate" ? 1 : 0) - uSkate.value) * (1 - Math.exp(-6 * dt));
-    // drift the cloud shadows across the whole landscape (ground, books and
+    // drift the daylight across the whole landscape (ground, books and
     // stones all sample the one shared mask + time).
-    clouds.update(dt);
+    daylight.update(dt);
     // recentre the sky on the viewer (night dome wraps it, day layer rides overhead)
     // and deepen it with radial depth into the past. The day layer reads the field at
     // absolute world xz, so its openings stay world-locked as the player walks.

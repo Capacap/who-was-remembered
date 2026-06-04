@@ -1,5 +1,5 @@
 import * as THREE from "three";
-import { CloudUniforms, WIND_DIR } from "./clouds";
+import { DaylightUniforms, WIND_DIR } from "./daylight";
 
 // --- sky --------------------------------------------------------------------
 // A brooding overcast after Kuindzhi: a dark cloud ceiling where the only bright thing in
@@ -63,9 +63,9 @@ export interface Sky {
   update: (depth: number, camPos: THREE.Vector3) => void;
 }
 
-// cloud: the shared cloud uniforms (only uCloudTime here, driving the storm drift so it
-// moves with the ground's lit patches); _sunPos is unused now the glimpsed sun is gone.
-export function buildSky(cloud: CloudUniforms, _sunPos: THREE.Vector3): Sky {
+// daylight: the shared daylight uniforms (only uDriftTime here, driving the storm drift so
+// it moves with the ground's lit patches); _sunPos is unused now the glimpsed sun is gone.
+export function buildSky(daylight: DaylightUniforms, _sunPos: THREE.Vector3): Sky {
   const uDepth = { value: 0 };
 
   // --- night dome ---
@@ -81,7 +81,7 @@ export function buildSky(cloud: CloudUniforms, _sunPos: THREE.Vector3): Sky {
       uDepth,
       uHorizonY: { value: HORIZON_Y },
       uSkyTop: { value: SKY_TOP },
-      uCloudTime: cloud.uCloudTime, // drives the cloud drift
+      uDriftTime: daylight.uDriftTime, // drives the cloud drift
     },
     vertexShader: /* glsl */ `
       varying vec3 vDir;
@@ -99,7 +99,7 @@ export function buildSky(cloud: CloudUniforms, _sunPos: THREE.Vector3): Sky {
       uniform float uDepth;
       uniform float uHorizonY;
       uniform float uSkyTop;
-      uniform float uCloudTime;
+      uniform float uDriftTime;
 
       float hash21(vec2 p) {
         p = fract(p * vec2(123.34, 345.45));
@@ -120,7 +120,7 @@ export function buildSky(cloud: CloudUniforms, _sunPos: THREE.Vector3): Sky {
       // band stays clear. Returns mass density [0,1].
       float cloudDeck(vec3 dir, float scale, vec2 drift, float floorY, float ceilY) {
         float vy = max(dir.y, 0.12); // clamp the grazing rim so the projection stays finite
-        vec2 cuv = (dir.xz / vy) * scale + drift * uCloudTime;
+        vec2 cuv = (dir.xz / vy) * scale + drift * uDriftTime;
         float m = smoothstep(${CLOUD_LO.toFixed(2)}, ${CLOUD_HI.toFixed(2)}, fbm2(cuv));
         return m * smoothstep(floorY, ceilY, dir.y);
       }

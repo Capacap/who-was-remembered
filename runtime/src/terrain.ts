@@ -1,5 +1,9 @@
 import * as THREE from "three";
-import { CLOUD_FRAG_COMMON, cloudApplyGLSL, type CloudUniforms } from "./clouds";
+import {
+  DAYLIGHT_FRAG_COMMON,
+  applyDaylightGLSL,
+  type DaylightUniforms,
+} from "./daylight";
 
 // --- terrain ----------------------------------------------------------------
 // The world is a near-flat desert and the dunes are its relief, not a texture
@@ -262,7 +266,7 @@ const SKATE_GLOW_RGB = `vec3(${_sg.r.toFixed(4)}, ${_sg.g.toFixed(4)}, ${_sg.b.t
 // ground it can never look superimposed (the stone ring it replaced did, being a warm
 // Lambert prop dropped onto the cool emissive centre). Evaluated per-fragment over the
 // teleporter positions, not per-vertex: the disc is smaller than a GROUND_CELL facet,
-// so a vertex attribute would light a single triangle. A slow pulse off uCloudTime
+// so a vertex attribute would light a single triangle. A slow pulse off uDriftTime
 // reads as powered. Eyeball knobs; tune against the vortex teal, which the innermost
 // teleporters sit inside (a blue pad there has to fight the near-white eye glow).
 const TP_GLOW_INNER = new THREE.Color(0x3df0ff); // cyan at the centre of the pad
@@ -271,7 +275,7 @@ const TP_GLOW_RADIUS = 9; // disc footprint, world units; tracks main.ts TP_ENTE
 const TP_GLOW_FALLOFF = 1.6; // intensity exponent over the radius; >1 keeps a bright core with a soft skirt
 const TP_GLOW_STRENGTH = 0.85; // additive intensity at the centre
 const TP_GLOW_PULSE = 0.18; // pulse depth as a fraction of strength (0 = steady)
-const TP_GLOW_PULSE_SPEED = 0.6; // pulse rate against the drifting uCloudTime
+const TP_GLOW_PULSE_SPEED = 0.6; // pulse rate against the drifting uDriftTime
 // Proximity ramp off the player position: far away the pad is a dim, plain-blue
 // beacon; on approach it brightens and the cyan core emerges. Keep in sync with
 // main.ts TP_BEAM_APPROACH_* so beam and pad ramp together.
@@ -522,7 +526,7 @@ export function sampleNormal(
 // Inject the ground material edits, shared by the one static ground mesh: the
 // camera-distance opacity fade (so the world dissolves circularly into the dome at
 // the far edge, no square plate) and the additive raking pool that follows the
-// player, then the drifting cloud-shadow multiply. All are per-fragment in world
+// player, then the drifting daylight multiply. All are per-fragment in world
 // space, so they ride on the static mesh unchanged from the clipmap days; only the
 // per-level discard hole and its depth machinery are gone with the clipmap.
 function applyGroundMaterial(
@@ -530,7 +534,7 @@ function applyGroundMaterial(
   cell: number,
   uPlayer: PlayerUniform,
   uSkate: { value: number },
-  cloud: CloudUniforms,
+  daylight: DaylightUniforms,
 ): void {
   mat.transparent = true;
   const fadeSpan = (FADE_END - FADE_START).toFixed(1);
@@ -558,43 +562,43 @@ function applyGroundMaterial(
          vec3 tpInner = mix(${TP_GLOW_OUTER_RGB}, ${TP_GLOW_INNER_RGB}, tpApproach);
          vec3 tpCol = mix(tpInner, ${TP_GLOW_OUTER_RGB}, tpT);
          // slow breathing pulse so the pad reads as powered, not painted.
-         float tpPulse = 1.0 - ${TP_GLOW_PULSE.toFixed(2)} * (0.5 - 0.5 * cos(uCloudTime * ${TP_GLOW_PULSE_SPEED.toFixed(3)}));
+         float tpPulse = 1.0 - ${TP_GLOW_PULSE.toFixed(2)} * (0.5 - 0.5 * cos(uDriftTime * ${TP_GLOW_PULSE_SPEED.toFixed(3)}));
          gl_FragColor.rgb += tpGlow * tpCol * (${TP_GLOW_STRENGTH.toFixed(2)} * tpPulse * tpProx);
        }`
     : "";
   mat.onBeforeCompile = (shader) => {
     shader.uniforms.uPlayer = uPlayer;
     shader.uniforms.uSkate = uSkate;
-    shader.uniforms.uCrack = cloud.uCrack;
-    shader.uniforms.uCloudTime = cloud.uCloudTime;
-    shader.uniforms.uCloudMix = cloud.uCloudMix;
+    shader.uniforms.uDaylight = daylight.uDaylight;
+    shader.uniforms.uDriftTime = daylight.uDriftTime;
+    shader.uniforms.uDaylightMix = daylight.uDaylightMix;
     if (tpPos.length) shader.uniforms.uTpPos = { value: tpPos };
     shader.vertexShader = shader.vertexShader
       .replace(
         "#include <common>",
-        "#include <common>\nattribute float aEye;\nattribute float aRelief;\nvarying float vEye;\nvarying float vRelief;\nvarying float vGroundFade;\nvarying float vCloudDist;\nvarying vec3 vWorldPos;\nvarying vec2 vCloudXZ;",
+        "#include <common>\nattribute float aEye;\nattribute float aRelief;\nvarying float vEye;\nvarying float vRelief;\nvarying float vGroundFade;\nvarying float vViewDist;\nvarying vec3 vWorldPos;\nvarying vec2 vFieldXZ;",
       )
       .replace(
         "#include <project_vertex>",
         `#include <project_vertex>
          vEye = aEye;
          vRelief = aRelief;
-         vCloudDist = length(mvPosition.xyz);
+         vViewDist = length(mvPosition.xyz);
          vGroundFade = clamp(
-           (vCloudDist - ${FADE_START.toFixed(1)}) / ${fadeSpan},
+           (vViewDist - ${FADE_START.toFixed(1)}) / ${fadeSpan},
            0.0, 1.0);
          vWorldPos = (modelMatrix * vec4(transformed, 1.0)).xyz;
-         // sample the cloud on the un-jittered lattice point so the shadow reads off
+         // sample the daylight field on the un-jittered lattice point so it reads off
          // the grid rather than the per-vertex jitter; jitter is under half a cell, so
          // rounding the local position to the cell grid recovers the lattice point.
          vec2 _lat = floor(position.xz / ${cell.toFixed(1)} + 0.5) * ${cell.toFixed(1)};
-         vCloudXZ = (modelMatrix * vec4(_lat.x, 0.0, _lat.y, 1.0)).xz;`,
+         vFieldXZ = (modelMatrix * vec4(_lat.x, 0.0, _lat.y, 1.0)).xz;`,
       );
     let frag = shader.fragmentShader.replace(
       "#include <common>",
-      "#include <common>\nvarying float vEye;\nvarying float vRelief;\nvarying float vGroundFade;\nvarying float vCloudDist;\nvarying vec3 vWorldPos;\nvarying vec2 vCloudXZ;\nuniform vec2 uPlayer;\nuniform float uSkate;" +
+      "#include <common>\nvarying float vEye;\nvarying float vRelief;\nvarying float vGroundFade;\nvarying float vViewDist;\nvarying vec3 vWorldPos;\nvarying vec2 vFieldXZ;\nuniform vec2 uPlayer;\nuniform float uSkate;" +
         tpDecl +
-        CLOUD_FRAG_COMMON,
+        DAYLIGHT_FRAG_COMMON,
     );
     // Raking pool, additive after lighting (linear space, before the colorspace
     // encode). The world-space face normal comes from the position derivatives the
@@ -607,9 +611,9 @@ function applyGroundMaterial(
       `#include <opaque_fragment>
        {
          // crest/trough colour and the vortex eye, all keyed to baked masks. These sit
-         // BEFORE the day/night multiply, so they are part of the lit sand and the crack
-         // field modulates them: dark dunes inside a night shard, coloured relief and a
-         // glowing centre only where a daylight seam crosses. (Added after the multiply they
+         // BEFORE the day/night multiply, so they are part of the lit sand and the daylight
+         // field modulates them: dark dunes at night, coloured relief and a glowing centre
+         // only where a daylight island crosses. (Added after the multiply they
          // paint full-strength over the crushed night albedo and read as a garish neon
          // smear, with no sand under them to be a subtle tint of.) They are emissive so
          // they survive the low raking SUN that leaves the centre unlit; they do not also
@@ -619,12 +623,12 @@ function applyGroundMaterial(
          // vortex eye: additive glow (colour x mask) pooled in the centre troughs.
          gl_FragColor.rgb += vEye * ${EYE_EMISSIVE_RGB} * ${EYE_EMISSIVE_STRENGTH.toFixed(2)};
        }` +
-        // day/night: multiply the lit sand (albedo + relief) by the crack web (night in
-        // the shards, daylight along the seams), sinking toward the night floor into the
+        // day/night: multiply the lit sand (albedo + relief) by the daylight field (night
+        // in the dark, day in the lit islands), sinking toward the night floor into the
         // distance dissolve so the far ground darkens to meet the black storm dome.
-        cloudApplyGLSL("vCloudXZ", "vGroundFade", "vCloudDist") +
+        applyDaylightGLSL("vFieldXZ", "vGroundFade", "vViewDist") +
         `{
-         // these run AFTER the multiply so they survive a night shard: the player's own
+         // these run AFTER the multiply so they survive the night: the player's own
          // light has to read for navigation through the mostly-night desert, and the
          // vortex eye is a glow meant to read in the unlit centre.
          vec3 wn = normalize(cross(dFdx(vWorldPos), dFdy(vWorldPos)));
@@ -640,7 +644,7 @@ function applyGroundMaterial(
          float bfall = 1.0 - smoothstep(${SKATE_GLOW_INNER.toFixed(1)}, ${SKATE_GLOW_RADIUS.toFixed(1)}, pdist);
          gl_FragColor.rgb += uSkate * ${SKATE_GLOW_RGB} * (${SKATE_GLOW_STRENGTH.toFixed(2)} * bfall * (0.45 + 0.55 * rake));
        }` +
-        // teleporter floor glow last, AFTER the cloud multiply, so the powered pad
+        // teleporter floor glow last, AFTER the daylight multiply, so the powered pad
         // holds steady instead of dimming as a shadow drifts over the plaza.
         tpGlow,
     );
@@ -776,12 +780,12 @@ export function facetHeight(x: number, z: number): number {
 // finestVertex (so facetHeight reconstructs the drawn facet and books seat exactly),
 // heights from sampleHeight, and the radial era colour with the crest/trough relief
 // tint. flatShading + vertexColors give the low-poly Vane look; applyGroundMaterial
-// adds the distance fade, the raking pool and the drifting cloud shadow. Built once
-// and never rebuilt: it sits still while the shared uPlayer/cloud uniforms move.
+// adds the distance fade, the raking pool and the drifting daylight tint. Built once
+// and never rebuilt: it sits still while the shared uPlayer/daylight uniforms move.
 export function buildGround(
   uPlayer: PlayerUniform,
   uSkate: { value: number },
-  cloud: CloudUniforms,
+  daylight: DaylightUniforms,
 ): THREE.Mesh {
   const cell = GROUND_CELL;
   const g0 = -Math.round(GROUND_HALF / cell); // world-cell index of the (0,0) corner
@@ -848,7 +852,7 @@ export function buildGround(
     vertexColors: true,
     flatShading: true,
   });
-  applyGroundMaterial(mat, cell, uPlayer, uSkate, cloud);
+  applyGroundMaterial(mat, cell, uPlayer, uSkate, daylight);
   const mesh = new THREE.Mesh(geom, mat);
   mesh.frustumCulled = false; // one big mesh always wrapping the camera
   return mesh;
