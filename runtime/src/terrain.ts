@@ -145,16 +145,6 @@ const CREST_LIGHT = 0.05; // crest lightens / trough darkens (a whisper; the sun
 const CREST_SAT = 0.13; // crest bleaches / trough deepens (now a dominant read)
 const CREST_HUE = 0.022; // crest warms / trough cools (now a dominant read)
 
-// Time rings: radius is time, so a gentle ripple in lightness (and a hair of
-// warm/cool) keyed to radius makes the map read as concentric growth rings /
-// strata, a tree- or mountain-cross-section of deep time. Keyed straight off
-// radius, not the exact year mapping: the bands are decoration for the narrative,
-// not a readable century scale, so even spacing is enough (with RADIUS_ALPHA = 1
-// it lands on centuries anyway). Eyeball knobs.
-const RING_SPACING = 512; // world units between rings (~a century at alpha = 1)
-const RING_LIGHT = 0.03; // lightness swing across a ring (the dominant read)
-const RING_HUE = 0.004; // warm/cool swing across a ring (subtle)
-
 // Distance fade: the ground's opacity falls to zero between these radii from the
 // CAMERA, so the whole landscape dissolves into the sky dome before it reaches the
 // mesh edge. The fade is circular (camera distance), so unlike a fog tint of opaque
@@ -306,18 +296,16 @@ export function groundColor(
   // under the HSL offsets below so the eye still picks up crest/trough shading.
   if (eye > 0) out.lerp(COLOR_EYE, eye * EYE_ALBEDO_STRENGTH);
   const tone = perlin(x / COLOR_WAVELENGTH, z / COLOR_WAVELENGTH); // [-1, 1]
-  // time rings: a smooth ripple, one cycle per RING_SPACING of radius.
-  const ring = Math.cos((r / RING_SPACING) * Math.PI * 2);
   // crests (k > 0) warm, bleach and lighten; troughs (k < 0) cool, deepen and
   // darken. Hue/sat shift against k's sign, lightness with it.
   const k = relief < -1 ? -1 : relief > 1 ? 1 : relief;
-  // The painted wobble, the time rings and the relief tint are three HSL offsets;
-  // fold them into one getHSL/setHSL roundtrip rather than three (this runs per vertex
-  // across the whole ground build, so the two saved RGB<->HSL conversions matter).
+  // The painted wobble and the relief tint are two HSL offsets; fold them into one
+  // getHSL/setHSL roundtrip rather than two (this runs per vertex across the whole
+  // ground build, so the saved RGB<->HSL conversions matter).
   out.getHSL(_hsl);
-  _hsl.h += tone * 0.01 + ring * RING_HUE - k * CREST_HUE;
+  _hsl.h += tone * 0.01 - k * CREST_HUE;
   _hsl.s += tone * 0.03 - k * CREST_SAT;
-  _hsl.l += tone * 0.04 + ring * RING_LIGHT + k * CREST_LIGHT;
+  _hsl.l += tone * 0.04 + k * CREST_LIGHT;
   out.setHSL(_hsl.h, _hsl.s, _hsl.l);
   return out;
 }
