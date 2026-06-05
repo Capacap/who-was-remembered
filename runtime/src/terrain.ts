@@ -6,57 +6,20 @@ import {
 } from "./daylight";
 
 // --- terrain ----------------------------------------------------------------
-// The world is a near-flat desert and the dunes are its relief, not a texture
-// laid over a hill. The present (origin) stays calm and level where the books
-// are densest; only a whisper of a central rise gives spawn a faint vantage
-// before it eases to the desert floor and a transverse dune field takes over.
+// The world is a near-flat desert whose relief (a whisper of a central rise easing
+// out to a spiral dune field) is a BAKED heightmap raster (stage9), not computed
+// here. This lives in the renderer, not the pipeline: the vertical axis carries no
+// data (time and longitude are the horizontal x/z), so terrain is decoration by the
+// three-tier rule. sampleHeight is the single elevation source: the ground mesh
+// tessellates it, the player's feet read it, and books seat on facetHeight (the facet
+// the ground mesh actually draws), so the visible ground and everything on it agree.
 //
-// This lives in the renderer, not the pipeline. The vertical axis carries no data
-// (time and longitude are the horizontal x/z), so terrain is decoration by the
-// three-tier rule. The shape is a baked heightmap raster (stage9), and sampleHeight
-// is the single elevation source: the ground mesh tessellates it, the player's feet
-// read it, and books seat on facetHeight (the facet the ground mesh actually draws),
-// so the visible ground and everything on it agree. The analytic getGroundHeight
-// below is now only the pre-heightmap-load fallback.
+// An earlier analytic hill+dune field (getGroundHeight/getGroundNormal and their
+// dune-shaping knobs) was removed 2026-06-05: it only ever fed a pre-load fallback,
+// and its transverse-dune shape no longer even matched the baked spiral dunes, so it
+// was stale dead weight. Edit terrain SHAPE in the stage9 bake, never here.
 
-const PEAK_HEIGHT = 60; // a whisper of a central rise, not a summit, world units
-const PLATEAU_R = 700; // calm and level here (spawn + plaza + the year-2000 ring)
-const BASE_R = 5200; // the rise has eased to the desert floor (0) by here
-
-// Teleporter plazas: each monument stands on a level disc carved into the slope
-// at its own elevation, so the pillar sits plumb and the future stone-circle
-// visual has flat ground to sit on. FLATTEN_R is the level core; it eases back
-// to the hill over FLATTEN_FALLOFF. The falloff is wide enough to span several
-// mesh facets, so the transition reads as a deliberate faceted pan rather than a
-// single vertex yanked up into a spike.
-const FLATTEN_R = 14;
-const FLATTEN_FALLOFF = 50;
-
-// Dune field. The terrain is essentially flat desert, so the dunes ARE the
-// relief, not an undulation on a hill. A prevailing wind packs them into
-// transverse ridges: long crests running crosswind, closely spaced along the
-// wind. Sampling the noise anisotropically (short along-wind, long crosswind)
-// elongates the ridges, a domain warp lets them meander off straight, and a
-// ridged fold sharpens the crest into a crease rather than a soft bump. They
-// fade in past the calm present plateau and run at full height across the rest.
-//
-// Slip-face asymmetry (gentle windward, steep lee) is deferred on purpose:
-// clamping a lee slope to the sand's angle of repose wants neighbour info, which
-// is natural on a baked raster and awkward pointwise, so it is the first thing
-// that will earn the heightmap bake.
-const DUNE_AMP = 70; // crest height above the trough, world units
-const DUNE_SPACE = 260; // along-wind dune spacing (close)
-const DUNE_LEN = 900; // crosswind ridge length scale (long)
-const DUNE_OCTAVES = 3;
-const WARP_AMP = 120; // how far the crest lines meander off straight
-const WARP_SCALE = 1100; // wavelength of that meander
-const WIND_ANGLE = 0.7; // prevailing wind bearing, radians
-const WIND_X = Math.cos(WIND_ANGLE);
-const WIND_Z = Math.sin(WIND_ANGLE);
-const NOISE_INNER = PLATEAU_R; // dunes start past the calm present plateau
-const NOISE_FULL = 1400; // ... at full height by here
-
-let plazas: { x: number; z: number; h: number }[] = [];
+let plazas: { x: number; z: number }[] = [];
 
 // smootherstep: zero first AND second derivative at both ends, so the grade
 // eases in and out without a curvature kink that would show up in the normals.
@@ -114,23 +77,6 @@ function perlin(x: number, y: number): number {
   const x1 = (1 - u) * dot(aa, xf, yf) + u * dot(ba, xf - 1, yf);
   const x2 = (1 - u) * dot(aa + 1, xf, yf - 1) + u * dot(ba + 1, xf - 1, yf - 1);
   return (1 - v) * x1 + v * x2; // roughly [-1, 1]
-}
-
-// fractal sum (fBm) of a few octaves in UNIT coordinate space (the caller
-// pre-scales), normalized back to ~[-1, 1]. Unit space lets the dune sampler
-// stretch the coordinates anisotropically before calling in.
-function fbmUnit(x: number, y: number): number {
-  let amp = 1;
-  let freq = 1;
-  let sum = 0;
-  let norm = 0;
-  for (let o = 0; o < DUNE_OCTAVES; o++) {
-    sum += amp * perlin(x * freq, y * freq);
-    norm += amp;
-    amp *= 0.5;
-    freq *= 2;
-  }
-  return sum / norm;
 }
 
 // integer hash -> [0, 1): per-vertex pseudo-random, used to jitter the ground
@@ -309,84 +255,14 @@ const GROUND_HALF = 9000; // half-extent: covers the world (R_MAX ~7100) + the f
 const GROUND_JIT_FRAC = 0.33; // in-plane vertex jitter as a fraction of the cell:
 //   the Vane look, an organic faceted triangulation instead of a mechanical lattice
 
-// the dune offset at a point: anisotropic ridged noise, faded in past the
-// present plateau. See the dune-field note above for the construction.
-function dune(x: number, z: number, r: number): number {
-  const env = smootherstep((r - NOISE_INNER) / (NOISE_FULL - NOISE_INNER));
-  if (env <= 0) return 0;
-  // meander the crest lines so they aren't ruled straight
-  const wx = x + WARP_AMP * perlin(x / WARP_SCALE, z / WARP_SCALE);
-  const wz = z + WARP_AMP * perlin(x / WARP_SCALE + 41.3, z / WARP_SCALE + 17.9);
-  // rotate into wind-aligned axes and sample anisotropically: dunes pack along
-  // the wind (short scale), ridges run crosswind (long scale).
-  const s = (wx * WIND_X + wz * WIND_Z) / DUNE_SPACE;
-  const t = (-wx * WIND_Z + wz * WIND_X) / DUNE_LEN;
-  // ridged fold: a crease at the crest. Squaring tightens the crest and pools
-  // the sand flat in the troughs.
-  const ridge = 1 - Math.abs(fbmUnit(s, t)); // [0, 1], peaked at the crest
-  return env * DUNE_AMP * ridge * ridge;
-}
-
-// the bare radial hill, before dunes and plaza flattening.
-function hill(r: number): number {
-  if (r <= PLATEAU_R) return PEAK_HEIGHT;
-  if (r >= BASE_R) return 0;
-  return PEAK_HEIGHT * (1 - smootherstep((r - PLATEAU_R) / (BASE_R - PLATEAU_R)));
-}
-
-// Pin each plaza's level height to the ACTUAL local ground at the monument's
-// spot (hill + dune), computed once so getGroundHeight stays a cheap lookup.
-// Using the dune-free hill height instead would level the plaza to the baseline
-// while the dunes around it sit metres lower, leaving the monument on a mesa.
+// Record each teleporter's xz so the ground shader can pool a "stand here" glow at
+// every plaza (applyGroundMaterial reads these). The plazas are levelled in the
+// stage9 heightmap bake itself, so nothing here needs to recompute their height.
 export function initTerrain(teleporters: { x: number; y: number }[]): void {
-  plazas = teleporters.map((t) => {
-    const r = Math.hypot(t.x, t.y);
-    return { x: t.x, z: t.y, h: hill(r) + dune(t.x, t.y, r) };
-  });
+  plazas = teleporters.map((t) => ({ x: t.x, z: t.y }));
 }
 
-export function getGroundHeight(x: number, z: number): number {
-  const r = Math.hypot(x, z);
-  let h = hill(r) + dune(x, z, r);
-  // flatten toward each nearby plaza's level height (hill only, dunes suppressed
-  // so the plaza reads as deliberately levelled). Plazas are far apart, so at
-  // most one is ever in range; a squared-distance reject skips the other 25.
-  const reach = FLATTEN_R + FLATTEN_FALLOFF;
-  const reach2 = reach * reach;
-  for (const p of plazas) {
-    const dx = x - p.x;
-    const dz = z - p.z;
-    const d2 = dx * dx + dz * dz;
-    if (d2 > reach2) continue;
-    const d = Math.sqrt(d2);
-    const blend = 1 - smootherstep((d - FLATTEN_R) / FLATTEN_FALLOFF);
-    h += (p.h - h) * blend;
-  }
-  return h;
-}
-
-const NORMAL_EPS = 0.5; // default central-difference step for the normal, world units
-
-// Surface normal via central differences of getGroundHeight, the analytic
-// counterpart of sampleNormal. Now unused (props read sampleNormal off the baked
-// field); kept beside getGroundHeight as its fallback companion until the analytic
-// path is retired. eps is the half-span the difference is taken over.
-export function getGroundNormal(
-  x: number,
-  z: number,
-  out = new THREE.Vector3(),
-  eps = NORMAL_EPS,
-): THREE.Vector3 {
-  const hx = getGroundHeight(x + eps, z) - getGroundHeight(x - eps, z);
-  const hz = getGroundHeight(x, z + eps) - getGroundHeight(x, z - eps);
-  // surface y = h(x, z); gradient is (∂h/∂x, ∂h/∂z); upward normal is
-  // (-∂h/∂x, 1, -∂h/∂z), here with the 1/(2·eps) folded into the normalize.
-  return out.set(-hx, 2 * eps, -hz).normalize();
-}
-
-export function peakHeight(): number {
-  return PEAK_HEIGHT;
-}
+const NORMAL_EPS = 0.5; // default central-difference step for sampleNormal, world units
 
 // Ground colour at a world point: the radial pale-summit -> sand -> grey-void
 // narrative, a low-frequency painted wobble, and a crest/trough relief tint.
@@ -469,11 +345,11 @@ export function initHeightmap(
   HM = { data, res, worldSize, texel: worldSize / res, half: worldSize / 2 };
 }
 
-// Height at a world point from the baked raster. Falls back to the analytic
-// getGroundHeight before the heightmap has loaded (e.g. the spawn placement,
-// which sits on the flat plateau where the two agree anyway).
+// Height at a world point from the baked raster. Before the heightmap has loaded it
+// returns 0: the only caller then is the spawn placement, which is re-settled onto the
+// baked surface the instant the raster is in (main.ts), so no frame ever shows the 0.
 export function sampleHeight(x: number, z: number): number {
-  if (!HM) return getGroundHeight(x, z);
+  if (!HM) return 0;
   const { data, res, texel, half } = HM;
   const col = (x + half) / texel - 0.5;
   const row = (z + half) / texel - 0.5;
@@ -499,11 +375,9 @@ export function sampleHeight(x: number, z: number): number {
   );
 }
 
-// Surface normal from the baked raster, the heightmap counterpart of
-// getGroundNormal: central differences on sampleHeight so props seat to the same
-// surface the ground mesh draws, not the analytic field that diverges from it. eps
-// doubles as the footprint half-width, so a large prop conforms to the slope it
-// spans rather than one texel.
+// Surface normal from the baked raster: central differences on sampleHeight so props
+// seat to the same surface the ground mesh draws. eps doubles as the footprint
+// half-width, so a large prop conforms to the slope it spans rather than one texel.
 export function sampleNormal(
   x: number,
   z: number,

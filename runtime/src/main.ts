@@ -24,9 +24,9 @@ import {
 
 // --- walkable field --------------------------------------------------------
 // One instanced box per figure, placed straight from the pipeline's (x, y), with
-// a first-person controller so the disc can be walked. The ground is a radial
-// hill (see terrain.ts): books are seated on it and tilted to its normal, and
-// the player's walk height samples the same function so nothing floats.
+// a first-person controller so the disc can be walked. The ground is the baked
+// heightmap (see terrain.ts): books are seated on it and tilted to its normal, and
+// the player's walk height samples the same surface so nothing floats.
 // Books are still placeholder primitives. Everything visual here is scaffolding.
 
 const info = document.getElementById("info") as HTMLDivElement;
