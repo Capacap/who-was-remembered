@@ -119,10 +119,27 @@ const EYE_R1 = 1900; // ... gone by here, reaching out into the rising dunes
 const EYE_ALBEDO_STRENGTH = 0.85; // albedo lerp toward the eye colour (only shows where lit)
 const EYE_RELIEF_PUSH = 320; // world units the boundary shifts per unit relief:
 // troughs (relief < 0) pull it inward (more eye), crests (relief > 0) push it out
-const EYE_NOISE_AMP = 680; // world units the boundary wanders by noise (breaks the ring)
-const EYE_NOISE_SCALE = 760; // coarse noise wavelength; a finer octave rides on top
+const EYE_NOISE_AMP = 680; // world units the eye boundary wanders by the shared smear field
 const EYE_VALLEY = 1.3; // pool the colour in the dune troughs, recede off the crests:
 // scales the mask by (1 - EYE_VALLEY * relief), so crests dim and troughs lift
+
+// The shared "smear" field: one radial displacement (two octaves of Perlin) that the
+// vortex eye AND the era gradient both add to the radius before reading their colour, so
+// the time-bands and the eye finger in and out TOGETHER as one turbulent flow rather than
+// sitting in clean concentric rings. This generalises the eye's old boundary noise to the
+// whole palette ("all colours smear the way the eye does"). Each user scales the field by
+// its own amplitude (EYE_NOISE_AMP for the narrow eye band, ERA_WARP_AMP for the broad
+// gradient), so they wander by different absolute amounts off the same field and stay
+// coherent. The era gradient is atmosphere — the books carry the real date — so it is free
+// to bleed; push ERA_WARP_AMP up for more dissolve, down toward clean concentric rings.
+const WARP_SCALE = 760; // coarse wavelength; a finer octave at 0.4x rides on top
+const ERA_WARP_AMP = 680; // world units the era bands finger in/out (the gradient smear)
+function smearNoise(x: number, z: number): number {
+  return (
+    perlin(x / WARP_SCALE, z / WARP_SCALE) +
+    0.5 * perlin(x / (WARP_SCALE * 0.4), z / (WARP_SCALE * 0.4))
+  );
+}
 
 // Crest/trough relief tint, painted into the ALBEDO on the radial base: crests read
 // scoured pale and a touch warm, troughs deeper and cooler, so the dunes carry COLOUR
@@ -275,10 +292,7 @@ const NORMAL_EPS = 0.5; // default central-difference step for sampleNormal, wor
 // COLOR_EYE in groundColor.
 export function eyeMask(x: number, z: number, relief: number): number {
   const r = Math.hypot(x, z);
-  const noise =
-    perlin(x / EYE_NOISE_SCALE, z / EYE_NOISE_SCALE) +
-    0.5 * perlin(x / (EYE_NOISE_SCALE * 0.4), z / (EYE_NOISE_SCALE * 0.4));
-  const rEff = r + EYE_RELIEF_PUSH * relief + EYE_NOISE_AMP * noise;
+  const rEff = r + EYE_RELIEF_PUSH * relief + EYE_NOISE_AMP * smearNoise(x, z);
   const radial = 1 - smootherstep((rEff - EYE_R0) / (EYE_R1 - EYE_R0));
   // pool in the troughs, recede off the crests: relief > 0 (crest) dims, < 0 lifts
   const valley = 1 - EYE_VALLEY * relief;
@@ -294,8 +308,13 @@ export function groundColor(
   eye = 0,
 ): THREE.Color {
   // one continuous ramp: pale -> sand at the midpoint -> grey across [0, edge].
+  // The radius is smeared by the shared field (the same one the eye uses) before the ramp
+  // is read, so the era bands finger in and out together with the eye instead of reading as
+  // clean concentric rings. Clamp: the displacement can push the sampled radius below 0
+  // near the centre.
   const r = Math.hypot(x, z);
-  const t = Math.min(1, r / ERA_GRADIENT_R);
+  const rEra = r + ERA_WARP_AMP * smearNoise(x, z);
+  const t = Math.min(1, Math.max(0, rEra / ERA_GRADIENT_R));
   if (t < 0.5) out.copy(SAND_GRADIENT_START).lerp(SAND_GRADIENT_MID, t * 2);
   else out.copy(SAND_GRADIENT_MID).lerp(SAND_GRADIENT_END, (t - 0.5) * 2);
   // Tint the albedo toward the eye colour; the HSL offsets below then ride on top so
