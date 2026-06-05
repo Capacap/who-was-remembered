@@ -75,17 +75,19 @@ BASE_R = 5200.0  # the rise has eased to the desert floor (0) by here
 
 # --- central vantage (the spawn crater) -------------------------------------
 # The inner disc (r < PLATEAU_R) is otherwise featureless: no dunes, no swells,
-# just the flat top of the broad rise. Instead of a barren plateau the player
-# spawns on, shape it into a shallow crater with a central hill: a dome to stand
-# on and survey from, a ring moat around it, easing back to the plateau level by
-# PLATEAU_R so the dune/swell massif beyond is untouched. The dune wall at r >
-# PLATEAU_R reads as the outer crater rim.
-VANTAGE_PEAK = 35.0  # central summit height above the plateau level (0 = flat)
-VANTAGE_PEAK_R = 220.0  # radius of the central hill's foot
-CRATER_DEPTH = 18.0  # moat depth below the plateau level, between hill and rim
-
-FLATTEN_R = 14.0  # level core of a teleporter plaza
-FLATTEN_FALLOFF = 50.0  # ... easing back to the dunes over this
+# just the flat top of the broad rise. Instead of a barren plateau, dish it into a
+# shallow CRATER: the present is a sink, deepest at the centre and easing back to
+# the plateau level by PLATEAU_R, so the dune/swell massif beyond reads as the
+# crater's outer rim. (An earlier version put a central HILL to spawn on here; it
+# wasn't doing its job, so the concavity is flipped -- the present is a hollow the
+# accumulated past piles up around, not a summit.) Depth trades against the
+# survey-the-ring vantage: deeper sinks the eye below the rim, so keep it shallow.
+CRATER_DEPTH = 18.0  # crater depth below the plateau level at the centre (0 = flat)
+CRATER_FALLOFF_R = 1400.0  # crater eases back to the plateau level by here. Wider than the
+# old PLATEAU_R (700): the broad gentle bowl drops the mid-bowl wall (the lip that occludes
+# the view) faster than it drops the books, so the first masses of books just past R_INNER
+# clear the lip from the sunken spawn instead of hiding behind it. The deep dunes past here
+# are untouched; inside it the crater gently dishes the already-calm inner swell zone.
 
 FBM_OCTAVES = 3  # octaves of the ridged-noise fBm the dunes are built from
 NOISE_INNER = PLATEAU_R  # the swell/massif starts past the calm present plateau
@@ -284,26 +286,22 @@ def hill(r: np.ndarray) -> np.ndarray:
     """The broad radial rise plus the central vantage crater.
 
     The rise is a whisper at the centre easing to 0 by BASE_R, as before. Onto
-    the inner disc (r < PLATEAU_R) we add a vantage feature: a central dome the
-    player spawns on, ringed by a shallow moat, both vanishing by PLATEAU_R so
-    the dune/swell massif beyond is untouched.
+    the inner disc we dish a crater: a shallow sink the present sits in, easing
+    back to the plateau level by CRATER_FALLOFF_R so the deep dunes beyond are
+    untouched.
     """
     rise = PEAK_HEIGHT * (1 - smootherstep((r - PLATEAU_R) / (BASE_R - PLATEAU_R)))
     return rise + vantage_centre(r)
 
 
 def vantage_centre(r: np.ndarray) -> np.ndarray:
-    """Central hill in a shallow ring moat, confined to r < PLATEAU_R.
+    """Central crater: the present is a shallow sink, not a hill.
 
-    Two pieces, each easing to 0 at its outer edge so the feature joins the
-    plateau level flush at PLATEAU_R: a dome from +VANTAGE_PEAK at the centre to
-    0 by VANTAGE_PEAK_R, and a raised-cosine moat dipping to -CRATER_DEPTH across
-    the disc (zero at the centre and at the rim).
+    A broad shallow bowl deepest at the centre (-CRATER_DEPTH) easing back to the
+    plateau level by CRATER_FALLOFF_R, wide enough that the gentle inner wall lets
+    the first masses of books clear the lip from the sunken spawn.
     """
-    dome = VANTAGE_PEAK * (1 - smootherstep(r / VANTAGE_PEAK_R))
-    t = np.clip(r / PLATEAU_R, 0.0, 1.0)
-    moat = CRATER_DEPTH * np.sin(np.pi * t) ** 2
-    return dome - moat
+    return -CRATER_DEPTH * (1.0 - smootherstep(r / CRATER_FALLOFF_R))
 
 
 def _bilinear(F: np.ndarray, row: np.ndarray, col: np.ndarray) -> np.ndarray:
@@ -521,24 +519,11 @@ def bake_heightmap(res: int, teleporters: np.ndarray,
     H = (hill(r) + env * dune_spiral_relief(gx, gz, r, texel)
          + spiral_swell(gx, gz, r) + center_texture(gx, gz, r))
 
-    # Carve a level plaza at each teleporter: blend the field toward the
-    # monument's own local ground height inside FLATTEN_R, easing back to the
-    # dunes over FLATTEN_FALLOFF. The target height is read from the baked
-    # surface at the teleporter's cell (the asymmetric dunes are a raster, no
-    # longer a pointwise function), so the plaza sits flush with the sand around
-    # it instead of on a mesa. Sampled before any carving so overlapping plazas
-    # can't drift (the monuments are far enough apart that they don't overlap).
-    if teleporters.size:
-        tx, ty = teleporters[:, 0], teleporters[:, 1]
-        ci = np.clip(np.round((tx + WORLD_SIZE / 2) / texel - 0.5)
-                     .astype(np.int64), 0, res - 1)
-        cj = np.clip(np.round((ty + WORLD_SIZE / 2) / texel - 0.5)
-                     .astype(np.int64), 0, res - 1)
-        th = H[cj, ci]  # surface height at each monument's cell
-        for k in range(tx.size):
-            d = np.hypot(gx - tx[k], gz - ty[k])
-            blend = 1 - smootherstep((d - FLATTEN_R) / FLATTEN_FALLOFF)
-            H += (th[k] - H) * blend
+    # Teleporter plazas are no longer flattened. They were levelled so a teleporter
+    # MODEL could sit flush on the ground; there is no model now (the gate is a glow
+    # baked into the terrain shader plus a beam), so flattening would only punch flat
+    # discs into the dunes for no reason. The floor markers drape on the dune surface
+    # like everything else. `teleporters` is still loaded for the inspection render.
 
     return H, dens, env
 
@@ -774,12 +759,10 @@ def main() -> None:
                         help="override REPOSE_DEG (avalanche talus angle)")
     parser.add_argument("--aval-iters", type=int, default=None,
                         help="override AVALANCHE_ITERS (sand-slide passes)")
-    parser.add_argument("--vantage-peak", type=float, default=None,
-                        help="override VANTAGE_PEAK (central summit height; 0 = flat)")
-    parser.add_argument("--vantage-peak-r", type=float, default=None,
-                        help="override VANTAGE_PEAK_R (central hill foot radius)")
     parser.add_argument("--crater-depth", type=float, default=None,
-                        help="override CRATER_DEPTH (moat depth below plateau level)")
+                        help="override CRATER_DEPTH (central crater depth below plateau; 0 = flat)")
+    parser.add_argument("--crater-falloff-r", type=float, default=None,
+                        help="override CRATER_FALLOFF_R (radius the crater eases back to plateau)")
     parser.add_argument("--center-tex-amp", type=float, default=None,
                         help="override CENTER_TEX_AMP (basin ripple height; 0 = off)")
     parser.add_argument("--center-tex-scale", type=float, default=None,
@@ -821,17 +804,15 @@ def main() -> None:
     args = parser.parse_args()
 
     global REPOSE_DEG, AVALANCHE_ITERS
-    global VANTAGE_PEAK, VANTAGE_PEAK_R, CRATER_DEPTH
+    global CRATER_DEPTH, CRATER_FALLOFF_R
     global CENTER_TEX_AMP, CENTER_TEX_SCALE, CENTER_TEX_FULL_R, CENTER_TEX_FADE_R
     global SP_AMP, SP_SPACE, SP_TWIST, SP_OCTAVES, SP_K0, SP_ASPECT
     global SWELL_AMP, SWELL_ARMS, SWELL_WOBBLE, SWELL_FADE_R0, SWELL_FADE_R1
     global SMOOTH_STRENGTH, SMOOTH_BLUR, SMOOTH_PCTL
-    if args.vantage_peak is not None:
-        VANTAGE_PEAK = args.vantage_peak
-    if args.vantage_peak_r is not None:
-        VANTAGE_PEAK_R = args.vantage_peak_r
     if args.crater_depth is not None:
         CRATER_DEPTH = args.crater_depth
+    if args.crater_falloff_r is not None:
+        CRATER_FALLOFF_R = args.crater_falloff_r
     if args.center_tex_amp is not None:
         CENTER_TEX_AMP = args.center_tex_amp
     if args.center_tex_scale is not None:
