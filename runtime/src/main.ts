@@ -1563,7 +1563,7 @@ async function main() {
   // one player-position uniform shared by the ground's raking light and the books'
   // proximity glow, so both reactive pools track the same centre (the overlapping
   // light radii). Updated once per frame in the loop.
-  const uPlayer: PlayerUniform = { value: new THREE.Vector2(0, 0) };
+  const uPlayer: PlayerUniform = { value: new THREE.Vector2(0, 0), lift: { value: 0 } };
   // skate state for the ground's cool glow pool: ramped 0..1 in the loop so the blue
   // blooms in/out with the mode rather than snapping on with the Shift key.
   const uSkate = { value: 0 };
@@ -1827,6 +1827,14 @@ async function main() {
     // ground rake) to the player every frame. The book LOD refill is gated by move
     // distance, far too coarse for a smooth pool, so the uniform is driven here.
     uPlayer.value.set(camera.position.x, camera.position.z);
+    // height of the eye above the ground directly below (hop + cosmetic skate hover):
+    // lifts the rake lamp with the player so the pool reacts to a jump instead of
+    // staying painted flat. Same sampleHeight the controller grounds on, so it reads 0
+    // when planted.
+    uPlayer.lift.value = Math.max(
+      0,
+      camera.position.y - EYE_HEIGHT - sampleHeight(camera.position.x, camera.position.z),
+    );
     // ease the skate glow toward on/off so the blue pool blooms in and out instead of
     // popping with the Shift key (time-constant filter, same shape as the eye-lift).
     uSkate.value += ((mode === "skate" ? 1 : 0) - uSkate.value) * (1 - Math.exp(-6 * dt));

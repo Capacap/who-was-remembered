@@ -244,8 +244,12 @@ const TP_GLOW_OUTER_RGB = `vec3(${_tgo.r.toFixed(4)}, ${_tgo.g.toFixed(4)}, ${_t
 
 // A live uniform carrying the player's world-xz position, shared between the
 // ground's raking light and the books' proximity glow so both pools share a centre.
+// `lift` rides alongside (only the ground rake reads it): the player's height above
+// the ground directly below, 0 when grounded, so a jump or the skate hover lifts the
+// rake lamp with the eye instead of leaving it painted flat on the sand.
 export interface PlayerUniform {
   value: THREE.Vector2;
+  lift: { value: number };
 }
 
 // --- ground: a single static mesh tessellated from the heightmap --------------
@@ -459,6 +463,7 @@ function applyGroundMaterial(
     : "";
   mat.onBeforeCompile = (shader) => {
     shader.uniforms.uPlayer = uPlayer;
+    shader.uniforms.uPlayerLift = uPlayer.lift;
     shader.uniforms.uSkate = uSkate;
     shader.uniforms.uDaylight = daylight.uDaylight;
     shader.uniforms.uDriftTime = daylight.uDriftTime;
@@ -485,7 +490,7 @@ function applyGroundMaterial(
       );
     let frag = shader.fragmentShader.replace(
       "#include <common>",
-      "#include <common>\nvarying float vGroundFade;\nvarying float vViewDist;\nvarying vec3 vWorldPos;\nvarying vec2 vFieldXZ;\nuniform vec2 uPlayer;\nuniform float uSkate;" +
+      "#include <common>\nvarying float vGroundFade;\nvarying float vViewDist;\nvarying vec3 vWorldPos;\nvarying vec2 vFieldXZ;\nuniform vec2 uPlayer;\nuniform float uPlayerLift;\nuniform float uSkate;" +
         tpDecl +
         DAYLIGHT_FRAG_COMMON,
     );
@@ -508,7 +513,10 @@ function applyGroundMaterial(
          // vortex eye is a glow meant to read in the unlit centre.
          vec3 wn = normalize(cross(dFdx(vWorldPos), dFdy(vWorldPos)));
          if (wn.y < 0.0) wn = -wn;
-         vec3 toP = vec3(uPlayer.x - vWorldPos.x, ${PLAYER_LIGHT_HEIGHT.toFixed(1)}, uPlayer.y - vWorldPos.z);
+         // the lamp rides PLAYER_LIGHT_HEIGHT above the player's feet AND uPlayerLift
+         // higher again when airborne/hovering, so a jump lifts it off the sand (the
+         // rake flattens and spreads); pdist stays xz so the pool footprint holds.
+         vec3 toP = vec3(uPlayer.x - vWorldPos.x, ${PLAYER_LIGHT_HEIGHT.toFixed(1)} + uPlayerLift, uPlayer.y - vWorldPos.z);
          float pdist = length(toP.xz);
          // squared so the skirt tapers off well before the radius -- a soft pool around
          // the feet rather than a broad wash filling the grazing view.
