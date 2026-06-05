@@ -1593,6 +1593,14 @@ async function main() {
       openOverlay(target);
     } else if (e.code === "KeyT" && !overlayOpen && controls.isLocked && nearTp >= 0) {
       openTravel(nearTp);
+    } else if (e.code === "KeyL") {
+      // dev: toggle the daylight (storm-shadow) field off, so the ground shows its
+      // full Lambert-lit albedo with no day/night darkening. Lets the sand colours be
+      // judged without the world shrouded in moving shadow. uDaylightMix is shared into
+      // the ground and book materials, so one flip neutralises the whole field.
+      const u = daylight.uniforms.uDaylightMix;
+      u.value = u.value > 0 ? 0 : 1;
+      console.log(`[dev] daylight field ${u.value ? "on" : "off (flat-lit)"}`);
     } else if (e.code === "Escape" && overlayOpen) {
       closeOverlay();
     }

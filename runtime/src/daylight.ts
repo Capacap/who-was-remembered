@@ -62,8 +62,9 @@ export interface DaylightUniforms {
   // the diffuse fbm day/night field: drives the ground and book day-night tint.
   uDaylight: { value: THREE.Texture };
   uDriftTime: { value: number };
-  // DIAGNOSTIC kill switch: 1 = full night/day tint, 0 = neutral (effect off). A dormant
-  // hook (defaults to 1, no key wired to it now); set its .value to 0 to localise flicker.
+  // DIAGNOSTIC kill switch: 1 = full night/day tint, 0 = neutral (effect off, ground shows
+  // flat Lambert-lit albedo). Toggled live by the dev KeyL handler in main.ts so the sand
+  // colours can be judged without the drifting storm shadow; defaults to 1.
   uDaylightMix: { value: number };
 }
 
