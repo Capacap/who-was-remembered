@@ -181,31 +181,23 @@ const EYE_VALLEY = 1.3; // pool the colour in the dune troughs, recede off the c
 const _eye = COLOR_EYE.clone().convertSRGBToLinear();
 const EYE_EMISSIVE_RGB = `vec3(${_eye.r.toFixed(4)}, ${_eye.g.toFixed(4)}, ${_eye.b.toFixed(4)})`;
 
-// Crest/trough relief tint, layered on the radial base: crests read scoured pale
-// and a touch warm, troughs cooler and darker, so the dunes carry colour and not
-// just shading. The signal is the vertex height minus its neighbours RELIEF_CELLS out
-// on the ground grid, so the colour tracks the relief the mesh actually draws. All
+// Crest/trough relief tint, painted into the ALBEDO on the radial base: crests read
+// scoured pale and a touch warm, troughs deeper and cooler, so the dunes carry COLOUR
+// while the raking sun's flat-shaded N·L owns light/dark. The signal is the vertex
+// height minus its neighbours RELIEF_CELLS out on the ground grid, so the colour tracks
+// the relief the mesh actually draws. It leans on hue + saturation, which ride straight
+// through the lighting (a warm albedo times warm light stays warm), and only a whisper
+// of lightness, since the sun already owns that axis and would crush a bigger shift. An
+// earlier version carried this tint as an additive emissive (a warm crest rim + a deep
+// red trough pool); it was removed because out in the dune field the sun DOES light the
+// facets, so the albedo reads fine, and the emissive only fought the lighting and the
+// Kuindzhi palette. (The vortex eye stays emissive: its centre is genuinely unlit.) All
 // four are eyeball knobs.
 const RELIEF_CELLS = 3; // neighbour offset in cells: the relief's read wavelength
 const RELIEF_SCALE = 0.25; // slope-difference that reaches the full crest/trough tint
-const CREST_LIGHT = 0.15; // crest lightens / trough darkens (the dominant read)
-const CREST_SAT = 0.07; // crest bleaches / trough deepens
-const CREST_HUE = 0.012; // crest warms / trough cools
-// The albedo crest/trough tint above is crushed by the raking dusk sun (lighting
-// already owns light/dark on the flat-shaded facets, so an albedo shift can't
-// compete and the dunes read as one sand colour). So the crest/trough COLOUR is
-// carried by an additive emissive term, lighting-independent like the vortex eye:
-// crests catch a warm rim, troughs pool a deep red glow. Keyed to the same signed
-// relief k, passed per-vertex as aRelief. Two independent strengths so the warm rim
-// and the red pool tune separately; zero a strength to drop that half of the tint.
-const CREST_EMIS = new THREE.Color(0xffc890); // warm rim glow on crests
-const TROUGH_EMIS = new THREE.Color(0xcc2800); // deep red glow pooled in troughs
-const CREST_EMIS_STRENGTH = 0.18;
-const TROUGH_EMIS_STRENGTH = 0.2;
-const _crestE = CREST_EMIS.clone().convertSRGBToLinear();
-const _troughE = TROUGH_EMIS.clone().convertSRGBToLinear();
-const CREST_EMIS_RGB = `vec3(${_crestE.r.toFixed(4)}, ${_crestE.g.toFixed(4)}, ${_crestE.b.toFixed(4)})`;
-const TROUGH_EMIS_RGB = `vec3(${_troughE.r.toFixed(4)}, ${_troughE.g.toFixed(4)}, ${_troughE.b.toFixed(4)})`;
+const CREST_LIGHT = 0.05; // crest lightens / trough darkens (a whisper; the sun owns light/dark)
+const CREST_SAT = 0.13; // crest bleaches / trough deepens (now a dominant read)
+const CREST_HUE = 0.022; // crest warms / trough cools (now a dominant read)
 
 // Time rings: radius is time, so a gentle ripple in lightness (and a hair of
 // warm/cool) keyed to radius makes the map read as concentric growth rings /
@@ -576,13 +568,12 @@ function applyGroundMaterial(
     shader.vertexShader = shader.vertexShader
       .replace(
         "#include <common>",
-        "#include <common>\nattribute float aEye;\nattribute float aRelief;\nvarying float vEye;\nvarying float vRelief;\nvarying float vGroundFade;\nvarying float vViewDist;\nvarying vec3 vWorldPos;\nvarying vec2 vFieldXZ;",
+        "#include <common>\nattribute float aEye;\nvarying float vEye;\nvarying float vGroundFade;\nvarying float vViewDist;\nvarying vec3 vWorldPos;\nvarying vec2 vFieldXZ;",
       )
       .replace(
         "#include <project_vertex>",
         `#include <project_vertex>
          vEye = aEye;
-         vRelief = aRelief;
          vViewDist = length(mvPosition.xyz);
          vGroundFade = clamp(
            (vViewDist - ${FADE_START.toFixed(1)}) / ${fadeSpan},
@@ -596,7 +587,7 @@ function applyGroundMaterial(
       );
     let frag = shader.fragmentShader.replace(
       "#include <common>",
-      "#include <common>\nvarying float vEye;\nvarying float vRelief;\nvarying float vGroundFade;\nvarying float vViewDist;\nvarying vec3 vWorldPos;\nvarying vec2 vFieldXZ;\nuniform vec2 uPlayer;\nuniform float uSkate;" +
+      "#include <common>\nvarying float vEye;\nvarying float vGroundFade;\nvarying float vViewDist;\nvarying vec3 vWorldPos;\nvarying vec2 vFieldXZ;\nuniform vec2 uPlayer;\nuniform float uSkate;" +
         tpDecl +
         DAYLIGHT_FRAG_COMMON,
     );
@@ -610,17 +601,15 @@ function applyGroundMaterial(
       "#include <opaque_fragment>",
       `#include <opaque_fragment>
        {
-         // crest/trough colour and the vortex eye, all keyed to baked masks. These sit
-         // BEFORE the day/night multiply, so they are part of the lit sand and the daylight
-         // field modulates them: dark dunes at night, coloured relief and a glowing centre
-         // only where a daylight island crosses. (Added after the multiply they
-         // paint full-strength over the crushed night albedo and read as a garish neon
-         // smear, with no sand under them to be a subtle tint of.) They are emissive so
-         // they survive the low raking SUN that leaves the centre unlit; they do not also
-         // need to survive the night, which is the storm passing over them.
-         gl_FragColor.rgb += ${CREST_EMIS_RGB} * (${CREST_EMIS_STRENGTH.toFixed(2)} * max(vRelief, 0.0));
-         gl_FragColor.rgb += ${TROUGH_EMIS_RGB} * (${TROUGH_EMIS_STRENGTH.toFixed(2)} * max(-vRelief, 0.0));
-         // vortex eye: additive glow (colour x mask) pooled in the centre troughs.
+         // vortex eye: an additive glow (colour x baked mask) pooled in the centre
+         // troughs. It sits BEFORE the day/night multiply, so the daylight field
+         // modulates it (it glows only where a daylight island crosses the centre, dark
+         // otherwise) rather than painting full-strength over crushed night albedo as a
+         // neon smear. It is emissive because the flat vantage centre catches almost none
+         // of the raking sun, so an albedo tint there crushes to black; the glow carries
+         // the eye in that unlit pocket. (The crest/trough relief tint is NOT emissive
+         // anymore: out in the dune field the sun lights the facets, so that tint rides
+         // the albedo in groundColor; only the unlit centre still needs a glow.)
          gl_FragColor.rgb += vEye * ${EYE_EMISSIVE_RGB} * ${EYE_EMISSIVE_STRENGTH.toFixed(2)};
        }` +
         // day/night: multiply the lit sand (albedo + relief) by the daylight field (night
@@ -795,7 +784,6 @@ export function buildGround(
   const positions = new Float32Array(vcount * 3);
   const colors = new Float32Array(vcount * 3);
   const eyes = new Float32Array(vcount); // per-vertex eye coverage, for the emissive glow
-  const reliefs = new Float32Array(vcount); // per-vertex signed relief k, for the crest/trough emissive
   const v3 = new THREE.Vector3();
   const c = new THREE.Color();
   const ro = RELIEF_CELLS * cell; // neighbour offset for the crest/trough relief read
@@ -818,7 +806,6 @@ export function buildGround(
         (RELIEF_SCALE * ro);
       const eye = eyeMask(v3.x, v3.z, relief);
       eyes[v] = eye;
-      reliefs[v] = relief < -1 ? -1 : relief > 1 ? 1 : relief; // clamped k for the emissive
       groundColor(v3.x, v3.z, c, relief, eye);
       colors[v * 3] = c.r;
       colors[v * 3 + 1] = c.g;
@@ -846,7 +833,6 @@ export function buildGround(
   geom.setAttribute("position", new THREE.BufferAttribute(positions, 3));
   geom.setAttribute("color", new THREE.BufferAttribute(colors, 3));
   geom.setAttribute("aEye", new THREE.BufferAttribute(eyes, 1));
-  geom.setAttribute("aRelief", new THREE.BufferAttribute(reliefs, 1));
   geom.setIndex(new THREE.BufferAttribute(indices, 1));
   const mat = new THREE.MeshLambertMaterial({
     vertexColors: true,
