@@ -92,9 +92,9 @@ function hash2(i: number, j: number): number {
 // present, fading through desert sand to a dark grey floor in the deep-past
 // void. Radius is time, so this is recency literally lighting the map. A
 // low-frequency patch noise breaks the gradient so it reads painted, not banded.
-const COLOR_PALE = new THREE.Color(0xefe8d2); // bright dry summit (the present)
-const COLOR_SAND = new THREE.Color(0xcabb95); // mid desert
-const COLOR_GREY = new THREE.Color(0x6e6860); // faded deep-past floor
+const SAND_GRADIENT_START = new THREE.Color(0xefe8d2); // bright dry summit (the present)
+const SAND_GRADIENT_MID = new THREE.Color(0xcabb95); // mid desert
+const SAND_GRADIENT_END = new THREE.Color(0x6e6860); // faded deep-past floor
 // One smooth era ramp across the whole map: pale summit (the present, at the
 // centre) -> sand at the midpoint -> grey deep-past floor at the outer edge.
 // Spans [0, ERA_GRADIENT_R]; recency literally lighting the map, now a single
@@ -141,9 +141,16 @@ const EYE_EMISSIVE_RGB = `vec3(${_eye.r.toFixed(4)}, ${_eye.g.toFixed(4)}, ${_ey
 // four are eyeball knobs.
 const RELIEF_CELLS = 3; // neighbour offset in cells: the relief's read wavelength
 const RELIEF_SCALE = 0.25; // slope-difference that reaches the full crest/trough tint
-const CREST_LIGHT = 0.05; // crest lightens / trough darkens (a whisper; the sun owns light/dark)
-const CREST_SAT = 0.13; // crest bleaches / trough deepens (now a dominant read)
-const CREST_HUE = 0.022; // crest warms / trough cools (now a dominant read)
+// Crests and troughs tune INDEPENDENTLY (they need not be each other's mirror): the
+// crest knobs fire only where relief > 0, the trough knobs only where relief < 0.
+// Lightness is the sun's axis, so keep these a whisper; hue/sat ride through the
+// lighting and can read harder. CREST_LIGHT lifts crests, TROUGH_DARK sinks troughs.
+const CREST_LIGHT = 0.05; // crest lightens (a whisper; the sun owns light/dark)
+const CREST_SAT = 0.13; // crest bleaches (desaturates the scoured top)
+const CREST_HUE = 0.022; // crest warms
+const TROUGH_DARK = 0.05; // trough darkens (a whisper; the sun owns light/dark)
+const TROUGH_SAT = 0.13; // trough deepens (saturates the shadowed hollow)
+const TROUGH_HUE = 0.022; // trough cools
 
 // Distance fade: the ground's opacity falls to zero between these radii from the
 // CAMERA, so the whole landscape dissolves into the sky dome before it reaches the
@@ -289,23 +296,27 @@ export function groundColor(
   // one continuous ramp: pale -> sand at the midpoint -> grey across [0, edge].
   const r = Math.hypot(x, z);
   const t = Math.min(1, r / ERA_GRADIENT_R);
-  if (t < 0.5) out.copy(COLOR_PALE).lerp(COLOR_SAND, t * 2);
-  else out.copy(COLOR_SAND).lerp(COLOR_GREY, (t - 0.5) * 2);
+  if (t < 0.5) out.copy(SAND_GRADIENT_START).lerp(SAND_GRADIENT_MID, t * 2);
+  else out.copy(SAND_GRADIENT_MID).lerp(SAND_GRADIENT_END, (t - 0.5) * 2);
   // Tint the albedo toward the eye colour (the glow that actually carries it in
   // the dark centre is the emissive term, added in applyGroundMaterial). Folded
   // under the HSL offsets below so the eye still picks up crest/trough shading.
   if (eye > 0) out.lerp(COLOR_EYE, eye * EYE_ALBEDO_STRENGTH);
   const tone = perlin(x / COLOR_WAVELENGTH, z / COLOR_WAVELENGTH); // [-1, 1]
-  // crests (k > 0) warm, bleach and lighten; troughs (k < 0) cool, deepen and
-  // darken. Hue/sat shift against k's sign, lightness with it.
+  // Split the relief into a crest amount and a trough amount, each 0..1, so the two
+  // tune independently: crests warm, bleach and lighten; troughs cool, deepen and
+  // darken. (Setting the TROUGH_* knobs equal to the CREST_* ones recovers the old
+  // symmetric mirror.)
   const k = relief < -1 ? -1 : relief > 1 ? 1 : relief;
-  // The painted wobble and the relief tint are two HSL offsets; fold them into one
-  // getHSL/setHSL roundtrip rather than two (this runs per vertex across the whole
+  const crest = k > 0 ? k : 0;
+  const trough = k < 0 ? -k : 0;
+  // The painted wobble and the relief tint are HSL offsets; fold them into one
+  // getHSL/setHSL roundtrip rather than several (this runs per vertex across the whole
   // ground build, so the saved RGB<->HSL conversions matter).
   out.getHSL(_hsl);
-  _hsl.h += tone * 0.01 - k * CREST_HUE;
-  _hsl.s += tone * 0.03 - k * CREST_SAT;
-  _hsl.l += tone * 0.04 + k * CREST_LIGHT;
+  _hsl.h += tone * 0.01 - crest * CREST_HUE + trough * TROUGH_HUE;
+  _hsl.s += tone * 0.03 - crest * CREST_SAT + trough * TROUGH_SAT;
+  _hsl.l += tone * 0.04 + crest * CREST_LIGHT - trough * TROUGH_DARK;
   out.setHSL(_hsl.h, _hsl.s, _hsl.l);
   return out;
 }
