@@ -53,9 +53,21 @@ const MOVE = {
   walk: { max: 5, accel: 30, decel: 50 },
   skate: { max: 80, accel: 30, decel: 15 },
   // the eye lifts this much the instant you start skating: a small, deliberate cue
-  // that the button did something, well short of an actual fly-height float. The
-  // ground-follow filter eases it in and out, so it reads as rising onto the glide.
+  // that the button did something, well short of an actual fly-height float. PURELY
+  // cosmetic: eased in/out and added on top of the physics eye height, so it never
+  // feeds the vertical velocity (folding it into the follow target would inject a
+  // fake 0.8u/jolt of vy every time Shift was tapped, and could trip a launch).
   hoverLift: 0.8,
+  // crest hops. The eye is a point under gravity that the ground pushes UP but never
+  // pulls DOWN: climb a dune grounded and you track the surface, but crest it fast and
+  // the surface drops out from under you, so you keep the climb's upward speed and arc.
+  // gravity pulls the hop back down; launchMin is the climb speed (units/sec) you must
+  // exceed to leave the ground at all, so a walk stays planted and only a fast skate-
+  // crest pops — raise it if rippled upslopes feel twitchy; vyMax caps the pop so a
+  // sharp crest can't fling the eye. All live-tunable via window.MOVE against real dunes.
+  gravity: 50,
+  launchMin: 4,
+  vyMax: 12,
   // ground-follow stiffness: a fixed time-constant filter on eye height. At a walk the
   // terrain target barely moves so the feet stay planted; at skate speed the target
   // changes fast and the same filter smooths the dune bumps that would otherwise jolt
@@ -1245,6 +1257,20 @@ function createController(camera: THREE.PerspectiveCamera, dom: HTMLElement) {
   const vel = new THREE.Vector3(); // carried horizontal velocity (xz; y stays 0)
   let flying = false;
 
+  // vertical eye state, kept separate from camera.position.y so the cosmetic skate
+  // lift can ride on top without feeding the physics. eyeY is the lift-free physics
+  // height; vy is non-zero only mid-hop; vSurf is the smoothed rate the ground rises
+  // under the body (the speed a crest launch inherits). lastAppliedY is what we last
+  // wrote to camera.position.y, so an external write (spawn settle, teleport) shows up
+  // as a mismatch next frame and we resync onto it instead of fighting it.
+  let eyeY = camera.position.y;
+  let vy = 0;
+  let grounded = true;
+  let prevBodyTop = camera.position.y;
+  let vSurf = 0;
+  let liftCur = 0;
+  let lastAppliedY = camera.position.y;
+
   const onKeyDown = (e: KeyboardEvent) => {
     if (e.code === "KeyF") {
       flying = !flying; // dev fly toggle; drop carried momentum so neither mode lurches
@@ -1345,24 +1371,62 @@ function createController(camera: THREE.PerspectiveCamera, dom: HTMLElement) {
       }
     }
 
-    // pin the eye to the baked ground, smoothed. The skate lift raises it a touch as a
-    // tactile cue; the time-constant filter keeps the feet planted at a walk and smooths
-    // dune bumps at skate speed where rigid tracking would jolt the camera. Sample at the
-    // body AND a velocity-scaled look-ahead, taking the max so a rising slope lifts the
-    // eye before you reach it (a climb, not a snap) while a crest still eases down.
-    const lift = skating ? MOVE.hoverLift : 0;
+    // pin the eye to the baked ground, smoothed, with a ballistic launch over fast-
+    // crested dunes. Sample at the body AND a velocity-scaled look-ahead: the max lifts
+    // the eye onto a rising slope before you reach it (a climb, not a snap or a clip),
+    // while the body sample alone governs leaving and landing.
     const gHere = sampleHeight(camera.position.x, camera.position.z);
     const gAhead = sampleHeight(
       camera.position.x + vel.x * MOVE.lookAhead,
       camera.position.z + vel.z * MOVE.lookAhead,
     );
-    const targetY = Math.max(gHere, gAhead) + EYE_HEIGHT + lift;
-    camera.position.y += (targetY - camera.position.y) * (1 - Math.exp(-MOVE.followK * dt));
-    // hard floor: the smoothing must never lag the eye below the surface on a fast climb
-    // (the clip-through-the-dune bug). Snap up to the ground at the body; downhill is
-    // unaffected because there the eye already sits above this floor.
-    const floorY = gHere + EYE_HEIGHT;
-    if (camera.position.y < floorY) camera.position.y = floorY;
+    const bodyTop = gHere + EYE_HEIGHT; // the surface under the feet, eye-high
+
+    // resync if something outside the controller moved the eye (spawn settle, teleport):
+    // those write the bare surface + EYE_HEIGHT, so adopt it as the base and drop any
+    // carried vertical state rather than smoothing/launching across the discontinuity.
+    if (Math.abs(camera.position.y - lastAppliedY) > 1e-4) {
+      eyeY = camera.position.y;
+      vy = 0;
+      grounded = true;
+      vSurf = 0;
+      prevBodyTop = bodyTop;
+    }
+
+    // smoothed rate the ground rises under the body: the climb speed a crest inherits.
+    const vyBody = (bodyTop - prevBodyTop) / dt;
+    vSurf += (vyBody - vSurf) * (1 - Math.exp(-MOVE.followK * dt));
+    prevBodyTop = bodyTop;
+
+    if (grounded) {
+      if (vSurf > MOVE.launchMin && vyBody < vSurf * 0.5) {
+        // crest: the ground was climbing fast and has now turned over (the raw rate
+        // collapsed below half the smoothed climb) → leave it carrying that speed.
+        grounded = false;
+        vy = Math.min(vSurf, MOVE.vyMax);
+      } else {
+        // tracking the surface: the time-constant filter keeps the feet planted at a
+        // walk and smooths dune bumps at skate speed where rigid tracking would jolt.
+        const followY = Math.max(gHere, gAhead) + EYE_HEIGHT;
+        eyeY += (followY - eyeY) * (1 - Math.exp(-MOVE.followK * dt));
+        if (eyeY < bodyTop) eyeY = bodyTop; // hard floor: never clip the body on a climb
+      }
+    }
+    if (!grounded) {
+      vy -= MOVE.gravity * dt;
+      eyeY += vy * dt;
+      if (eyeY <= bodyTop) {
+        eyeY = bodyTop; // land on the true surface under the body
+        vy = 0;
+        grounded = true;
+      }
+    }
+
+    // cosmetic skate lift, eased in/out, applied on top of the physics eye height.
+    const liftTarget = skating ? MOVE.hoverLift : 0;
+    liftCur += (liftTarget - liftCur) * (1 - Math.exp(-MOVE.followK * dt));
+    camera.position.y = eyeY + liftCur;
+    lastAppliedY = camera.position.y;
 
     return skating ? "skate" : "walk";
   }
