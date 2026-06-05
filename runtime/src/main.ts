@@ -94,8 +94,14 @@ const TIER_COLOR = [0xb89b6e, 0xdcab4c, 0xff5a2c].map((c) => new THREE.Color(c))
 // colour tells you which region lies which way ("redder ahead -> heading east").
 // Landmark tiers keep their beacon colours; this only repaints tier 0. A per-book
 // lightness jitter stops dense clusters merging into a single slab. Eyeball knobs.
-const GEO_SAT = 0.35; // hue vividness (low = desert-muted, high = map-key loud)
-const GEO_LIGHT = 0.55; // base lightness of an ordinary book
+// Saturation is the lever that carries BOTH the close-up vividness and the distance
+// read: up close, low saturation washes pale; at distance the book goes semi-transparent
+// (distance fade) and blends with the tan sand behind it, so a saturated hue stays
+// coloured against the dunes while a pale one greys out into them. Pushed up from a washed
+// 0.35. Lightness sits at/below 0.5 so the hue reads as colour rather than bleaching toward
+// white under the daylight (HSL desaturates perceptually as lightness climbs past 0.5).
+const GEO_SAT = 0.6; // hue vividness (low = desert-muted, high = map-key loud)
+const GEO_LIGHT = 0.5; // base lightness of an ordinary book
 const GEO_LIGHT_VAR = 0.12; // +/- per-book lightness scatter (the anti-merge speckle)
 const HUE_OFFSET = 0.0; // rotate the wheel so a chosen region lands on a chosen hue
 
@@ -115,14 +121,15 @@ const PAGE_CREAM = new THREE.Color(0xece2cc);
 // field is (0 = near-black, 1 = full colour always; lower kills the cross-disc
 // geo-hue read in exchange for a starker reveal). GLOW_BOOST is the extra
 // additive glow at the centre of the pool. Eyeball knobs.
-const GLOW_RADIUS = 36; // books dark beyond this horizontal distance from the player
+const GLOW_RADIUS = 48; // books dark beyond this horizontal distance from the player
 const GLOW_INNER = 2; // tight full-brightness core at the player's feet; smooth taper to GLOW_RADIUS
 const GLOW_REST_DIM = 0.12; // resting brightness of a near book outside the pool (0 = black)
 const GLOW_REST_FAR = 0.4; // resting brightness once distance-faded; higher than REST_DIM
 //   so far books are dim dusty specks, not max-contrast black confetti. The dark
 //   specks on bright sand were the worst of the sub-pixel flicker, so lifting the
 //   far floor trades a little of the stark dark field for a calmer horizon.
-const GLOW_BOOST = 0.6; // additive bloom at the pool centre
+const GLOW_BOOST = 1.3; // additive bloom at the pool centre: the reactive light is now
+//   the whole "life" of the field (the hover/bob was removed), so the pool is the signal
 
 // Self-emission so a book is a coloured speck even where the night lighting and the
 // proximity dim would otherwise lose it in the dark (the whole field had sunk into
@@ -132,17 +139,15 @@ const GLOW_BOOST = 0.6; // additive bloom at the pool centre
 // sky). EMISSIVE_NEAR is the extra emission the proximity pool adds, so a book by the
 // player burns brighter than the distant field (see applyProximityGlow).
 const GLOW_EMISSIVE = 0.14; // base self-glow as a fraction of the book's hue
-const GLOW_EMISSIVE_NEAR = 0.5; // extra emission at the pool centre
+const GLOW_EMISSIVE_NEAR = 0.85; // extra emission at the pool centre
 
-// The field is never quite still, so it reads as alive rather than as plotted data.
-// The life is MOTION, not a brightness flicker (scaling the emissive made dim-hued
-// books barely move while bright ones winked hard, an inconsistent read). Two effects
-// layer onto the player's proximity pool, both driven by the shared uDriftTime (seconds)
-// so they stay in step with the drifting weather:
-//   - BOB: each book hovers gently above its seat on its OWN hashed phase, so the field
-//     shimmers with uncoordinated motion rather than a marching swell. Strictly positive
-//     (0..AMP) so a book never dips below the sand, where it would clip and read as the
-//     dark "waves" a signed swell produced.
+// What keeps the field from reading as static plotted data, both REACTIVE rather than a
+// constant animation (an earlier per-book hover/bob was removed: with no contact shadows
+// to sell the lift it read as aimless drift):
+//   - The PROXIMITY POOL (applyProximityGlow, GLOW_* above): books rest dim and blaze to
+//     their full colour plus an additive bloom as the player comes within GLOW_RADIUS, so
+//     walking the disc carries a travelling light that reacts to where you are. This is the
+//     field's "life" now.
 //   - REVEAL: the sun-reveal. Where a daylight break drifts over a book it lights up in
 //     step with the sand it stands on: a second tap of the SAME daylightAt field the
 //     ground reads for its day/night tint, cast in the SAME warm DAY colour, so the two
@@ -151,9 +156,23 @@ const GLOW_EMISSIVE_NEAR = 0.5; // extra emission at the pool centre
 //     (a book in full sun emits close to its own hue, warmed). It is gated by daylightAt,
 //     so at night it falls to zero and only the steady uEmissive floor remains, the floor
 //     that keeps books visible in the dark in the first place.
-const BOB_AMP = 0.07; // world units a book hovers above its seat (0..AMP, never below)
-const BOB_SPEED = 0.5; // rad/s; period ~12s
 const GLOW_REVEAL = 2.0; // sun-reveal strength: book self-light at full daylight
+
+// Temperature: as the proximity pool reaches a book it WARMS, a painterly hue rotation
+// toward a warm anchor rather than a flat orange tint (which would muddy). Each hue heats
+// toward its own warm neighbour -- a cool blue rotates toward cyan, a green toward yellow,
+// a purple toward red -- so the reactive light reads as HEAT while staying vivid. The
+// anchor sits at YELLOW, not orange: with an orange anchor the shortest hue-arc would send
+// blue the wrong way (toward magenta); a yellow anchor is what makes blue->cyan. Strength
+// is the max fraction of the arc to the anchor traversed at the pool centre, kept moderate
+// so books warm toward their neighbour instead of all converging on yellow. The shift falls
+// off with the pool (glow), so a book cools back to its resting hue as the player leaves.
+const WARM_HUE = 0.19; // warm anchor on the hue wheel (~69deg, yellow)
+const WARM_STRENGTH = 0.18; // max hue-arc fraction rotated toward warm at the pool centre.
+// Eased down from 0.3: the warm shift was rotating the red-orange landmark books toward
+// yellow-orange, diluting a colour the player reads as a notability signal. The landmark
+// hue sits near the warm anchor so its arc is already small; lowering strength quiets it
+// while cool colours (far from the anchor) still warm visibly -- blue->cyan survives.
 
 interface GlowUniforms {
   uPlayer: PlayerUniform;
@@ -356,27 +375,16 @@ function applyProximityGlow(
     shader.vertexShader = shader.vertexShader
       .replace(
         "#include <common>",
-        "#include <common>\nvarying vec2 vGlowXZ;\nvarying float vViewDist;\n" +
-          "uniform float uDriftTime;\n" +
-          // Dave Hoskins hash12: scales the coord down before any fract, so it keeps
-          // precision out at the disc's ~7000u edge where fract(sin(dot)*43758) aliases
-          // adjacent books to the same value. Drives each book's own bob phase. Returns 0..1.
-          "float bookHash(vec2 p){ vec3 q = fract(vec3(p.xyx) * 0.1031); q += dot(q, q.yzx + 33.33); return fract((q.x + q.y) * q.z); }",
+        "#include <common>\nvarying vec2 vGlowXZ;\nvarying float vViewDist;",
       )
-      // Bob each book. project_vertex has already set gl_Position from mvPosition; recompute
-      // it in world space so the motion is rigid regardless of the per-book spine scale baked
-      // into instanceMatrix (an object-space offset would scale with thickness). Phase keys
-      // off the instance ORIGIN, not the per-vertex position, so a whole book moves as one.
-      //   _bob:  per-book hover, own hashed phase, 0..AMP so it only ever rises.
+      // Carry the book's world xz (for the proximity pool) and its view distance (for the
+      // distance dim) to the fragment. No vertex displacement -- the per-book hover/bob was
+      // removed -- so project_vertex's gl_Position stands unchanged.
       .replace(
         "#include <project_vertex>",
         `#include <project_vertex>
-         vec4 _O = modelMatrix * instanceMatrix * vec4(0.0, 0.0, 0.0, 1.0);
          vec4 _wpos = modelMatrix * instanceMatrix * vec4(transformed, 1.0);
          vGlowXZ = _wpos.xz;
-         float _bob = (0.5 + 0.5 * sin(uDriftTime * ${BOB_SPEED.toFixed(3)} + bookHash(_O.xz) * 6.2831853)) * ${BOB_AMP.toFixed(3)};
-         _wpos.y += _bob;
-         gl_Position = projectionMatrix * viewMatrix * _wpos;
          vViewDist = length(mvPosition.xyz);`,
       );
     shader.fragmentShader = shader.fragmentShader
@@ -386,7 +394,10 @@ function applyProximityGlow(
           "uniform float uGlowRadius;\nuniform float uGlowInner;\n" +
           "uniform float uRestDim;\nuniform float uRestFar;\nuniform float uGlowBoost;\n" +
           "uniform float uEmissive;\nuniform float uEmissiveNear;\n" +
-          DAYLIGHT_FRAG_COMMON,
+          DAYLIGHT_FRAG_COMMON +
+          // rgb<->hsv (Iñigo Quílez), for the temperature warm-shift in the pool below
+          "\nvec3 rgb2hsv(vec3 c){vec4 K=vec4(0.,-1./3.,2./3.,-1.);vec4 p=mix(vec4(c.bg,K.wz),vec4(c.gb,K.xy),step(c.b,c.g));vec4 q=mix(vec4(p.xyw,c.r),vec4(c.r,p.yzx),step(p.x,c.r));float d=q.x-min(q.w,q.y);return vec3(abs(q.z+(q.w-q.y)/(6.*d+1e-10)),d/(q.x+1e-10),q.x);}" +
+          "\nvec3 hsv2rgb(vec3 c){vec3 r=clamp(abs(mod(c.x*6.+vec3(0.,4.,2.),6.)-3.)-1.,0.,1.);return c.z*mix(vec3(1.),r,c.y);}",
       )
       .replace(
         "#include <opaque_fragment>",
@@ -411,7 +422,18 @@ function applyProximityGlow(
           // falls to zero at night, leaving only the floor that keeps books visible there.
           `gl_FragColor.rgb += diffuseColor.rgb * (uEmissive + glow * uEmissiveNear);
            float _sun = daylightAt(vGlowXZ, vViewDist);
-           gl_FragColor.rgb += diffuseColor.rgb * ${DAY_GLSL} * (_sun * ${GLOW_REVEAL.toFixed(3)});`,
+           gl_FragColor.rgb += diffuseColor.rgb * ${DAY_GLSL} * (_sun * ${GLOW_REVEAL.toFixed(3)});` +
+          // temperature: warm the pooled book toward the yellow anchor by the shortest hue
+          // arc (blue->cyan, green->yellow, purple->red), scaled by the pool so it heats on
+          // approach and cools as the player leaves. Low-saturation page cream barely moves.
+          `
+           {
+             float _warmth = glow * ${WARM_STRENGTH.toFixed(3)};
+             vec3 _hsv = rgb2hsv(gl_FragColor.rgb);
+             float _dh = mod(${WARM_HUE.toFixed(3)} - _hsv.x + 0.5, 1.0) - 0.5;
+             _hsv.x = fract(_hsv.x + _dh * _warmth);
+             gl_FragColor.rgb = hsv2rgb(_hsv);
+           }`,
       );
   };
 }
