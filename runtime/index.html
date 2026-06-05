@@ -4,7 +4,51 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Wikipedia Exploration — walker</title>
+    <!-- Spectral: a screen-tuned old-style serif. The piece is a desert of books;
+         the type should read like print, not OS chrome. One face throughout (the
+         dev perf readout stays monospace); weight + italic carry the hierarchy. -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Spectral:ital,wght@0,400;0,500;0,600;1,400;1,500&display=swap"
+      rel="stylesheet"
+    />
     <style>
+      /* ── palette ─────────────────────────────────────────────────────────
+         The UI is a museum label laid over a Kuindzhi painting: ink on bone for
+         the deliberate panels, bone light for text that floats over the dark
+         scene (compass, glance, prompts). One accent, drawn from the world's only
+         cool note — the vortex-eye teal — reserved for "the way out": links, the
+         travel prompt, the armed reticle, your own bookmarks. Tuned as variables
+         so the accent (and the whole temperature) can be re-judged against the
+         real scene in seconds. */
+      :root {
+        --ink: #2c2317; /* primary text on bone */
+        --ink-soft: #5c4e38; /* secondary text on bone */
+        --bone: #ece2cc; /* the panel "paper" */
+        --bone-text: #e9dfc8; /* light text floating over the dark scene */
+        --rule: rgba(44, 35, 23, 0.2); /* hairline divisions on bone */
+        /* accent follows material temperature. The cool teal earns its keep over
+           the cool DARK SCENE (reticle, compass marks, travel keycap); on the WARM
+           PAPER card a cool accent reads clinical, so the card uses a warm accent —
+           a muted oxblood/sienna, the old-book "red-letter" note that belongs to
+           cream paper and harmonises with the desert browns. */
+        --accent: #2a8f86; /* teal — scene only, never on the card */
+        --accent-bright: #63d2c6; /* teal on the dark scene (reticle, marks) */
+        --ink-accent: #9e4a2a; /* warm accent on the bone card (link, bookmarked) */
+        --serif: "Spectral", Georgia, "Times New Roman", serif;
+        /* --engrave is the throughline for ALL floating HUD text: a fine dark
+           casing (a ring of 1px shadows forming a continuous outline) plus a soft
+           glow. Every chromeless element — compass, glance, status line, travel
+           prompt — wears the same treatment, so the HUD reads as one language:
+           light engraved into the scene. --case is the casing colour, dialled in
+           one place. (The paper card is ink-on-bone and needs none of this.) */
+        --case: rgba(10, 7, 3, 0.82);
+        --engrave:
+          1px 1px 0 var(--case), -1px 1px 0 var(--case), 1px -1px 0 var(--case),
+          -1px -1px 0 var(--case), 0 1px 0 var(--case), 0 -1px 0 var(--case),
+          1px 0 0 var(--case), -1px 0 0 var(--case), 0 0 8px rgba(0, 0, 0, 0.5);
+      }
       html,
       body {
         margin: 0;
@@ -12,131 +56,250 @@
         overflow: hidden;
         background: #d9c9a8;
       }
+
+      /* ── load / error slot (bottom-left) ─────────────────────────────────
+         Only shows the loading messages and a load-failure message; cleared to
+         empty once the world is up (the old persistent flavour/controls text was
+         debug-era and is gone). */
       #info {
         position: fixed;
-        left: 12px;
-        bottom: 12px;
-        font: 12px/1.5 system-ui, sans-serif;
-        color: #5a4a32;
+        left: 14px;
+        bottom: 13px;
+        font-family: var(--serif);
+        font-size: 13px;
+        color: var(--bone-text);
+        text-shadow: var(--engrave);
         pointer-events: none;
         user-select: none;
       }
-      /* crosshair: a faint dot marking what the look-at picker is aiming at */
+
+      /* ── reticle ─────────────────────────────────────────────────────────
+         A faint bone dot at rest; when the look-at picker has an inspectable book
+         under it (.armed from JS), the dot warms to the accent and gains a soft
+         halo ring — the one affordance the old UI was missing. */
       #reticle {
         position: fixed;
         left: 50%;
         top: 50%;
-        width: 5px;
-        height: 5px;
-        margin: -2.5px 0 0 -2.5px;
+        width: 4px;
+        height: 4px;
+        margin: -2px 0 0 -2px;
         border-radius: 50%;
-        background: rgba(90, 74, 50, 0.55);
+        background: rgba(233, 223, 200, 0.55);
+        box-shadow: 0 0 2px rgba(0, 0, 0, 0.6);
         pointer-events: none;
         user-select: none;
+        transition:
+          background 0.15s ease,
+          box-shadow 0.15s ease;
       }
-      /* glance label: name / description / years for the targeted book. Sits
-         just below the reticle, ambient, never interactive. */
+      #reticle.armed {
+        background: var(--accent-bright);
+        box-shadow:
+          0 0 0 4px rgba(99, 210, 198, 0.18),
+          0 0 6px rgba(0, 0, 0, 0.5);
+      }
+
+      /* ── shared contextual-action bits ───────────────────────────────────
+         The piece must be self-explanatory — no tutorial, eventually touch — so
+         every contextual moment spells out its action in ONE component: .act is
+         the verb line, .key is a keycap chip. The keycap is neutral (bone outline
+         on a dark fill), NOT teal: keycaps are instructional and appear everywhere,
+         so colouring them would spend the accent that means "the way out" (links,
+         armed reticle, bookmarks). A future touch build swaps the keycap for a
+         "tap" wording rather than restyling. Used by the glance and the tp prompt. */
+      .act {
+        margin-top: 6px;
+        font-size: 12px;
+        letter-spacing: 1px;
+        text-transform: uppercase;
+        opacity: 0.85;
+      }
+      .key {
+        display: inline-block;
+        min-width: 1.15em;
+        margin: 0 2px;
+        padding: 1px 6px;
+        border-radius: 3px;
+        border: 1px solid rgba(233, 223, 200, 0.5);
+        background: rgba(18, 14, 9, 0.5);
+        color: var(--bone-text);
+        font-weight: 600;
+        letter-spacing: 0;
+        text-align: center;
+        text-transform: none;
+        text-shadow: 0 1px 1px rgba(0, 0, 0, 0.6);
+      }
+
+      /* ── intro controls (near the spawn centre only) ─────────────────────
+         The basic movement controls — the things the contextual prompts don't
+         cover. A self-explanatory intro, no tutorial: they fade in (timed) while
+         the player is within a radius of the spawn centre (the empty plaza they
+         survey) and fade out once they leave it to explore. JS just toggles the
+         .show class at the threshold; the CSS transition does the fade. Sits just
+         below screen centre so it reads as an intro, not a status bar. */
+      #controls {
+        position: fixed;
+        left: 50%;
+        top: calc(50% + 52px);
+        transform: translateX(-50%);
+        text-align: center;
+        font-family: var(--serif);
+        color: var(--bone-text);
+        text-shadow: var(--engrave);
+        pointer-events: none;
+        user-select: none;
+        opacity: 0;
+        transition: opacity 0.8s ease;
+      }
+      #controls.show {
+        opacity: 1;
+      }
+      .ctl {
+        font-size: 12px;
+        letter-spacing: 1px;
+        text-transform: uppercase;
+        line-height: 2;
+        opacity: 0.92;
+      }
+
+      /* ── glance (chromeless wall text) ───────────────────────────────────
+         The light, ambient register: name / descriptor / years for the book you
+         are looking at. No card, no scrim box — it wears the shared --engrave
+         casing (the cartographic label technique: a fine outline keeping it legible
+         over any spine colour) so it belongs to the same family as the compass and
+         status line rather than reading as its own punchy thing. */
       #glance {
         position: fixed;
         left: 50%;
-        top: calc(50% + 22px);
+        top: calc(50% + 28px);
         transform: translateX(-50%);
-        min-width: 180px;
-        max-width: 360px;
-        padding: 8px 12px;
-        font: 13px/1.4 system-ui, sans-serif;
-        color: #4a3c28;
-        background: rgba(217, 201, 168, 0.82);
-        border-radius: 4px;
+        max-width: 460px;
         text-align: center;
+        color: var(--bone-text);
+        font-family: var(--serif);
+        text-shadow: var(--engrave);
         pointer-events: none;
         user-select: none;
         display: none;
       }
       #glance .name {
+        font-size: 23px;
         font-weight: 600;
+        letter-spacing: 0.2px;
       }
       #glance .desc {
-        opacity: 0.85;
+        font-size: 15.5px;
+        font-style: italic;
+        opacity: 0.92;
+        margin-top: 2px;
       }
       #glance .years {
-        opacity: 0.7;
+        font-size: 14px;
+        opacity: 0.78;
+        margin-top: 2px;
         font-variant-numeric: tabular-nums;
       }
-      /* inspect overlay: the deliberate stop. Backdrop captures clicks (closes
-         + re-locks); the card holds the Wikipedia link. */
+
+      /* ── inspect / travel panel (the deliberate stop) ────────────────────
+         The card is an archival catalogue card: bone paper, ink, a rule under the
+         name. No drop shadow (shadows read as floating chrome); a hairline border
+         and the deepened scrim seat it. The backdrop captures clicks to close. */
       #overlay {
         position: fixed;
         inset: 0;
         display: none;
         align-items: center;
         justify-content: center;
-        background: rgba(60, 50, 34, 0.45);
+        background: radial-gradient(
+          ellipse at center,
+          rgba(16, 12, 7, 0.66),
+          rgba(16, 12, 7, 0.46)
+        );
       }
       #card {
-        min-width: 320px;
-        max-width: 460px;
-        padding: 24px 28px;
-        background: #e7dcc2;
-        border-radius: 8px;
-        box-shadow: 0 12px 40px rgba(0, 0, 0, 0.3);
-        font: 15px/1.5 system-ui, sans-serif;
-        color: #3a2f1f;
+        min-width: 330px;
+        max-width: 440px;
+        padding: 26px 30px 22px;
+        /* slightly translucent + a faint blur: the deliberate panel is still
+           paper, but reads as the same atmospheric light condensed, not an opaque
+           sticker dropped on the scene. */
+        background: rgba(236, 226, 204, 0.93);
+        backdrop-filter: blur(3px);
+        border: 1px solid rgba(44, 35, 23, 0.18);
+        border-radius: 2px;
+        color: var(--ink);
+        font-family: var(--serif);
+        font-size: 15px;
+        line-height: 1.5;
       }
       #card .name {
-        font-size: 22px;
+        font-size: 24px;
         font-weight: 600;
-        margin-bottom: 2px;
+        letter-spacing: 0.2px;
+        margin: 0 0 8px;
+        padding-bottom: 8px;
+        border-bottom: 1px solid var(--rule);
       }
       #card .desc {
-        opacity: 0.85;
+        font-style: italic;
+        color: var(--ink-soft);
       }
       #card .years {
-        opacity: 0.7;
-        margin-top: 2px;
+        color: var(--ink-soft);
+        opacity: 0.85;
+        margin-top: 3px;
         font-variant-numeric: tabular-nums;
       }
-      #card a {
-        display: inline-block;
-        margin-top: 18px;
-        padding: 9px 16px;
-        background: #2f6cff;
-        color: #fff;
-        text-decoration: none;
-        border-radius: 5px;
-        font-weight: 600;
-      }
+      /* Wikipedia link as a quiet ruled text link, not a CTA button; the bookmark
+         as bare text that takes the accent once set. No web-blue anywhere. */
       #card .actions {
-        margin-top: 18px;
+        margin-top: 20px;
         display: flex;
-        gap: 10px;
-        align-items: center;
+        gap: 22px;
+        align-items: baseline;
       }
       #card a {
-        margin-top: 0;
+        color: var(--ink-accent);
+        text-decoration: none;
+        border-bottom: 1px solid var(--ink-accent);
+        padding-bottom: 1px;
+        font-weight: 500;
+      }
+      #card a:hover {
+        color: var(--ink);
+        border-color: var(--ink);
       }
       #card button {
-        padding: 9px 16px;
+        background: none;
         border: none;
-        border-radius: 5px;
+        padding: 0;
         cursor: pointer;
-        background: #cdbd99;
-        color: #3a2f1f;
+        color: var(--ink-soft);
         font: inherit;
-        font-weight: 600;
+        font-weight: 500;
+      }
+      #card button:hover {
+        color: var(--ink);
       }
       #card button.on {
-        background: #2f6cff;
-        color: #fff;
+        color: var(--ink-accent);
       }
       #card .hint {
-        margin-top: 14px;
-        font-size: 12px;
+        margin-top: 16px;
+        font-size: 11px;
+        letter-spacing: 0.6px;
+        text-transform: uppercase;
+        color: var(--ink-soft);
         opacity: 0.55;
       }
-      /* compass: a horizontal strip anchored on ⊙ (origin = the present), not
-         cardinal N/E/S/W. Markers slide by bearing relative to where you face.
-         Density-faded near the dense centre (set from JS), present in the void. */
+
+      /* ── compass (the keeper) ────────────────────────────────────────────
+         The piece's signature: a horizontal strip of time, anchored on ⊙ (the
+         present) not cardinal N/E/S/W. It lives over the dark storm sky, so the
+         ink-on-light of the old build read as near-invisible grey — it is bone
+         light here, with a shadow halo. Markers slide by bearing relative to
+         facing; density-faded near the dense centre (set from JS). */
       #compass {
         position: fixed;
         left: 50%;
@@ -146,25 +309,26 @@
         height: 34px;
         pointer-events: none;
         user-select: none;
-        font: 14px system-ui, sans-serif;
-        color: #4a3c28;
+        font-family: var(--serif);
+        color: var(--bone-text);
+        text-shadow: var(--engrave);
       }
       #compass-track {
         position: absolute;
         left: 0;
         right: 0;
         top: 22px;
-        height: 2px;
-        background: rgba(90, 74, 50, 0.3);
+        height: 1px;
+        background: rgba(233, 223, 200, 0.22);
       }
       #compass-notch {
         position: absolute;
         left: 50%;
         top: 14px;
-        width: 2px;
+        width: 1px;
         height: 16px;
-        margin-left: -1px;
-        background: rgba(90, 74, 50, 0.7);
+        margin-left: -0.5px;
+        background: rgba(233, 223, 200, 0.65);
       }
       #compass-era {
         position: absolute;
@@ -172,7 +336,9 @@
         top: 0;
         transform: translateX(-50%);
         font-size: 12px;
-        opacity: 0.8;
+        letter-spacing: 1px;
+        text-transform: uppercase;
+        opacity: 0.85;
         font-variant-numeric: tabular-nums;
         white-space: nowrap;
       }
@@ -183,14 +349,14 @@
         font-size: 16px;
         line-height: 1;
       }
-      .cmark.origin {
-        color: #7a6038;
-      }
+      /* the time axis reads as warm light; your own bookmarks take the cool accent
+         so "mine" stands apart from "the world's" — and never the old web-blue. */
+      .cmark.origin,
       .cmark.past {
-        color: #7a6038;
+        color: #d9c49d;
       }
       .cmark.bookmark {
-        color: #2f6cff;
+        color: var(--accent-bright);
       }
       #compass-label {
         position: absolute;
@@ -200,84 +366,91 @@
         font-size: 13px;
         white-space: nowrap;
         text-align: center;
-        color: #3a2f1f;
-        background: rgba(217, 201, 168, 0.85);
-        padding: 2px 8px;
-        border-radius: 4px;
+        color: var(--bone-text);
+        text-shadow: var(--engrave);
         display: none;
       }
-      /* teleporter prompt: appears at the foot of the screen when you stand in a
-         stone circle. Cool blue to match the light shaft and set travel apart from
-         the warm book inspect. Never interactive (the T key drives it). */
+
+      /* ── teleporter prompt ───────────────────────────────────────────────
+         "Where am I + how to leave" — place information, the same category as the
+         compass's "when am I", so it docks just beneath the compass in the top
+         orientation cluster rather than floating at the foot of the screen. This
+         keeps the centre reserved for the gaze prompt (the book glance): the two
+         are different kinds of information and can be on screen at once, so they
+         must not share the centre. Same engraved-light family; the cool accent
+         rides only the keycap. Never interactive (T drives it). */
       #tp-prompt {
         position: fixed;
         left: 50%;
-        bottom: 60px;
+        top: 70px;
         transform: translateX(-50%);
-        padding: 9px 18px;
-        font: 14px/1.4 system-ui, sans-serif;
-        color: #dfe8ff;
-        background: rgba(31, 52, 110, 0.55);
-        border: 1px solid rgba(47, 108, 255, 0.6);
-        border-radius: 6px;
+        font-family: var(--serif);
+        color: var(--bone-text);
         text-align: center;
+        text-shadow: var(--engrave);
         pointer-events: none;
         user-select: none;
         display: none;
       }
       #tp-prompt .tp-here {
+        font-size: 18px;
         font-weight: 600;
       }
-      #tp-prompt .tp-act {
-        margin-top: 2px;
-        font-size: 13px;
-        opacity: 0.85;
-      }
-      #tp-prompt kbd {
-        font: inherit;
-        font-weight: 600;
-        padding: 1px 6px;
-        border-radius: 4px;
-        background: rgba(47, 108, 255, 0.55);
-        color: #fff;
-      }
-      /* travel menu: the destination list, reusing #overlay/#card. The rows are
-         the 26 anchors (current one omitted), nearest first. */
+
+      /* ── travel list (reuses #overlay/#card) ─────────────────────────────
+         The 26 anchors as an index: flat rows divided by hairlines, hover lights
+         an accent edge. No tan blocks, no blue hover. The seat name stays in
+         readable italic (uppercasing a person's name reads wrong). */
       #card .tp-list {
-        margin-top: 16px;
-        max-height: 52vh;
+        margin-top: 14px;
+        max-height: 54vh;
         overflow-y: auto;
         display: flex;
         flex-direction: column;
-        gap: 6px;
       }
       #card .tp-dest {
         display: flex;
         flex-direction: column;
         align-items: flex-start;
         width: 100%;
-        padding: 8px 12px;
+        padding: 9px 10px;
         text-align: left;
+        background: none;
         border: none;
-        border-radius: 5px;
-        cursor: pointer;
-        background: #cdbd99;
-        color: #3a2f1f;
+        border-left: 2px solid transparent;
+        border-bottom: 1px solid rgba(44, 35, 23, 0.12);
+        color: var(--ink);
         font: inherit;
+        cursor: pointer;
       }
       #card .tp-dest:hover {
-        background: #2f6cff;
-        color: #fff;
+        background: rgba(44, 35, 23, 0.05);
+        border-left-color: var(--ink-accent);
       }
       #card .tp-dest .tp-label {
         font-weight: 600;
+        font-size: 15px;
       }
       #card .tp-dest .tp-meta {
-        font-size: 12px;
-        opacity: 0.7;
+        font-style: italic;
+        font-size: 12.5px;
+        color: var(--ink-soft);
+        opacity: 0.85;
+        margin-top: 2px;
         font-variant-numeric: tabular-nums;
       }
-      /* fade-to-black for the jump. Sits above everything (HUD included) while the
+      #card .tp-list::-webkit-scrollbar {
+        width: 8px;
+      }
+      #card .tp-list::-webkit-scrollbar-thumb {
+        background: rgba(44, 35, 23, 0.25);
+        border-radius: 4px;
+      }
+      #card .tp-list::-webkit-scrollbar-track {
+        background: transparent;
+      }
+
+      /* fade-to-black for the jump. Above everything (HUD included) while the
          camera repositions, then fades back. */
       #fade {
         position: fixed;
@@ -301,6 +474,14 @@
       <div id="compass-label"></div>
     </div>
     <div id="tp-prompt"></div>
+    <div id="controls">
+      <div class="ctl">
+        <span class="key">WASD</span> move · <span class="key">Shift</span> skate
+      </div>
+      <div class="ctl">
+        click to look · <span class="key">Esc</span> release
+      </div>
+    </div>
     <div id="overlay">
       <div id="card"></div>
     </div>

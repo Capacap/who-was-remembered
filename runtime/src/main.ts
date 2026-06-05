@@ -1495,12 +1495,15 @@ async function main() {
   // perf monitor: stats.js panel (click to cycle FPS / ms / MB) plus a text
   // readout of the numbers that actually tell us if the book LOD is working,
   // draw calls, triangles, and the live detailed-book count vs the box field.
+  // dev-only readout, hidden by default so the shipped view is clean; ` (Backquote)
+  // toggles it. Until the options menu exists this is the one dev affordance that
+  // earns a key, since the perf numbers are how we confirm the book LOD is working.
   const stats = new Stats();
-  stats.dom.style.cssText = "position:fixed;top:0;left:0;z-index:100;";
+  stats.dom.style.cssText = "position:fixed;top:0;left:0;z-index:100;display:none;";
   document.body.appendChild(stats.dom);
   const perf = document.createElement("div");
   perf.style.cssText =
-    "position:fixed;top:48px;left:0;z-index:100;padding:4px 6px;" +
+    "position:fixed;top:48px;left:0;z-index:100;padding:4px 6px;display:none;" +
     "font:11px/1.4 monospace;color:#9fe;background:rgba(0,0,0,.55);white-space:pre;";
   document.body.appendChild(perf);
 
@@ -1602,6 +1605,8 @@ async function main() {
 
   // --- look-at glance + inspect overlay -------------------------------------
   const glance = document.getElementById("glance") as HTMLDivElement;
+  const reticle = document.getElementById("reticle") as HTMLDivElement;
+  const controlsHud = document.getElementById("controls") as HTMLDivElement;
   const overlay = document.getElementById("overlay") as HTMLDivElement;
   const card = document.getElementById("card") as HTMLDivElement;
   const tpPrompt = document.getElementById("tp-prompt") as HTMLDivElement;
@@ -1622,7 +1627,8 @@ async function main() {
     glance.innerHTML =
       `<div class="name">${renderName(i)}</div>` +
       (desc ? `<div class="desc">${desc}</div>` : "") +
-      (years ? `<div class="years">${years}</div>` : "");
+      (years ? `<div class="years">${years}</div>` : "") +
+      `<div class="act"><span class="key">E</span> inspect</div>`;
     glance.style.display = "block";
   }
 
@@ -1653,6 +1659,7 @@ async function main() {
     overlay.style.display = "flex";
     overlayOpen = true;
     glance.style.display = "none";
+    reticle.classList.remove("armed");
     controls.unlock(); // free the cursor so the link is clickable
   }
 
@@ -1733,19 +1740,22 @@ async function main() {
       const u = daylight.uniforms.uDaylightMix;
       u.value = u.value > 0 ? 0 : 1;
       console.log(`[dev] daylight field ${u.value ? "on" : "off (flat-lit)"}`);
+    } else if (e.code === "Backquote") {
+      // dev: show/hide the perf readout (stats.js + the LOD numbers). Hidden by
+      // default so the shipped view is clean; ` brings it back when profiling.
+      const show = stats.dom.style.display === "none";
+      stats.dom.style.display = show ? "block" : "none";
+      perf.style.display = show ? "block" : "none";
     } else if (e.code === "Escape" && overlayOpen) {
       closeOverlay();
     }
   });
 
-  const hint =
-    "click to look · WASD move · Shift skate · E inspect · T travel · Esc release";
-  const setHud = (mode: MoveMode) => {
-    const label = mode === "fly" ? "flying (dev)" : mode === "skate" ? "skating" : "walking";
-    info.innerHTML =
-      `${field.n.toLocaleString()} figures · ${label} · centre = year 2000<br>${hint}`;
-  };
-  setHud("walk");
+  // the bottom-left readout was only ever load/debug text; clear it now the world
+  // is up. #info stays in the DOM for the loading messages and the load-failure
+  // handler (main().catch). Controls are self-explanatory via the contextual
+  // prompts; a full reference belongs in the options menu, not a persistent line.
+  info.innerHTML = "";
 
   window.addEventListener("resize", () => {
     camera.aspect = window.innerWidth / window.innerHeight;
@@ -1760,17 +1770,19 @@ async function main() {
   let mode: MoveMode = "walk";
   let sincePick = 0;
   let sinceStat = 0;
+  // intro controls: shown within CTL_R_SHOW of the spawn centre, hidden past
+  // CTL_R_HIDE (the gap is hysteresis so walking the boundary can't flicker the
+  // timed CSS fade). Both inside R_INNER (~600) so they're gone before the books.
+  const CTL_R_SHOW = 360;
+  const CTL_R_HIDE = 460;
+  let ctlShown = false;
   // worst-case ms for the two camera-driven rebuilds, reset each readout window,
   // so a bursty re-tessellation spike shows up instead of being averaged away.
   let booksMs = 0;
   const PICK_INTERVAL = 0.12; // ~8 Hz; the look-at label needn't be per-frame
   renderer.setAnimationLoop(() => {
     const dt = Math.min(clock.getDelta(), 0.1); // clamp after tab-out stalls
-    const m = update(dt);
-    if (m !== mode) {
-      setHud(m);
-      mode = m;
-    }
+    mode = update(dt);
 
     // look-at picking: only while walking the scene (locked) and not inspecting.
     // Suppressed while skating so the glance prompt doesn't strobe as books blow past.
@@ -1781,9 +1793,11 @@ async function main() {
         target = pick();
         if (target >= 0) showGlance(target);
         else glance.style.display = "none";
+        reticle.classList.toggle("armed", target >= 0); // affordance: inspectable
       }
     } else if (glance.style.display !== "none") {
       glance.style.display = "none";
+      reticle.classList.remove("armed");
       target = -1;
     }
 
@@ -1808,11 +1822,20 @@ async function main() {
           const tp = teleporters[nearTp];
           tpPrompt.innerHTML =
             `<div class="tp-here">◎ ${escapeHtml(tp.label)}</div>` +
-            `<div class="tp-act">press <kbd>T</kbd> to travel</div>`;
+            `<div class="act"><span class="key">T</span> travel</div>`;
         }
       }
       const armed = nearTp >= 0 && !overlayOpen && controls.isLocked && mode !== "skate";
       tpPrompt.style.display = armed ? "block" : "none";
+    }
+
+    // intro controls: toggle .show at the centre radius (hysteresis below); the
+    // CSS transition does the timed fade. Hidden while an overlay is open.
+    {
+      const rCentre = Math.hypot(camera.position.x, camera.position.z);
+      if (ctlShown && (rCentre > CTL_R_HIDE || overlayOpen)) ctlShown = false;
+      else if (!ctlShown && rCentre < CTL_R_SHOW && !overlayOpen) ctlShown = true;
+      controlsHud.classList.toggle("show", ctlShown);
     }
 
     // the ground is static (built once); only the books refill by LOD as the camera
