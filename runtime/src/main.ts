@@ -1387,11 +1387,16 @@ async function main() {
 
   // Dusk rig matching the sky: a low, warm, raking sun so every dune face shows
   // light/dark contrast (a grazing sun maximises the cosine difference between
-  // slopes, which is what makes the dunes read as 3D), over a dim, cool hemisphere
-  // ambient so the directional term dominates instead of flooding the slopes flat.
-  // The sun sits on SUN_POS, the same bearing the sky's warm glow uses, so the lit
-  // ground and the bright sky agree.
-  scene.add(new THREE.HemisphereLight(0xffd9b3, 0x2b2f47, 0.5));
+  // slopes, which is what makes the dunes read as 3D), over a genuinely COOL sky
+  // ambient. The cool sky colour is the load-bearing choice: the warm sun rakes the
+  // dune faces warm, while flat ground (and the near-flat vantage centre, which
+  // catches almost no direct sun) is lit mostly by this cool ambient, so it reads
+  // cool. That warm/cool split is what lets the vortex eye read cold WITHOUT an
+  // emissive, and stops a pale albedo collapsing to "the colour of the only light"
+  // (it was all-warm before: the old sky colour 0xffd9b3 was warm, so nothing cool
+  // reached the desert and white read as sand). The sun sits on SUN_POS, the same
+  // bearing the sky's warm glow uses, so the lit ground and the bright sky agree.
+  scene.add(new THREE.HemisphereLight(0x7e95bd, 0x2b2f47, 0.5));
   const sun = new THREE.DirectionalLight(0xffb066, 2.3);
   sun.position.copy(SUN_POS);
   scene.add(sun);

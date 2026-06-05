@@ -92,9 +92,9 @@ function hash2(i: number, j: number): number {
 // present, fading through desert sand to a dark grey floor in the deep-past
 // void. Radius is time, so this is recency literally lighting the map. A
 // low-frequency patch noise breaks the gradient so it reads painted, not banded.
-const SAND_GRADIENT_START = new THREE.Color(0xefe8d2); // bright dry summit (the present)
-const SAND_GRADIENT_MID = new THREE.Color(0xcabb95); // mid desert
-const SAND_GRADIENT_END = new THREE.Color(0x6e6860); // faded deep-past floor
+const SAND_GRADIENT_START = new THREE.Color(0xEFE8D2); // bright dry summit (the present)
+const SAND_GRADIENT_MID = new THREE.Color(0xD3BC95); // mid desert
+const SAND_GRADIENT_END = new THREE.Color(0x9C8465); // faded deep-past floor
 // One smooth era ramp across the whole map: pale summit (the present, at the
 // centre) -> sand at the midpoint -> grey deep-past floor at the outer edge.
 // Spans [0, ERA_GRADIENT_R]; recency literally lighting the map, now a single
@@ -104,28 +104,25 @@ const ERA_GRADIENT_R = 7100;
 const COLOR_WAVELENGTH = 900; // patch-noise scale for the painted wobble
 
 // The vortex eye: a pale glacial teal gathered at the centre, the cold light of
-// the present where the knowledge piles up. It reads as EMISSIVE (added after
-// lighting), not albedo: the flat vantage centre catches almost none of the
-// raking sun, so an albedo tint there is crushed to black no matter how light
-// the colour, while an additive glow is lighting-independent and reads in the
-// dark. The coverage never makes a clean radial ring: a noise field (EYE_NOISE_*)
-// fingers the boundary in and out even across the flat calm zone where there are
-// no dunes to follow, a relief push (EYE_RELIEF_PUSH) lets it run down the dune
-// troughs where the terrain has relief, and EYE_VALLEY pools the glow in the
-// troughs and recedes it off the crests so it interfingers with the rising dunes.
-const COLOR_EYE = new THREE.Color(0xe8f3f1); // near-white with a whisper of cool: otherworldly bleached sand
+// the present where the knowledge piles up. It is painted into the ALBEDO (lerp in
+// groundColor toward COLOR_EYE), lit like the rest of the sand. The old additive
+// emissive was dropped 2026-06-05: it was a carry-over from a darker shader era; the
+// hemisphere light lifts the near-flat centre enough that the albedo reads without a
+// glow crutch fighting the lighting. The coverage never makes a clean radial ring: a
+// noise field (EYE_NOISE_*) fingers the boundary in and out even across the flat calm
+// zone where there are no dunes to follow, a relief push (EYE_RELIEF_PUSH) lets it run
+// down the dune troughs where the terrain has relief, and EYE_VALLEY pools the colour
+// in the troughs and recedes it off the crests so it interfingers with the rising dunes.
+const COLOR_EYE = new THREE.Color(0x4B6B75); // near-white with a whisper of cool: otherworldly bleached sand
 const EYE_R0 = 260; // full eye colour inside here (the vantage pocket)
 const EYE_R1 = 1900; // ... gone by here, reaching out into the rising dunes
 const EYE_ALBEDO_STRENGTH = 0.85; // albedo lerp toward the eye colour (only shows where lit)
-const EYE_EMISSIVE_STRENGTH = 0.6; // additive glow strength (carries the eye in the unlit centre)
 const EYE_RELIEF_PUSH = 320; // world units the boundary shifts per unit relief:
 // troughs (relief < 0) pull it inward (more eye), crests (relief > 0) push it out
 const EYE_NOISE_AMP = 680; // world units the boundary wanders by noise (breaks the ring)
 const EYE_NOISE_SCALE = 760; // coarse noise wavelength; a finer octave rides on top
 const EYE_VALLEY = 1.3; // pool the colour in the dune troughs, recede off the crests:
 // scales the mask by (1 - EYE_VALLEY * relief), so crests dim and troughs lift
-const _eye = COLOR_EYE.clone().convertSRGBToLinear();
-const EYE_EMISSIVE_RGB = `vec3(${_eye.r.toFixed(4)}, ${_eye.g.toFixed(4)}, ${_eye.b.toFixed(4)})`;
 
 // Crest/trough relief tint, painted into the ALBEDO on the radial base: crests read
 // scoured pale and a touch warm, troughs deeper and cooler, so the dunes carry COLOUR
@@ -137,20 +134,22 @@ const EYE_EMISSIVE_RGB = `vec3(${_eye.r.toFixed(4)}, ${_eye.g.toFixed(4)}, ${_ey
 // earlier version carried this tint as an additive emissive (a warm crest rim + a deep
 // red trough pool); it was removed because out in the dune field the sun DOES light the
 // facets, so the albedo reads fine, and the emissive only fought the lighting and the
-// Kuindzhi palette. (The vortex eye stays emissive: its centre is genuinely unlit.) All
+// Kuindzhi palette. (The vortex eye is now albedo too, for the same reason.) All
 // four are eyeball knobs.
 const RELIEF_CELLS = 3; // neighbour offset in cells: the relief's read wavelength
 const RELIEF_SCALE = 0.25; // slope-difference that reaches the full crest/trough tint
 // Crests and troughs tune INDEPENDENTLY (they need not be each other's mirror): the
 // crest knobs fire only where relief > 0, the trough knobs only where relief < 0.
-// Lightness is the sun's axis, so keep these a whisper; hue/sat ride through the
-// lighting and can read harder. CREST_LIGHT lifts crests, TROUGH_DARK sinks troughs.
-const CREST_LIGHT = 0.05; // crest lightens (a whisper; the sun owns light/dark)
-const CREST_SAT = 0.13; // crest bleaches (desaturates the scoured top)
-const CREST_HUE = 0.022; // crest warms
-const TROUGH_DARK = 0.05; // trough darkens (a whisper; the sun owns light/dark)
-const TROUGH_SAT = 0.13; // trough deepens (saturates the shadowed hollow)
-const TROUGH_HUE = 0.022; // trough cools
+// CREST_LIGHT/TROUGH_DARK are PROPORTIONAL (a fraction of the base lightness), not a
+// fixed offset, so a trough darkens by the same fraction on the bright centre cream
+// and the dark outer grey rather than crushing the already-dark edge toward black.
+// Hue/sat ride through the lighting and can read harder.
+const CREST_LIGHT = 1.0; // crest lightens, as a fraction of base lightness
+const CREST_SAT = 0.10; // crest bleaches (desaturates the scoured top)
+const CREST_HUE = 0.1; // crest warms
+const TROUGH_DARK = 0.5; // trough darkens, as a fraction of base lightness
+const TROUGH_SAT = 0.25; // trough deepens (saturates the shadowed hollow)
+const TROUGH_HUE = -0.1; // trough cools
 
 // Distance fade: the ground's opacity falls to zero between these radii from the
 // CAMERA, so the whole landscape dissolves into the sky dome before it reaches the
@@ -196,10 +195,11 @@ const SKATE_GLOW_RGB = `vec3(${_sg.r.toFixed(4)}, ${_sg.g.toFixed(4)}, ${_sg.b.t
 // "stand here" marker. The beam fades out within TP_BEAM_FADE_NEAR so it never clips
 // the camera up close, which is exactly where it stops telling you where to stand;
 // this glow takes over there, so the column and the pad hand off as one beacon. Same
-// blue as the beam (main.ts TP_BEAM_COLOR). Additive emissive like the vortex eye, so
-// it reads in the barely-lit centre instead of crushing dark, and because it IS the
-// ground it can never look superimposed (the stone ring it replaced did, being a warm
-// Lambert prop dropped onto the cool emissive centre). Evaluated per-fragment over the
+// blue as the beam (main.ts TP_BEAM_COLOR). This one stays an additive emissive (unlike
+// the eye, now albedo): a "stand here" marker must read in the barely-lit centre instead
+// of crushing dark, and because it IS the ground it can never look superimposed (the
+// stone ring it replaced did, being a warm Lambert prop dropped onto the cool centre).
+// Evaluated per-fragment over the
 // teleporter positions, not per-vertex: the disc is smaller than a GROUND_CELL facet,
 // so a vertex attribute would light a single triangle. A slow pulse off uDriftTime
 // reads as powered. Eyeball knobs; tune against the vortex teal, which the innermost
@@ -271,8 +271,8 @@ const NORMAL_EPS = 0.5; // default central-difference step for sampleNormal, wor
 // 0 past the band. The boundary radius is perturbed by two octaves of noise (so
 // the edge fingers organically rather than reading as a clean ring) and by local
 // relief (so it runs down the dune troughs where the terrain has relief to
-// follow). buildGround reads this once per vertex for both the albedo tint and
-// the emissive glow, so the two always agree.
+// follow). buildGround reads this once per vertex to drive the albedo tint toward
+// COLOR_EYE in groundColor.
 export function eyeMask(x: number, z: number, relief: number): number {
   const r = Math.hypot(x, z);
   const noise =
@@ -298,9 +298,9 @@ export function groundColor(
   const t = Math.min(1, r / ERA_GRADIENT_R);
   if (t < 0.5) out.copy(SAND_GRADIENT_START).lerp(SAND_GRADIENT_MID, t * 2);
   else out.copy(SAND_GRADIENT_MID).lerp(SAND_GRADIENT_END, (t - 0.5) * 2);
-  // Tint the albedo toward the eye colour (the glow that actually carries it in
-  // the dark centre is the emissive term, added in applyGroundMaterial). Folded
-  // under the HSL offsets below so the eye still picks up crest/trough shading.
+  // Tint the albedo toward the eye colour; the HSL offsets below then ride on top so
+  // the eye still picks up crest/trough shading. It is lit like the rest of the sand
+  // now (no emissive); the hemisphere light carries the near-flat centre.
   if (eye > 0) out.lerp(COLOR_EYE, eye * EYE_ALBEDO_STRENGTH);
   const tone = perlin(x / COLOR_WAVELENGTH, z / COLOR_WAVELENGTH); // [-1, 1]
   // Split the relief into a crest amount and a trough amount, each 0..1, so the two
@@ -316,7 +316,11 @@ export function groundColor(
   out.getHSL(_hsl);
   _hsl.h += tone * 0.01 - crest * CREST_HUE + trough * TROUGH_HUE;
   _hsl.s += tone * 0.03 - crest * CREST_SAT + trough * TROUGH_SAT;
-  _hsl.l += tone * 0.04 + crest * CREST_LIGHT - trough * TROUGH_DARK;
+  // Lightness relief is PROPORTIONAL: scale the base by (1 +- fraction) so a trough
+  // darkens by the same fraction whether the base is bright centre cream or dark outer
+  // grey, instead of a fixed offset that crushes the already-dark edge toward black.
+  // The painted wobble stays a small additive variation folded in first.
+  _hsl.l = (_hsl.l + tone * 0.04) * (1 + crest * CREST_LIGHT - trough * TROUGH_DARK);
   out.setHSL(_hsl.h, _hsl.s, _hsl.l);
   return out;
 }
@@ -441,12 +445,11 @@ function applyGroundMaterial(
     shader.vertexShader = shader.vertexShader
       .replace(
         "#include <common>",
-        "#include <common>\nattribute float aEye;\nvarying float vEye;\nvarying float vGroundFade;\nvarying float vViewDist;\nvarying vec3 vWorldPos;\nvarying vec2 vFieldXZ;",
+        "#include <common>\nvarying float vGroundFade;\nvarying float vViewDist;\nvarying vec3 vWorldPos;\nvarying vec2 vFieldXZ;",
       )
       .replace(
         "#include <project_vertex>",
         `#include <project_vertex>
-         vEye = aEye;
          vViewDist = length(mvPosition.xyz);
          vGroundFade = clamp(
            (vViewDist - ${FADE_START.toFixed(1)}) / ${fadeSpan},
@@ -460,7 +463,7 @@ function applyGroundMaterial(
       );
     let frag = shader.fragmentShader.replace(
       "#include <common>",
-      "#include <common>\nvarying float vEye;\nvarying float vGroundFade;\nvarying float vViewDist;\nvarying vec3 vWorldPos;\nvarying vec2 vFieldXZ;\nuniform vec2 uPlayer;\nuniform float uSkate;" +
+      "#include <common>\nvarying float vGroundFade;\nvarying float vViewDist;\nvarying vec3 vWorldPos;\nvarying vec2 vFieldXZ;\nuniform vec2 uPlayer;\nuniform float uSkate;" +
         tpDecl +
         DAYLIGHT_FRAG_COMMON,
     );
@@ -472,19 +475,7 @@ function applyGroundMaterial(
     // pay only the derivative + a few ops.
     frag = frag.replace(
       "#include <opaque_fragment>",
-      `#include <opaque_fragment>
-       {
-         // vortex eye: an additive glow (colour x baked mask) pooled in the centre
-         // troughs. It sits BEFORE the day/night multiply, so the daylight field
-         // modulates it (it glows only where a daylight island crosses the centre, dark
-         // otherwise) rather than painting full-strength over crushed night albedo as a
-         // neon smear. It is emissive because the flat vantage centre catches almost none
-         // of the raking sun, so an albedo tint there crushes to black; the glow carries
-         // the eye in that unlit pocket. (The crest/trough relief tint is NOT emissive
-         // anymore: out in the dune field the sun lights the facets, so that tint rides
-         // the albedo in groundColor; only the unlit centre still needs a glow.)
-         gl_FragColor.rgb += vEye * ${EYE_EMISSIVE_RGB} * ${EYE_EMISSIVE_STRENGTH.toFixed(2)};
-       }` +
+      `#include <opaque_fragment>` +
         // day/night: multiply the lit sand (albedo + relief) by the daylight field (night
         // in the dark, day in the lit islands), sinking toward the night floor into the
         // distance dissolve so the far ground darkens to meet the black storm dome.
@@ -656,7 +647,6 @@ export function buildGround(
   const vcount = stride * stride;
   const positions = new Float32Array(vcount * 3);
   const colors = new Float32Array(vcount * 3);
-  const eyes = new Float32Array(vcount); // per-vertex eye coverage, for the emissive glow
   const v3 = new THREE.Vector3();
   const c = new THREE.Color();
   const ro = RELIEF_CELLS * cell; // neighbour offset for the crest/trough relief read
@@ -678,7 +668,6 @@ export function buildGround(
               sampleHeight(v3.x, v3.z + ro))) /
         (RELIEF_SCALE * ro);
       const eye = eyeMask(v3.x, v3.z, relief);
-      eyes[v] = eye;
       groundColor(v3.x, v3.z, c, relief, eye);
       colors[v * 3] = c.r;
       colors[v * 3 + 1] = c.g;
@@ -705,7 +694,6 @@ export function buildGround(
   const geom = new THREE.BufferGeometry();
   geom.setAttribute("position", new THREE.BufferAttribute(positions, 3));
   geom.setAttribute("color", new THREE.BufferAttribute(colors, 3));
-  geom.setAttribute("aEye", new THREE.BufferAttribute(eyes, 1));
   geom.setIndex(new THREE.BufferAttribute(indices, 1));
   const mat = new THREE.MeshLambertMaterial({
     vertexColors: true,
