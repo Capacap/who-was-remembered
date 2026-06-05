@@ -180,33 +180,36 @@ const TROUGH_HUE = -0.1; // trough cools
 export const FADE_START = 3000; // fully opaque within this distance of the camera
 export const FADE_END = 6500; // fully gone (dome shows through) beyond this
 
-// Player raking light: a warm pool that follows the player and rakes across the
-// dune facets near them, so the near ground reads as reactive (the moving
-// gradient on the dunes). It is additive in WORLD space, lit by each facet's own
-// world-derived normal (cross of the position derivatives the flat shading already
-// computes), so it tilts with the dune faces rather than washing them flat. The
-// centre (uPlayer) is shared with the book glow; this radius is its own. Colour is
-// baked into the GLSL as a linear literal, like the distance fade. Eyeball knobs.
-const PLAYER_LIGHT_COLOR = new THREE.Color(0xffc89c); // warm pool
-const PLAYER_LIGHT_RADIUS = 42; // raking fades out by this horizontal distance
+// Player pool: ONE weak raking light that follows the player and rakes across the
+// dune facets near them, just enough to show the terrain underfoot in the mostly-night
+// desert. It is additive in WORLD space, lit by each facet's own world-derived normal
+// (cross of the position derivatives the flat shading already computes), so it tilts
+// with the dune faces rather than washing them flat -- the rake gradient IS the terrain
+// reveal. The centre (uPlayer) is shared with the book glow; this radius is its own.
+// Each mode is a two-colour RADIAL gradient (centre hue -> rim hue across the pool),
+// the same inner->outer trick the teleporter pads use: walking runs pale yellow at the
+// core into orange at the skirt; skating runs cyan into blue. uSkate (0..1, ramped in
+// the loop) cross-fades the two palettes -- the colour is the only "you're skating"
+// signal. The old wide-warm raking pool (str 0.55 / r 42) plus a separate blue skate
+// glow used to compound into a strong orange wash that also lit the books; collapsed to
+// a single tight, weak pool. Colours baked as linear GLSL literals like the distance
+// fade. Eyeball knobs; rebuild to retune.
+const PLAYER_WALK_INNER = new THREE.Color(0xffe6a0); // warm pale yellow at the core
+const PLAYER_WALK_OUTER = new THREE.Color(0xff8a3c); // orange at the skirt
+const PLAYER_SKATE_INNER = new THREE.Color(0x46d8ff); // cyan core while skating
+const PLAYER_SKATE_OUTER = new THREE.Color(0x2f6cff); // blue skirt while skating
+const PLAYER_LIGHT_RADIUS = 24; // pool kept tight around the feet (was 42)
 const PLAYER_LIGHT_INNER = 2.0; // full reach within this
-const PLAYER_LIGHT_STRENGTH = 0.55; // additive intensity at the pool centre
+const PLAYER_LIGHT_STRENGTH = 0.22; // weak: reveal the ground, don't wash it (was 0.55)
 const PLAYER_LIGHT_HEIGHT = 6.0; // light's height over the player; lower = more grazing
-const _pl = PLAYER_LIGHT_COLOR.clone().convertSRGBToLinear();
-const PLAYER_LIGHT_RGB = `vec3(${_pl.r.toFixed(4)}, ${_pl.g.toFixed(4)}, ${_pl.b.toFixed(4)})`;
-
-// Skate glow: a cool pool that blooms under the player while hovering, a second
-// signal (beyond the small hover lift) that Shift is doing something. It shares the
-// raking pool's centre and normal but is wider and mostly flat (lightly raked), so it
-// reads as the ground glowing beneath you rather than a directional light. Ramped by
-// uSkate (0..1) in the loop so it eases in/out with the mode. Eyeball knobs, baked as
-// GLSL literals like the warm pool; rebuild to retune.
-const SKATE_GLOW_COLOR = new THREE.Color(0x4a86ff); // cool blue pool
-const SKATE_GLOW_RADIUS = 16; // a tight pool right under the player
-const SKATE_GLOW_INNER = 2.0;
-const SKATE_GLOW_STRENGTH = 0.8; // additive intensity at centre, times uSkate
-const _sg = SKATE_GLOW_COLOR.clone().convertSRGBToLinear();
-const SKATE_GLOW_RGB = `vec3(${_sg.r.toFixed(4)}, ${_sg.g.toFixed(4)}, ${_sg.b.toFixed(4)})`;
+const _glsl = (c: THREE.Color) => {
+  const l = c.clone().convertSRGBToLinear();
+  return `vec3(${l.r.toFixed(4)}, ${l.g.toFixed(4)}, ${l.b.toFixed(4)})`;
+};
+const PLAYER_WALK_INNER_RGB = _glsl(PLAYER_WALK_INNER);
+const PLAYER_WALK_OUTER_RGB = _glsl(PLAYER_WALK_OUTER);
+const PLAYER_SKATE_INNER_RGB = _glsl(PLAYER_SKATE_INNER);
+const PLAYER_SKATE_OUTER_RGB = _glsl(PLAYER_SKATE_OUTER);
 
 // Teleporter floor glow: a blue emissive disc pooled on each plaza, the near-field
 // "stand here" marker. The beam fades out within TP_BEAM_FADE_NEAR so it never clips
@@ -507,14 +510,21 @@ function applyGroundMaterial(
          if (wn.y < 0.0) wn = -wn;
          vec3 toP = vec3(uPlayer.x - vWorldPos.x, ${PLAYER_LIGHT_HEIGHT.toFixed(1)}, uPlayer.y - vWorldPos.z);
          float pdist = length(toP.xz);
+         // squared so the skirt tapers off well before the radius -- a soft pool around
+         // the feet rather than a broad wash filling the grazing view.
          float fall = 1.0 - smoothstep(${PLAYER_LIGHT_INNER.toFixed(1)}, ${PLAYER_LIGHT_RADIUS.toFixed(1)}, pdist);
-         float rake = max(dot(wn, normalize(toP)), 0.0);
-         gl_FragColor.rgb += ${PLAYER_LIGHT_RGB} * (${PLAYER_LIGHT_STRENGTH.toFixed(2)} * fall * rake);
-         // cool pool while skating: wider, mostly-radial blue glow under the player,
-         // ramped by uSkate so it blooms in as Shift engages. Lightly raked so the
-         // ground reads as glowing beneath you rather than lit by a second sun.
-         float bfall = 1.0 - smoothstep(${SKATE_GLOW_INNER.toFixed(1)}, ${SKATE_GLOW_RADIUS.toFixed(1)}, pdist);
-         gl_FragColor.rgb += uSkate * ${SKATE_GLOW_RGB} * (${SKATE_GLOW_STRENGTH.toFixed(2)} * bfall * (0.45 + 0.55 * rake));
+         fall *= fall;
+         // mostly raked (so the dune relief reads) with a small floor so the flat ground
+         // right underfoot still lights; the rake gradient is the terrain reveal.
+         float rake = 0.3 + 0.7 * max(dot(wn, normalize(toP)), 0.0);
+         // radial fraction (0 core -> 1 rim) drives an inner->outer colour gradient like
+         // the teleporter pads; uSkate cross-fades the warm (yellow->orange) and the cool
+         // (cyan->blue) palettes.
+         float prad = clamp(pdist / ${PLAYER_LIGHT_RADIUS.toFixed(1)}, 0.0, 1.0);
+         vec3 poolInner = mix(${PLAYER_WALK_INNER_RGB}, ${PLAYER_SKATE_INNER_RGB}, uSkate);
+         vec3 poolOuter = mix(${PLAYER_WALK_OUTER_RGB}, ${PLAYER_SKATE_OUTER_RGB}, uSkate);
+         vec3 poolCol = mix(poolInner, poolOuter, prad);
+         gl_FragColor.rgb += poolCol * (${PLAYER_LIGHT_STRENGTH.toFixed(2)} * fall * rake);
        }` +
         // teleporter floor glow last, AFTER the daylight multiply, so the powered pad
         // holds steady instead of dimming as a shadow drifts over the plaza.

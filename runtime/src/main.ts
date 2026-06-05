@@ -121,13 +121,20 @@ const PAGE_CREAM = new THREE.Color(0xece2cc);
 // field is (0 = near-black, 1 = full colour always; lower kills the cross-disc
 // geo-hue read in exchange for a starker reveal). GLOW_BOOST is the extra
 // additive glow at the centre of the pool. Eyeball knobs.
-const GLOW_RADIUS = 48; // books dark beyond this horizontal distance from the player
+const GLOW_RADIUS = 32; // books dark beyond this horizontal distance from the player
 const GLOW_INNER = 2; // tight full-brightness core at the player's feet; smooth taper to GLOW_RADIUS
-const GLOW_REST_DIM = 0.12; // resting brightness of a near book outside the pool (0 = black)
-const GLOW_REST_FAR = 0.4; // resting brightness once distance-faded; higher than REST_DIM
-//   so far books are dim dusty specks, not max-contrast black confetti. The dark
-//   specks on bright sand were the worst of the sub-pixel flicker, so lifting the
-//   far floor trades a little of the stark dark field for a calmer horizon.
+const GLOW_REST_DIM = 0.12; // resting brightness of a near book just outside the pool (0 = black)
+const GLOW_REST_FAR = 0.85; // resting brightness a book lifts to with DISTANCE (aerial perspective):
+//   a far book settles to ~the same daylight-driven tone as the sand it lies on instead of
+//   crushing to the dim near-floor. Crushed-dark distant books read as a dark sheet hung in
+//   front of the lit field (they darken, the ground doesn't); lifting them lets distance MUTE
+//   them into the field rather than darken them below it. The dim near-floor still rings the
+//   player (within HAZE_NEAR) so the pool reveal keeps its drama; the lift ramps in past it.
+//   Also calms sub-pixel flicker: a far book near the ground's tone is low-contrast, not black
+//   confetti on bright sand. The book's own emissive floor rides on top, so at night the books
+//   stay gentle self-lit specks a touch above the dark ground (the self-illuminated read).
+const HAZE_NEAR = 250; // camera distance where the aerial lift begins (just past the pool)
+const HAZE_FAR = 2000; // ... and reaches GLOW_REST_FAR; the atmospheric-perspective band
 const GLOW_BOOST = 1.3; // additive bloom at the pool centre: the reactive light is now
 //   the whole "life" of the field (the hover/bob was removed), so the pool is the signal
 
@@ -173,6 +180,25 @@ const WARM_STRENGTH = 0.18; // max hue-arc fraction rotated toward warm at the p
 // yellow-orange, diluting a colour the player reads as a notability signal. The landmark
 // hue sits near the warm anchor so its arc is already small; lowering strength quiets it
 // while cool colours (far from the anchor) still warm visibly -- blue->cyan survives.
+
+// Era temperature: the SAME painterly hue-rotation, but driven by a book's RADIUS (= time)
+// instead of the player's proximity. Recency bias is the subject of the piece, so the field
+// itself runs warm at the modern centre and cools to cold in the deep-past rim -- the warmth
+// IS the bias, baked into the ground. Unlike the proximity pool this is static (radius never
+// changes), so it's folded into the resting albedo at build time, not the shader; the
+// proximity warm-shift then rides on top, so approaching a cold ancient book warms it back
+// toward neutral but never as hot as a modern one at the same range (the bias survives touch).
+// Applied to ordinary (tier 0) books ONLY: landmark beacons keep their full notability hue,
+// so a hot major reads even harder as a warm beacon against the cold antiquity around it --
+// the few remembered names staying bright while their era goes cold (on-theme, not a bug).
+// Hue rotation only (S/L untouched), so the saturation-driven distance read is preserved.
+const ERA_WARM_HUE = 0.13; // present anchor: a warm gold, a touch oranger than the pool yellow
+const ERA_COOL_HUE = 0.55; // deep-past anchor: a cold cyan-blue
+const ERA_TEMP_STRENGTH = 0.25; // max hue-arc fraction at the radial extremes (centre / rim)
+// 0 (no shift) sits at the mid-radius; the warm half is inside it, the cool half outside.
+
+// shortest signed hue arc from h to anchor, JS-mod-safe (GLSL mod is always positive; % is not)
+const mod1 = (x: number) => ((x % 1) + 1) % 1;
 
 interface GlowUniforms {
   uPlayer: PlayerUniform;
@@ -404,9 +430,13 @@ function applyProximityGlow(
         `#include <opaque_fragment>
          float glowD = distance(vGlowXZ, uPlayer);
          float glow = 1.0 - smoothstep(uGlowInner, uGlowRadius, glowD);
-         // the resting floor lifts toward uRestFar as the book distance-fades (vGroundFade,
-         // set by applyDistanceFade upstream), so far specks lose contrast and stop crawling.
-         float restFloor = mix(uRestDim, uRestFar, vGroundFade);
+         // aerial perspective: the resting floor lifts toward uRestFar with camera DISTANCE
+         // (distLift), so a far book settles to ~the ground's daylight tone instead of crushing
+         // to the dim near-floor and reading as a dark sheet in front of the lit field. The dim
+         // ring (within HAZE_NEAR) survives so the pool reveal stays dramatic. vGroundFade folds
+         // in so the very-far alpha band stays lifted too.
+         float distLift = smoothstep(${HAZE_NEAR.toFixed(1)}, ${HAZE_FAR.toFixed(1)}, vViewDist);
+         float restFloor = mix(uRestDim, uRestFar, max(vGroundFade, distLift));
          gl_FragColor.rgb *= mix(restFloor, 1.0, glow);
          gl_FragColor.rgb += gl_FragColor.rgb * glow * uGlowBoost;` +
           // the same drifting daylight the ground takes, so a book darkens with
@@ -444,6 +474,7 @@ function buildField(
   bookMid: THREE.BufferGeometry, // LOD01, drawn across the mid band
   uPlayer: PlayerUniform, // shared player-position uniform (also drives the ground rake)
   daylight: DaylightUniforms, // shared daylight uniforms (also drift over the ground)
+  world: World, // R_INNER/R_MAX define the era-temperature radial ramp
 ) {
   const { n, x, y, tier, geo, lon, scale } = field;
   // the scale byte is the normalized article length (export_runtime quantized the
@@ -580,6 +611,9 @@ function buildField(
   // separate stream for the lightness jitter so adding it doesn't perturb the
   // shape/tilt variety the main rnd stream already drives.
   const rndL = mulberry32(0x9e3779b9);
+  // era-temperature ramp: 0 at the modern inner ring -> 1 at the deep-past R_MAX.
+  // eraT 0.5 (mid-radius) is the neutral pivot; warm inside, cool outside.
+  const eraSpan = Math.max(1, world.R_MAX - world.R_INNER);
   for (let i = 0; i < n; i++) {
     // footprint is near-uniform (ground area is the contested axis); article length
     // becomes spine thickness instead, on the empty vertical axis.
@@ -628,7 +662,14 @@ function buildField(
     // and major keep their beacon colours. Residue is washed toward adrift on top
     // of either, so a place-less book never reads as confidently regional.
     if (tier[i] === 0) {
-      const hue = ((lon[i] / 256) + HUE_OFFSET) % 1;
+      let hue = ((lon[i] / 256) + HUE_OFFSET) % 1;
+      // era temperature: rotate the resting hue toward the warm (centre) or cool (rim)
+      // anchor by the shortest arc, scaled by distance from the neutral mid-radius. The
+      // geo read survives because every book on a given ring shifts by the same amount.
+      const eraT = clamp((Math.hypot(px[i], pz[i]) - world.R_INNER) / eraSpan, 0, 1);
+      const anchor = eraT < 0.5 ? ERA_WARM_HUE : ERA_COOL_HUE;
+      const tempStr = Math.abs(eraT - 0.5) * 2 * ERA_TEMP_STRENGTH;
+      hue = mod1(hue + (mod1(anchor - hue + 0.5) - 0.5) * tempStr);
       const lj = (rndL() * 2 - 1) * GEO_LIGHT_VAR;
       col.setHSL(hue, GEO_SAT, GEO_LIGHT + lj);
     } else {
@@ -1471,7 +1512,7 @@ async function main() {
   // placed on the analytic fallback before the fetch resolved).
   camera.position.y = sampleHeight(camera.position.x, camera.position.z) + EYE_HEIGHT;
   mark("terrain");
-  const built = buildField(field, bookLods[0], bookLods[1], uPlayer, daylight.uniforms);
+  const built = buildField(field, bookLods[0], bookLods[1], uPlayer, daylight.uniforms, world);
   mark("seat books");
 
   // Wall the player just past the outermost book. R_MAX (the nominal time-radius) is
