@@ -628,12 +628,14 @@ function buildField(
   // teleporter beam (renderOrder 10). Keep detail before box so blends are stable.
   const RO_DETAIL = 5; // near/mid detail: after the ground
   const RO_BOX = 7; // the box base: the rest of the field
-  const farMesh = new THREE.InstancedMesh(bookFar, farMat, n);
-  // dynamic: update() hides/restores instances as books move in and out of the detail
-  // tiers, so the box matrix is rewritten on each rebuild, not just once at build.
-  farMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-  farMesh.frustumCulled = false; // spans the whole disc; never wholly off-screen
-  farMesh.renderOrder = RO_BOX;
+  // The box base (every book's lowest LOD) is the dominant GPU cost — ~2.8ms flat,
+  // measured vertex/instance-bound, the same whether on or off screen because the old
+  // single mesh set frustumCulled=false and ran the vertex shader on all 574k every
+  // frame. It's built below as a COARSE GRID of per-tile InstancedMeshes (after the
+  // positions exist) so the renderer can frustum-cull the tiles behind the camera —
+  // at ground level inside the ring most of the disc is off-screen — and so a finite
+  // view distance can drop far tiles for weak/mobile GPUs. Tiles are created post-loop
+  // straight from fullMat/fullCol, so the loop only fills those arrays now.
   const midMesh = new THREE.InstancedMesh(bookMid, midMat, MID_CAP);
   midMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
   midMesh.frustumCulled = false; // rebuilt around the camera, bounds don't apply
@@ -714,7 +716,6 @@ function buildField(
     // x,z = uniform footprint (+ small jitter); y = spine thickness from article length.
     dummy.scale.set(BOOK_FOOTPRINT * fw, thick, BOOK_FOOTPRINT * fl);
     dummy.updateMatrix();
-    farMesh.setMatrixAt(i, dummy.matrix);
     dummy.matrix.toArray(fullMat, i * 16);
     // ordinary books carry the geo-navigation hue (+ lightness speckle); minor
     // and major keep their beacon colours. Residue is washed toward adrift on top
@@ -734,11 +735,8 @@ function buildField(
       col.copy(TIER_COLOR[tier[i]]);
     }
     if (geo[i] === 4) col.lerp(ADRIFT, 0.75);
-    farMesh.setColorAt(i, col);
     col.toArray(fullCol, i * 3);
   }
-  farMesh.instanceMatrix.needsUpdate = true;
-  if (farMesh.instanceColor) farMesh.instanceColor.needsUpdate = true;
 
   // Spatial grid over the book positions, built once. The near-set refill walks it
   // outward from the camera cell and fills nearest-cell-first up to NEAR_CAP, so a
@@ -768,6 +766,67 @@ function buildField(
   const cursor = cellStart.slice(0, gw * gh);
   for (let i = 0; i < n; i++) cellItems[cursor[cellOf(i)]++] = i;
 
+  // Box base as a coarse tile grid. Each non-empty TILE-sized cell becomes its own
+  // InstancedMesh with frustumCulled=true, so the renderer drops the tiles behind the
+  // camera (at ground level inside the ring, most of the disc) and a finite view
+  // distance can drop the far ones. TILE is the knob: smaller -> tighter culling but
+  // more draw calls; larger -> fewer calls, coarser cull. ~1200u keeps the box field
+  // to a few dozen calls while culling most of it from a ground view.
+  const TILE = 1200;
+  const tcols = Math.floor((maxX - minX) / TILE) + 1;
+  const trows = Math.floor((maxZ - minZ) / TILE) + 1;
+  const tileOfBook = (i: number): number =>
+    Math.floor((pz[i] - minZ) / TILE) * tcols + Math.floor((px[i] - minX) / TILE);
+  // count per grid cell, then hand each non-empty cell a compact mesh slot (empty cells
+  // — the centre plaza, the gaps between longitude wedges — never get a mesh).
+  const tileFill = new Int32Array(tcols * trows);
+  for (let i = 0; i < n; i++) tileFill[tileOfBook(i)]++;
+  const tileMeshIndex = new Int32Array(tcols * trows).fill(-1);
+  const farTiles: THREE.InstancedMesh[] = [];
+  for (let t = 0; t < tcols * trows; t++) {
+    if (tileFill[t] === 0) continue;
+    tileMeshIndex[t] = farTiles.length;
+    const mesh = new THREE.InstancedMesh(bookFar, farMat, tileFill[t]);
+    // dynamic: update() zero-scales promoted books in place and restores them, so a
+    // tile's matrices are rewritten as the camera roams (colours never change).
+    mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    mesh.frustumCulled = true; // the whole point: cull the tile when it's off-screen
+    mesh.renderOrder = RO_BOX;
+    farTiles.push(mesh);
+  }
+  // per-book maps so the refill hot path stays O(1): book i lives in tile mesh
+  // tileMeshOf[i] at instance slot slotOf[i]. Fill straight from fullMat/fullCol.
+  const tileMeshOf = new Int32Array(n);
+  const slotOf = new Int32Array(n);
+  const tileCursor = new Int32Array(farTiles.length);
+  const mBox = new THREE.Matrix4();
+  const cBox = new THREE.Color();
+  for (let i = 0; i < n; i++) {
+    const mi = tileMeshIndex[tileOfBook(i)];
+    const slot = tileCursor[mi]++;
+    tileMeshOf[i] = mi;
+    slotOf[i] = slot;
+    farTiles[mi].setMatrixAt(slot, mBox.fromArray(fullMat, i * 16));
+    farTiles[mi].setColorAt(slot, cBox.fromArray(fullCol, i * 3));
+  }
+  // freeze each tile's culling sphere over its real instance spread, once. update()
+  // only zero-scales promoted instances in place (count stays full), so this build-time
+  // sphere stays correct and is never recomputed. Cache centre/radius (xz) for the
+  // optional view-distance gate below.
+  const tileCx = new Float32Array(farTiles.length);
+  const tileCz = new Float32Array(farTiles.length);
+  const tileRad = new Float32Array(farTiles.length);
+  for (let t = 0; t < farTiles.length; t++) {
+    const mesh = farTiles[t];
+    mesh.instanceMatrix.needsUpdate = true;
+    if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+    mesh.computeBoundingSphere();
+    const s = mesh.boundingSphere!;
+    tileCx[t] = s.center.x;
+    tileCz[t] = s.center.z;
+    tileRad[t] = s.radius;
+  }
+
   const RMID2 = R_MID * R_MID;
   const RB2 = REBUILD_DIST * REBUILD_DIST;
   const maxRing = Math.ceil(R_MID / CELL) + 1; // cells beyond this are wholly out of range
@@ -781,6 +840,21 @@ function buildField(
   let nHidden = 0;
   let lastX = Infinity;
   let lastZ = Infinity;
+  // touched-tile set for the rebuild: hides/restores rewrite a few tiles' matrices, so
+  // we flip needsUpdate only on those, not all ~100. dirtyList collects, tileDirty dedups.
+  const tileDirty = new Uint8Array(farTiles.length);
+  const dirtyList: number[] = [];
+  const markTile = (mi: number): void => {
+    if (!tileDirty[mi]) {
+      tileDirty[mi] = 1;
+      dirtyList.push(mi);
+    }
+  };
+  // box-field master switch (dev B toggle) and optional view-distance cull (mobile/low
+  // preset). viewDist = Infinity -> the full vista, the default; finite -> hide tiles
+  // whose nearest point is beyond it. Both resolve to per-tile .visible in update().
+  let boxShown = true;
+  let viewDist = Infinity;
   function update(camX: number, camZ: number): void {
     const mdx = camX - lastX;
     const mdz = camZ - lastZ;
@@ -791,7 +865,8 @@ function buildField(
     // are still promoted, so a book that fell out of the detail tiers reappears in the box.
     for (let h = 0; h < nHidden; h++) {
       const i = hidden[h];
-      farMesh.setMatrixAt(i, m.fromArray(fullMat, i * 16));
+      farTiles[tileMeshOf[i]].setMatrixAt(slotOf[i], m.fromArray(fullMat, i * 16));
+      markTile(tileMeshOf[i]);
     }
     nHidden = 0;
     const cgx = Math.floor((camX - minX) / CELL);
@@ -817,14 +892,16 @@ function buildField(
           nearMesh.setMatrixAt(kNear, m.fromArray(fullMat, i * 16));
           nearMesh.setColorAt(kNear, c.fromArray(fullCol, i * 3));
           kNear++;
-          farMesh.setMatrixAt(i, HIDE); // detail draws it; collapse the box copy
+          farTiles[tileMeshOf[i]].setMatrixAt(slotOf[i], HIDE); // detail draws it; collapse the box copy
+          markTile(tileMeshOf[i]);
           hidden[nHidden++] = i;
         } else if (kMid < MID_CAP) {
           // mid band, or a near-band book that overflowed NEAR_CAP (still gets detail)
           midMesh.setMatrixAt(kMid, m.fromArray(fullMat, i * 16));
           midMesh.setColorAt(kMid, c.fromArray(fullCol, i * 3));
           kMid++;
-          farMesh.setMatrixAt(i, HIDE); // detail draws it; collapse the box copy
+          farTiles[tileMeshOf[i]].setMatrixAt(slotOf[i], HIDE); // detail draws it; collapse the box copy
+          markTile(tileMeshOf[i]);
           hidden[nHidden++] = i;
         }
         // else: both detail caps full, the always-drawn box base covers this book
@@ -854,15 +931,58 @@ function buildField(
     midMesh.count = kMid;
     midMesh.instanceMatrix.needsUpdate = true;
     if (midMesh.instanceColor) midMesh.instanceColor.needsUpdate = true;
-    // the restores and re-hides above rewrote a subset of the box matrix; push it once.
-    farMesh.instanceMatrix.needsUpdate = true;
+    // the restores and re-hides above rewrote a few tiles' matrices; push only those.
+    for (let d = 0; d < dirtyList.length; d++) {
+      const mi = dirtyList[d];
+      farTiles[mi].instanceMatrix.needsUpdate = true;
+      tileDirty[mi] = 0;
+    }
+    dirtyList.length = 0;
+    // view-distance / box-master visibility. Frustum culling is automatic (per tile);
+    // this only adds the optional distance gate. Skip the loop entirely on the default
+    // (infinite vista, box shown) so capable hardware pays nothing for it.
+    if (!boxShown || viewDist !== Infinity) {
+      for (let t = 0; t < farTiles.length; t++) {
+        const dx = camX - tileCx[t];
+        const dz = camZ - tileCz[t];
+        farTiles[t].visible =
+          boxShown && Math.hypot(dx, dz) - tileRad[t] <= viewDist;
+      }
+    }
   }
 
   const group = new THREE.Group();
-  group.add(farMesh);
+  for (const t of farTiles) group.add(t);
   group.add(midMesh);
   group.add(nearMesh);
-  return { group, px, pz, tier: tier as Uint8Array, update, nearMesh, midMesh };
+  // box-field controls: dev visibility toggle (B, for the perf baseline) and the
+  // view-distance setter (a future mobile/quality preset). setBoxVisible forces an
+  // immediate apply; the view-distance gate then re-resolves visibility on the next
+  // rebuild. n is the total instance count for the readout; farTiles.length the draw
+  // count when nothing is culled.
+  const setBoxVisible = (on: boolean): void => {
+    boxShown = on;
+    for (const t of farTiles) t.visible = on;
+  };
+  const isBoxVisible = (): boolean => boxShown;
+  const setViewDistance = (d: number): void => {
+    viewDist = d;
+    lastX = Infinity; // force the next update() to re-resolve tile visibility
+  };
+  return {
+    group,
+    px,
+    pz,
+    tier: tier as Uint8Array,
+    update,
+    nearMesh,
+    midMesh,
+    setBoxVisible,
+    isBoxVisible,
+    setViewDistance,
+    farTiles,
+    farTileCount: farTiles.length,
+  };
 }
 
 // Teleporter monuments (26): a ring of standing stones on the ground that the
@@ -1837,6 +1957,23 @@ async function main() {
     "font:11px/1.4 monospace;color:#9fe;background:rgba(0,0,0,.55);white-space:pre;";
   document.body.appendChild(perf);
 
+  // GPU timer (dev/baseline instrument). The render loop runs on setAnimationLoop,
+  // which is vsync-capped, so FPS and even the stats.js MS panel can't reveal how
+  // much GPU the book field actually costs while we sit under the refresh budget,
+  // and a CPU performance.now() around render() only times command submission, not
+  // the GPU work. EXT_disjoint_timer_query_webgl2 measures the true GPU duration of
+  // the render() call independent of vsync — the one number that moves when we cull
+  // triangles, so it's how we decide whether frustum tiling is worth building.
+  // One query in flight at a time, polled before the next is begun (a result isn't
+  // readable in its own frame); falls back to "n/a" where the ext is unavailable
+  // (notably Firefox, which gates it for fingerprinting). Result is in nanoseconds.
+  const glCtx = renderer.getContext() as WebGL2RenderingContext;
+  const timerExt = glCtx.getExtension("EXT_disjoint_timer_query_webgl2") as
+    | { TIME_ELAPSED_EXT: number; GPU_DISJOINT_EXT: number }
+    | null;
+  let gpuQueryInFlight: WebGLQuery | null = null;
+  let gpuMs = -1; // -1 = no sample yet / unsupported
+
   // spawn dead centre (0,0), on the summit of the present, facing outward across
   // the empty plaza. The first view is the whole uneven ring at once: a dense
   // wall of books toward the Western longitudes, near-empty ground toward the
@@ -2214,6 +2351,13 @@ async function main() {
       setFlatLit(!isFlatLit());
     } else if (e.code === "Backquote") {
       setPerf(!isPerf());
+    } else if (e.code === "KeyB") {
+      // baseline instrument (dev-only, throwaway): hide the entire far/box tier.
+      // box-off is the ceiling of perfect frustum culling — watch the gpu line with
+      // it on vs off, looking outward at spawn, to see what 574k boxes actually cost
+      // before we decide whether tiling can recover enough of it to be worth building.
+      built.setBoxVisible(!built.isBoxVisible());
+      console.log(`[perf] box field ${built.isBoxVisible() ? "shown" : "HIDDEN"}`);
     } else if (e.code === "Escape" && overlayOpen) {
       closeOverlay();
     }
@@ -2247,6 +2391,11 @@ async function main() {
   // worst-case ms for the two camera-driven rebuilds, reset each readout window,
   // so a bursty re-tessellation spike shows up instead of being averaged away.
   let booksMs = 0;
+  // scratch for the readout's post-cull box count: rebuild the camera frustum at the
+  // ~4 Hz readout tick and test each box tile's sphere, so we can show how many box
+  // tiles/books actually survive culling (the proof the tiling is doing its job).
+  const perfFrustum = new THREE.Frustum();
+  const perfPM = new THREE.Matrix4();
   const PICK_INTERVAL = 0.12; // ~8 Hz; the look-at label needn't be per-frame
   renderer.setAnimationLoop(() => {
     const dt = Math.min(clock.getDelta(), 0.1); // clamp after tab-out stalls
@@ -2313,7 +2462,33 @@ async function main() {
       1,
     );
     sky.update(depth, camera.position);
-    renderer.render(scene, camera);
+
+    // GPU-time the render: poll the previous frame's query, then wrap this render in
+    // a fresh one. A query can't be read in its own frame, so we keep just one in
+    // flight and read it a frame or two later — fine for a ~4 Hz readout.
+    if (timerExt) {
+      if (gpuQueryInFlight) {
+        const done = glCtx.getQueryParameter(gpuQueryInFlight, glCtx.QUERY_RESULT_AVAILABLE);
+        const disjoint = glCtx.getParameter(timerExt.GPU_DISJOINT_EXT);
+        if (done || disjoint) {
+          if (done && !disjoint) {
+            gpuMs = glCtx.getQueryParameter(gpuQueryInFlight, glCtx.QUERY_RESULT) / 1e6;
+          }
+          glCtx.deleteQuery(gpuQueryInFlight);
+          gpuQueryInFlight = null;
+        }
+      }
+      if (!gpuQueryInFlight) {
+        gpuQueryInFlight = glCtx.createQuery();
+        glCtx.beginQuery(timerExt.TIME_ELAPSED_EXT, gpuQueryInFlight);
+        renderer.render(scene, camera);
+        glCtx.endQuery(timerExt.TIME_ELAPSED_EXT);
+      } else {
+        renderer.render(scene, camera);
+      }
+    } else {
+      renderer.render(scene, camera);
+    }
 
     // read renderer.info AFTER render (it resets per frame), throttled to ~4 Hz so
     // the DOM write doesn't itself cost frames. The near count is the LOD's pulse:
@@ -2323,10 +2498,25 @@ async function main() {
     if (sinceStat >= 0.25) {
       sinceStat = 0;
       const r = renderer.info.render;
+      const gpuStr = !timerExt ? "n/a (no ext)" : gpuMs < 0 ? "…" : `${gpuMs.toFixed(2)}ms`;
+      // post-cull box count: how many tiles (and their instances) survive the frustum
+      // this view. The gap from farTileCount/field.n is exactly what tiling removed.
+      perfPM.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+      perfFrustum.setFromProjectionMatrix(perfPM);
+      let visTiles = 0;
+      let visBoxBooks = 0;
+      for (const t of built.farTiles) {
+        if (t.visible && perfFrustum.intersectsObject(t)) {
+          visTiles++;
+          visBoxBooks += t.count;
+        }
+      }
       perf.textContent =
+        `gpu    ${gpuStr}\n` +
         `calls  ${r.calls}\n` +
         `tris   ${(r.triangles / 1e6).toFixed(2)}M\n` +
-        `books  ${built.nearMesh.count.toLocaleString()} full + ${built.midMesh.count.toLocaleString()} mid / ${field.n.toLocaleString()} box\n` +
+        `near   ${built.nearMesh.count.toLocaleString()} full + ${built.midMesh.count.toLocaleString()} mid\n` +
+        `box    ${visBoxBooks.toLocaleString()} / ${field.n.toLocaleString()} drawn, ${visTiles}/${built.farTileCount} tiles${built.isBoxVisible() ? "" : " (HIDDEN)"}\n` +
         `bookfl ${booksMs.toFixed(1)}ms (peak)`;
       booksMs = 0;
     }
