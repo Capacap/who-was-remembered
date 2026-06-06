@@ -2,7 +2,13 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- viewport-fit=cover exposes env(safe-area-inset-*) so the touch controls clear
+         the notch / rounded corners; the game owns all gestures (touch-action:none on
+         the control surface), so disable the browser's own pinch-zoom. -->
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover"
+    />
     <title>Wikipedia Exploration — walker</title>
     <!-- Spectral: a screen-tuned old-style serif. The piece is a desert of books;
          the type should read like print, not OS chrome. One face throughout (the
@@ -600,6 +606,82 @@
         font-size: 11px;
       }
 
+      /* ── touch controls (coarse-pointer devices; shown from JS) ───────────
+         Left half drags a floating stick to move, right half drags to look, a tap on an
+         armed book inspects. The stick + chips wear the same bone-light-on-dark casing
+         as the rest of the floating HUD. touch-action:none so the browser's own pan/zoom
+         never fights the controls; the surface sits under the inspect/pause overlays
+         (which are display:flex with no z-index, and only ever shown while #touch is
+         hidden) and over the canvas. */
+      #touch {
+        position: fixed;
+        inset: 0;
+        display: none;
+        z-index: 90;
+        touch-action: none;
+        user-select: none;
+        -webkit-user-select: none;
+      }
+      #touch-stick {
+        position: absolute;
+        width: 112px;
+        height: 112px;
+        margin: -56px 0 0 -56px; /* centre the base on the touch point set from JS */
+        border-radius: 50%;
+        border: 1px solid rgba(233, 223, 200, 0.35);
+        background: rgba(18, 14, 9, 0.18);
+        display: none;
+        pointer-events: none;
+      }
+      #touch-thumb {
+        position: absolute;
+        left: 50%;
+        top: 50%;
+        width: 44px;
+        height: 44px;
+        border-radius: 50%;
+        transform: translate(-50%, -50%); /* JS adds the deflection offset */
+        background: rgba(233, 223, 200, 0.5);
+        box-shadow: 0 0 6px rgba(0, 0, 0, 0.5);
+      }
+      /* the two chips: bone outline on a dark fill, the .key language scaled up to a
+         thumb target. Skate takes the cool accent when engaged (it's a "the way out"-
+         adjacent locomotion state, and the accent lives over the dark scene). */
+      #touch-skate,
+      #touch-pause {
+        position: absolute;
+        pointer-events: auto;
+        font-family: var(--serif);
+        color: var(--bone-text);
+        text-shadow: var(--engrave);
+        background: rgba(18, 14, 9, 0.42);
+        border: 1px solid rgba(233, 223, 200, 0.45);
+        border-radius: 7px;
+        cursor: pointer;
+        -webkit-tap-highlight-color: transparent;
+      }
+      #touch-skate {
+        right: calc(env(safe-area-inset-right, 0px) + 22px);
+        bottom: calc(env(safe-area-inset-bottom, 0px) + 42px);
+        padding: 13px 20px;
+        font-size: 13px;
+        letter-spacing: 1.5px;
+        text-transform: uppercase;
+      }
+      #touch-skate.on {
+        color: var(--accent-bright);
+        border-color: var(--accent-bright);
+        background: rgba(42, 143, 134, 0.22);
+      }
+      #touch-pause {
+        top: calc(env(safe-area-inset-top, 0px) + 14px);
+        right: calc(env(safe-area-inset-right, 0px) + 14px);
+        width: 42px;
+        height: 42px;
+        font-size: 16px;
+        line-height: 1;
+      }
+
       /* fade-to-black for the jump. Above everything (HUD included) while the
          camera repositions, then fades back. */
       #fade {
@@ -667,11 +749,23 @@
               <input type="checkbox" id="dev-perf" /> Performance readout
               <span class="key">`</span>
             </label>
+            <label class="pause-toggle">
+              <input type="checkbox" id="dev-box" checked /> Box field
+              <span class="key">B</span>
+            </label>
           </div>
         </div>
       </div>
     </div>
     <div id="fade"></div>
+    <!-- touch controls: hidden until main.ts detects a coarse pointer and shows it.
+         The stick is positioned under the finger from JS (floating); the two chips are
+         the only fixed elements. -->
+    <div id="touch">
+      <div id="touch-stick"><div id="touch-thumb"></div></div>
+      <button id="touch-skate" type="button">Skate</button>
+      <button id="touch-pause" type="button" aria-label="Pause">⏸</button>
+    </div>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

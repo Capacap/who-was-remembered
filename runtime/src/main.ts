@@ -15,6 +15,7 @@ import {
   type PlayerUniform,
 } from "./terrain";
 import { buildSky } from "./sky";
+import { createTouchControls } from "./touch";
 import {
   buildDaylight,
   DAYLIGHT_FRAG_COMMON,
@@ -1694,6 +1695,21 @@ function createController(camera: THREE.PerspectiveCamera, dom: HTMLElement) {
   const vel = new THREE.Vector3(); // carried horizontal velocity (xz; y stays 0)
   let flying = false;
 
+  // touch input: a coarse-pointer device has no pointer lock and no keyboard, so an
+  // analog path feeds the SAME wish/look machinery as the keyboard + PointerLockControls.
+  // touchActive stands in for controls.isLocked (the active-scene gate); moveAxis is the
+  // stick deflection (-1..1 strafe/forward, magnitude = speed); look deltas accumulate and
+  // are drained each frame here (mouse look is PLC's own pointermove). See touch.ts.
+  let touchActive = false;
+  const moveAxis = new THREE.Vector2();
+  let touchSkate = false;
+  let lookDX = 0;
+  let lookDY = 0;
+  const TOUCH_LOOK = 0.004; // rad per drag-px (mouse is 0.002; touch wants a little more)
+  const PI_2 = Math.PI / 2;
+  const teuler = new THREE.Euler(0, 0, 0, "YXZ");
+  const coarse = window.matchMedia("(pointer: coarse)").matches;
+
   // vertical eye state, kept separate from camera.position.y so the cosmetic skate
   // lift can ride on top without feeding the physics. eyeY is the lift-free physics
   // height; vy is non-zero only mid-hop; vSurf is the smoothed rate the ground rises
@@ -1724,7 +1740,9 @@ function createController(camera: THREE.PerspectiveCamera, dom: HTMLElement) {
     keys.clear();
     vel.set(0, 0, 0);
   });
-  dom.addEventListener("click", () => controls.lock());
+  // desktop enters look-mode by clicking the canvas; on touch the tap surface IS the
+  // controls (requestPointerLock is meaningless there), so skip it on coarse pointers.
+  if (!coarse) dom.addEventListener("click", () => controls.lock());
 
   const forward = new THREE.Vector3();
   const right = new THREE.Vector3();
@@ -1743,7 +1761,23 @@ function createController(camera: THREE.PerspectiveCamera, dom: HTMLElement) {
   };
 
   function update(dt: number): MoveMode {
-    if (!controls.isLocked) return flying ? "fly" : "walk";
+    if (!controls.isLocked && !touchActive) return flying ? "fly" : "walk";
+
+    // touch look: apply the accumulated drag with the same Euler('YXZ') + pole clamp
+    // PLC uses for the mouse, read fresh from the quaternion so it composes with a
+    // lookAt reset (spawn / return to start) exactly as mouse look does.
+    if (touchActive && (lookDX !== 0 || lookDY !== 0)) {
+      teuler.setFromQuaternion(camera.quaternion);
+      teuler.y -= lookDX * TOUCH_LOOK;
+      teuler.x -= lookDY * TOUCH_LOOK;
+      teuler.x = Math.max(
+        PI_2 - controls.maxPolarAngle,
+        Math.min(PI_2 - controls.minPolarAngle, teuler.x),
+      );
+      camera.quaternion.setFromEuler(teuler);
+      lookDX = 0;
+      lookDY = 0;
+    }
 
     camera.getWorldDirection(forward);
     if (!flying) forward.y = 0; // grounded: ignore pitch, move along the ground
@@ -1767,8 +1801,8 @@ function createController(camera: THREE.PerspectiveCamera, dom: HTMLElement) {
       return "fly";
     }
 
-    // grounded: walk by default, skate while Shift is held.
-    const skating = keys.has("ShiftLeft") || keys.has("ShiftRight");
+    // grounded: walk by default, skate while Shift is held (or the touch skate toggle).
+    const skating = keys.has("ShiftLeft") || keys.has("ShiftRight") || touchSkate;
     const cfg = skating ? MOVE.skate : MOVE.walk;
 
     wish.set(0, 0, 0);
@@ -1776,10 +1810,17 @@ function createController(camera: THREE.PerspectiveCamera, dom: HTMLElement) {
     if (keys.has("KeyS") || keys.has("ArrowDown")) wish.sub(forward);
     if (keys.has("KeyD") || keys.has("ArrowRight")) wish.add(right);
     if (keys.has("KeyA") || keys.has("ArrowLeft")) wish.sub(right);
+    // analog touch stick: deflection sets both heading and (via wish length) speed.
+    if (touchActive && moveAxis.lengthSq() > 0) {
+      wish.addScaledVector(forward, moveAxis.y);
+      wish.addScaledVector(right, moveAxis.x);
+    }
 
     if (wish.lengthSq() > 0) {
-      // accelerate toward the wished heading at top speed
-      target.copy(wish.normalize()).multiplyScalar(cfg.max);
+      // accelerate toward the wished heading. Keyboard wishes are length >=1 → full
+      // speed (unchanged); the analog stick scales the cap by its deflection (<=1).
+      const defl = Math.min(1, wish.length());
+      target.copy(wish).normalize().multiplyScalar(cfg.max * defl);
       approach(cfg.accel * dt);
     } else {
       // no input: ease toward rest at the mode's decel (skate coasts, walk brakes hard)
@@ -1881,7 +1922,38 @@ function createController(camera: THREE.PerspectiveCamera, dom: HTMLElement) {
     vel.set(0, 0, 0);
   };
 
-  return { controls, update, stop, getFlying, setFlying };
+  // touch input surface (driven by touch.ts via main). setTouchActive mirrors the
+  // lock state for coarse-pointer play; going inactive drops the analog input + any
+  // carried velocity so a paused player never resumes mid-glide.
+  const setTouchActive = (v: boolean) => {
+    touchActive = v;
+    if (!v) {
+      moveAxis.set(0, 0);
+      lookDX = 0;
+      lookDY = 0;
+      vel.set(0, 0, 0);
+    }
+  };
+  const setMoveAxis = (x: number, y: number) => moveAxis.set(x, y);
+  const addLook = (dx: number, dy: number) => {
+    lookDX += dx;
+    lookDY += dy;
+  };
+  const setTouchSkate = (v: boolean) => {
+    touchSkate = v;
+  };
+
+  return {
+    controls,
+    update,
+    stop,
+    getFlying,
+    setFlying,
+    setTouchActive,
+    setMoveAxis,
+    addLook,
+    setTouchSkate,
+  };
 }
 
 async function main() {
@@ -1954,10 +2026,17 @@ async function main() {
   applyRenderScale();
   document.body.appendChild(renderer.domElement);
 
-  const { controls, update, stop, getFlying, setFlying } = createController(
-    camera,
-    renderer.domElement,
-  );
+  const {
+    controls,
+    update,
+    stop,
+    getFlying,
+    setFlying,
+    setTouchActive,
+    setMoveAxis,
+    addLook,
+    setTouchSkate,
+  } = createController(camera, renderer.domElement);
   scene.add(controls.object);
   // dev hook, same convention as window.MOVE: lets the camera be posed/inspected from the
   // devtools console (or a headless screenshot) without pointer lock or a rebuild.
@@ -2103,6 +2182,42 @@ async function main() {
 
   let aim: Aim = null; // what the reticle is over (book or teleporter), or null
   let overlayOpen = false;
+  // touch has no pointer lock, so a coarse-pointer device tracks "in the scene" with
+  // its own flag; inScene() unifies the two so the picker/inspect gate reads the same
+  // on both. The flag is driven by sceneEnter/sceneLeave alongside the controller's.
+  let touchActive = false;
+  const inScene = () => controls.isLocked || touchActive;
+  // contextual wording: no Esc / no keycaps on touch, so prompts say "tap".
+  const closeHint = isTouch
+    ? "Tap outside to close"
+    : "Esc or click outside to close";
+
+  // The touch UI is created later (it needs the pause/inspect entry points), but the
+  // scene-transition helpers reference it, so declare the handle up front. sceneLeave/
+  // sceneEnter are the platform-agnostic "an overlay takes over" / "back to play" pair:
+  // desktop drives the UI off PointerLock's lock/unlock events, touch drives it off the
+  // touchActive flag + showing/hiding the controls (no lock to hang events on). Every
+  // overlay/pause path calls these instead of controls.lock()/unlock() directly.
+  let touch: ReturnType<typeof createTouchControls> | null = null;
+  const sceneLeave = () => {
+    if (isTouch) {
+      touchActive = false;
+      setTouchActive(false);
+      touch?.setEnabled(false);
+    } else {
+      controls.unlock();
+    }
+  };
+  const sceneEnter = () => {
+    if (isTouch) {
+      touchActive = true;
+      setTouchActive(true);
+      touch?.setEnabled(true);
+      pauseEl.style.display = "none"; // no 'lock' event on touch to hide it for us
+    } else {
+      controls.lock();
+    }
+  };
 
   const renderName = (i: number) => escapeHtml(meta.name(i) || "(untitled)");
   const renderDesc = (i: number) => escapeHtml(meta.desc(i));
@@ -2110,6 +2225,12 @@ async function main() {
   // The look-at prompt for whatever's under the reticle. A teleporter borrows the
   // book's glance layout exactly -- name / detail / era / action -- so the two read
   // as one grammar; only the words and the verb ("travel" vs "inspect") differ.
+  // the verb line: a keycap on desktop ("E inspect"), tap wording on touch
+  // ("Tap to inspect") — same affordance, the device's own idiom.
+  const actLine = (verb: string) =>
+    isTouch
+      ? `<div class="act">Tap to ${verb}</div>`
+      : `<div class="act"><span class="key">E</span> ${verb}</div>`;
   function showGlance(a: { kind: "book" | "tp"; i: number }) {
     if (a.kind === "tp") {
       const tp = teleporters[a.i];
@@ -2117,7 +2238,7 @@ async function main() {
         `<div class="name">◎ ${escapeHtml(tp.label)}</div>` +
         (tp.seat ? `<div class="desc">${escapeHtml(tp.seat)}</div>` : "") +
         (tp.era ? `<div class="years">${escapeHtml(tp.era)}</div>` : "") +
-        `<div class="act"><span class="key">E</span> travel</div>`;
+        actLine("travel");
       glance.style.display = "block";
       return;
     }
@@ -2128,7 +2249,7 @@ async function main() {
       `<div class="name">${renderName(i)}</div>` +
       (desc ? `<div class="desc">${desc}</div>` : "") +
       (years ? `<div class="years">${years}</div>` : "") +
-      `<div class="act"><span class="key">E</span> inspect</div>`;
+      actLine("inspect");
     glance.style.display = "block";
   }
 
@@ -2144,7 +2265,7 @@ async function main() {
       `<a href="${escapeHtml(url)}" target="_blank" rel="noopener">Read on Wikipedia →</a>` +
       `<button id="bookmarkBtn"></button>` +
       `</div>` +
-      `<div class="hint">Esc or click outside to close</div>`;
+      `<div class="hint">${closeHint}</div>`;
     const btn = card.querySelector("#bookmarkBtn") as HTMLButtonElement;
     const renderBtn = () => {
       const on = compass.has(i);
@@ -2160,7 +2281,7 @@ async function main() {
     overlayOpen = true;
     glance.style.display = "none";
     reticle.classList.remove("armed");
-    controls.unlock(); // free the cursor so the link is clickable
+    sceneLeave(); // free the cursor (desktop) / freeze + hide touch UI so the card is tappable
   }
 
   function closeOverlay() {
@@ -2170,8 +2291,9 @@ async function main() {
     // pointer programmatically (not a user Esc), so no post-Esc throttle applies here;
     // every caller (scrim click, Esc keydown, a travel pick) is a live user gesture, so
     // the re-lock request is honoured. (A book/tp open suppressed the pause menu via
-    // overlayOpen, so this is the only thing that owns the unlocked moment.)
-    controls.lock();
+    // overlayOpen, so this is the only thing that owns the unlocked moment.) On touch
+    // this re-arms the controls flag and re-shows the stick instead.
+    sceneEnter();
   }
 
   // --- teleporter travel ----------------------------------------------------
@@ -2218,14 +2340,14 @@ async function main() {
       `<div class="name">◎ ${escapeHtml(here.label)}</div>` +
       `<div class="desc">Visit another time and place.</div>` +
       `<div class="tp-list">${rows}</div>` +
-      `<div class="hint">Esc or click outside to close</div>`;
+      `<div class="hint">${closeHint}</div>`;
     card.querySelectorAll<HTMLButtonElement>(".tp-dest").forEach((btn) => {
       btn.addEventListener("click", () => travelTo(Number(btn.dataset.i)));
     });
     overlay.style.display = "flex";
     overlayOpen = true;
     glance.style.display = "none";
-    controls.unlock(); // free the cursor so destinations are clickable
+    sceneLeave(); // free the cursor / freeze + hide touch UI so destinations are tappable
   }
 
   // click on the backdrop (not the card) closes; clicking the card/link doesn't.
@@ -2267,6 +2389,7 @@ async function main() {
   const devFlyEl = document.getElementById("dev-fly") as HTMLInputElement;
   const devFlatEl = document.getElementById("dev-flat") as HTMLInputElement;
   const devPerfEl = document.getElementById("dev-perf") as HTMLInputElement;
+  const devBoxEl = document.getElementById("dev-box") as HTMLInputElement;
   const spinnerEl = document.getElementById("pause-spinner") as HTMLSpanElement;
 
   // Resolution (render scale) — player-facing, NOT behind the dev gate. A segmented
@@ -2305,15 +2428,20 @@ async function main() {
     devFlyEl.checked = getFlying();
     devFlatEl.checked = isFlatLit();
     devPerfEl.checked = isPerf();
+    devBoxEl.checked = built.isBoxVisible();
     syncQuality();
     syncDevOpts();
     pauseEl.style.display = "flex";
-    spinnerEl.classList.add("show");
-    if (cooldownTimer) clearTimeout(cooldownTimer);
-    cooldownTimer = window.setTimeout(() => {
-      cooldownTimer = 0;
-      spinnerEl.classList.remove("show");
-    }, COOLDOWN_HINT_MS);
+    // the readiness spinner is the post-Esc re-lock cooldown hint; touch has no pointer
+    // lock and thus no cooldown, so its Resume takes instantly — skip the spinner there.
+    if (!isTouch) {
+      spinnerEl.classList.add("show");
+      if (cooldownTimer) clearTimeout(cooldownTimer);
+      cooldownTimer = window.setTimeout(() => {
+        cooldownTimer = 0;
+        spinnerEl.classList.remove("show");
+      }, COOLDOWN_HINT_MS);
+    }
   };
   // Resume re-locks the pointer. The pause menu is reached via Esc — the one exit that
   // trips Chrome's post-Esc throttle (the book/tp overlays unlock programmatically, so
@@ -2327,6 +2455,10 @@ async function main() {
   // no-op rather than an uncaught SecurityError; three's own pointerlockerror logger is
   // dropped just below so the throttled attempt prints nothing either.
   const resume = () => {
+    if (isTouch) {
+      sceneEnter(); // re-arm the controls + hide the menu; no pointer lock to request
+      return;
+    }
     const p = renderer.domElement.requestPointerLock() as Promise<void> | undefined;
     if (p && typeof p.then === "function") p.catch(() => {});
   };
@@ -2361,6 +2493,7 @@ async function main() {
   devFlyEl.addEventListener("change", () => setFlying(devFlyEl.checked));
   devFlatEl.addEventListener("change", () => setFlatLit(devFlatEl.checked));
   devPerfEl.addEventListener("change", () => setPerf(devPerfEl.checked));
+  devBoxEl.addEventListener("change", () => built.setBoxVisible(devBoxEl.checked));
   (document.getElementById("pause-resume") as HTMLButtonElement).addEventListener(
     "click",
     resume,
@@ -2383,6 +2516,33 @@ async function main() {
       cooldownTimer = 0;
     }
   });
+
+  // ── touch controls (coarse-pointer devices) ─────────────────────────────
+  // Build the analog surface and wire it to the same entry points the keyboard/mouse
+  // uses: the stick + drag feed the controller, a tap on an armed reticle inspects or
+  // travels, the pause chip drops to the menu. The glance/close wording already says
+  // "tap" (isTouch); here we also swap the intro hint and start in the scene, since
+  // there's no click-to-lock gesture to wait for on touch.
+  if (isTouch) {
+    controlsHud.innerHTML =
+      `<div class="ctl">Left half to move · right half to look</div>` +
+      `<div class="ctl">Tap a book to inspect · ⏸ to pause</div>`;
+    touch = createTouchControls({
+      onMove: (x, y) => setMoveAxis(x, y),
+      onLook: (dx, dy) => addLook(dx, dy),
+      onSkateToggle: (on) => setTouchSkate(on),
+      onTap: () => {
+        if (overlayOpen || !touchActive || !aim) return;
+        if (aim.kind === "tp") openTravel(aim.i);
+        else openOverlay(aim.i);
+      },
+      onPause: () => {
+        sceneLeave();
+        showPause();
+      },
+    });
+    sceneEnter(); // begin active: show the stick + arm the controller's touch path
+  }
 
   document.addEventListener("keydown", (e) => {
     if (e.code === "KeyE" && !overlayOpen && controls.isLocked && aim) {
@@ -2456,7 +2616,7 @@ async function main() {
     // look-at picking: only while walking the scene (locked) and not inspecting.
     // Suppressed while skating so the glance prompt doesn't strobe as books blow past.
     sincePick += dt;
-    if (!overlayOpen && controls.isLocked && mode !== "skate") {
+    if (!overlayOpen && inScene() && mode !== "skate") {
       if (sincePick >= PICK_INTERVAL) {
         sincePick = 0;
         aim = pick();
