@@ -3,6 +3,7 @@ import { PointerLockControls } from "three/examples/jsm/controls/PointerLockCont
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { DRACOLoader } from "three/examples/jsm/loaders/DRACOLoader.js";
 import Stats from "three/examples/jsm/libs/stats.module.js";
+import bookUrl from "./assets/meshes/book.glb?url";
 import {
   initTerrain,
   initHeightmap,
@@ -1823,7 +1824,7 @@ async function main() {
       loadMeta("meta.bin"),
       loadWorld("world.json"),
       loadHeightmap("heightmap.bin"),
-      loadBookLods("book.glb", ["book_LOD00", "book_LOD01"]),
+      loadBookLods(bookUrl, ["book_LOD00", "book_LOD01"]),
     ]);
   mark("fetch+decode");
   // the heightmap is the ground-height source for the ground mesh and the player's
