@@ -1253,6 +1253,11 @@ function createCompass(
 type MoveMode = "walk" | "skate" | "fly";
 function createController(camera: THREE.PerspectiveCamera, dom: HTMLElement) {
   const controls = new PointerLockControls(camera, dom);
+  // Inset the pitch limits one degree off true vertical: at the poles the look
+  // direction's horizontal component collapses and the compass bearing degenerates.
+  const POLE_GUARD = Math.PI / 180; // 1°
+  controls.minPolarAngle = POLE_GUARD;
+  controls.maxPolarAngle = Math.PI - POLE_GUARD;
   const keys = new Set<string>();
   const vel = new THREE.Vector3(); // carried horizontal velocity (xz; y stays 0)
   let flying = false;
