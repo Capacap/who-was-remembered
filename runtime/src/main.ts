@@ -1740,7 +1740,17 @@ function createController(camera: THREE.PerspectiveCamera, dom: HTMLElement) {
   // zero the carried velocity (teleport/spawn shouldn't arrive mid-glide).
   const stop = () => vel.set(0, 0, 0);
 
-  return { controls, update, stop };
+  // flight is a dev affordance; the pause menu drives it through the same path as
+  // the F key (drop carried momentum so neither mode lurches), and reads it back to
+  // keep the menu checkbox in sync with the key.
+  const getFlying = () => flying;
+  const setFlying = (v: boolean) => {
+    if (v === flying) return;
+    flying = v;
+    vel.set(0, 0, 0);
+  };
+
+  return { controls, update, stop, getFlying, setFlying };
 }
 
 async function main() {
@@ -1792,7 +1802,10 @@ async function main() {
   renderer.setSize(window.innerWidth, window.innerHeight);
   document.body.appendChild(renderer.domElement);
 
-  const { controls, update, stop } = createController(camera, renderer.domElement);
+  const { controls, update, stop, getFlying, setFlying } = createController(
+    camera,
+    renderer.domElement,
+  );
   scene.add(controls.object);
   // dev hook, same convention as window.MOVE: lets the camera be posed/inspected from the
   // devtools console (or a headless screenshot) without pointer lock or a rebuild.
@@ -1984,6 +1997,12 @@ async function main() {
   function closeOverlay() {
     overlay.style.display = "none";
     overlayOpen = false;
+    // straight back to walking, not the bare-cursor limbo. The overlay unlocked the
+    // pointer programmatically (not a user Esc), so no post-Esc throttle applies here;
+    // every caller (scrim click, Esc keydown, a travel pick) is a live user gesture, so
+    // the re-lock request is honoured. (A book/tp open suppressed the pause menu via
+    // overlayOpen, so this is the only thing that owns the unlocked moment.)
+    controls.lock();
   }
 
   // --- teleporter travel ----------------------------------------------------
@@ -2044,24 +2063,124 @@ async function main() {
   overlay.addEventListener("click", (e) => {
     if (e.target === overlay) closeOverlay();
   });
+  // ── dev toggles ─────────────────────────────────────────────────────────
+  // Each dev affordance has ONE setter so the keyboard shortcut and the pause-menu
+  // checkbox drive identical state; the menu re-reads the is* getters on open to stay
+  // in sync with whatever the keys did since. (Flight is the controller's, via F.)
+  const setFlatLit = (on: boolean) => {
+    // toggle the daylight (storm-shadow) field off, so the ground shows its full
+    // Lambert-lit albedo with no day/night darkening — judges the sand colours without
+    // the world shrouded in moving shadow. uDaylightMix is shared into the ground and
+    // book materials, so one flip neutralises the whole field.
+    daylight.uniforms.uDaylightMix.value = on ? 0 : 1;
+  };
+  const isFlatLit = () => daylight.uniforms.uDaylightMix.value === 0;
+  const setPerf = (on: boolean) => {
+    // show/hide the perf readout (stats.js + the LOD numbers). Hidden by default so the
+    // shipped view is clean; this is how we confirm the book LOD is working.
+    stats.dom.style.display = on ? "block" : "none";
+    perf.style.display = on ? "block" : "none";
+  };
+  const isPerf = () => stats.dom.style.display !== "none";
+
+  // ── pause menu ──────────────────────────────────────────────────────────
+  // The unlocked state IS the menu: releasing the pointer lock (Esc) over the scene
+  // surfaces it; Resume or a scrim click re-locks. The teleporter overlay also unlocks
+  // (to free the cursor for its links) but sets overlayOpen first, so we suppress the
+  // menu there and let the card own that unlocked moment. We DON'T bind Esc-to-resume:
+  // browsers throttle requestPointerLock for ~1s after an Esc-exit, so a keyboard
+  // re-lock would silently fail — the click paths land well after that window. Hiding
+  // is driven by the 'lock' event (not optimistically), so a throttled lock leaves the
+  // menu up to click again rather than stranding a bare cursor.
+  const pauseEl = document.getElementById("pause") as HTMLDivElement;
+  const devModeEl = document.getElementById("dev-mode") as HTMLInputElement;
+  const devOptsEl = document.getElementById("dev-opts") as HTMLDivElement;
+  const devFlyEl = document.getElementById("dev-fly") as HTMLInputElement;
+  const devFlatEl = document.getElementById("dev-flat") as HTMLInputElement;
+  const devPerfEl = document.getElementById("dev-perf") as HTMLInputElement;
+  const spinnerEl = document.getElementById("pause-spinner") as HTMLSpanElement;
+
+  // The menu only ever opens on an Esc exit (overlay unlocks are suppressed above), so
+  // the post-Esc re-lock cooldown is ALWAYS ticking when it appears — a documented fixed
+  // 1250ms (Chromium kEffectiveUserEscapeDuration). Spin a little indicator for that
+  // window so a too-early Resume click reads as "preparing", not broken; clear it on a
+  // timer. This is purely the visual hint — the actual re-lock stays attempt-driven, so
+  // if the constant ever differs the lock still takes correctly, only the spinner's
+  // dwell would be off. The spinner is absolutely positioned, so toggling it never
+  // reflows the card.
+  const COOLDOWN_HINT_MS = 1250;
+  let cooldownTimer = 0;
+  const syncDevOpts = () => {
+    devOptsEl.style.display = devModeEl.checked ? "block" : "none";
+  };
+  const showPause = () => {
+    devFlyEl.checked = getFlying();
+    devFlatEl.checked = isFlatLit();
+    devPerfEl.checked = isPerf();
+    syncDevOpts();
+    pauseEl.style.display = "flex";
+    spinnerEl.classList.add("show");
+    if (cooldownTimer) clearTimeout(cooldownTimer);
+    cooldownTimer = window.setTimeout(() => {
+      cooldownTimer = 0;
+      spinnerEl.classList.remove("show");
+    }, COOLDOWN_HINT_MS);
+  };
+  // Resume re-locks the pointer. The pause menu is reached via Esc — the one exit that
+  // trips Chrome's post-Esc throttle (the book/tp overlays unlock programmatically, so
+  // they re-lock instantly; a pause resumed inside the throttle can't be quite that
+  // quick). Rather than guess the throttle's length and gate on it — an over-long guess
+  // eats good clicks (the bug that made this feel laggy), too short re-spams the error —
+  // we just ATTEMPT the lock on every click: it takes the instant the browser allows,
+  // usually the first click, and a too-early click is a silent no-op (the menu hides
+  // only on the real 'lock' event, so it stays up and the next click takes). We call
+  // requestPointerLock directly to OWN its promise, so a throttled reject is a caught
+  // no-op rather than an uncaught SecurityError; three's own pointerlockerror logger is
+  // dropped just below so the throttled attempt prints nothing either.
+  const resume = () => {
+    const p = renderer.domElement.requestPointerLock() as Promise<void> | undefined;
+    if (p && typeof p.then === "function") p.catch(() => {});
+  };
+  // three logs a console.error from its own pointerlockerror handler on every failed
+  // lock; since our resume makes deliberate throttled attempts we handle via the caught
+  // promise, that log is pure noise. Remove it (guarded: a future three rename just
+  // brings the log back, it can't crash).
+  const errLogger = (controls as unknown as { _onPointerlockError?: EventListener })
+    ._onPointerlockError;
+  if (errLogger)
+    renderer.domElement.ownerDocument.removeEventListener("pointerlockerror", errLogger);
+
+  devModeEl.addEventListener("change", syncDevOpts);
+  devFlyEl.addEventListener("change", () => setFlying(devFlyEl.checked));
+  devFlatEl.addEventListener("change", () => setFlatLit(devFlatEl.checked));
+  devPerfEl.addEventListener("change", () => setPerf(devPerfEl.checked));
+  (document.getElementById("pause-resume") as HTMLButtonElement).addEventListener(
+    "click",
+    resume,
+  );
+  pauseEl.addEventListener("click", (e) => {
+    if (e.target === pauseEl) resume(); // scrim click resumes; clicks on the card don't
+  });
+  controls.addEventListener("unlock", () => {
+    if (!overlayOpen) showPause();
+  });
+  controls.addEventListener("lock", () => {
+    pauseEl.style.display = "none";
+    spinnerEl.classList.remove("show");
+    if (cooldownTimer) {
+      clearTimeout(cooldownTimer);
+      cooldownTimer = 0;
+    }
+  });
+
   document.addEventListener("keydown", (e) => {
     if (e.code === "KeyE" && !overlayOpen && controls.isLocked && aim) {
       if (aim.kind === "tp") openTravel(aim.i);
       else openOverlay(aim.i);
     } else if (e.code === "KeyL") {
-      // dev: toggle the daylight (storm-shadow) field off, so the ground shows its
-      // full Lambert-lit albedo with no day/night darkening. Lets the sand colours be
-      // judged without the world shrouded in moving shadow. uDaylightMix is shared into
-      // the ground and book materials, so one flip neutralises the whole field.
-      const u = daylight.uniforms.uDaylightMix;
-      u.value = u.value > 0 ? 0 : 1;
-      console.log(`[dev] daylight field ${u.value ? "on" : "off (flat-lit)"}`);
+      setFlatLit(!isFlatLit());
     } else if (e.code === "Backquote") {
-      // dev: show/hide the perf readout (stats.js + the LOD numbers). Hidden by
-      // default so the shipped view is clean; ` brings it back when profiling.
-      const show = stats.dom.style.display === "none";
-      stats.dom.style.display = show ? "block" : "none";
-      perf.style.display = show ? "block" : "none";
+      setPerf(!isPerf());
     } else if (e.code === "Escape" && overlayOpen) {
       closeOverlay();
     }

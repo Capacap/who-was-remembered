@@ -424,6 +424,134 @@
         background: transparent;
       }
 
+      /* ── pause menu (the unlocked state) ─────────────────────────────────
+         Releasing the pointer lock surfaces this over the softly-rendering scene.
+         The same archival card as #overlay — bone paper, ink, a ruled title — so the
+         deliberate panels read as one family. Resume (or a scrim click) re-locks. The
+         developer block is gated behind a toggle so a normal viewer never meets the
+         dev affordances (fly, flat-lit, perf readout). */
+      #pause {
+        position: fixed;
+        inset: 0;
+        display: none;
+        align-items: center;
+        justify-content: center;
+        background: radial-gradient(
+          ellipse at center,
+          rgba(16, 12, 7, 0.66),
+          rgba(16, 12, 7, 0.46)
+        );
+      }
+      #pause-card {
+        min-width: 300px;
+        max-width: 360px;
+        padding: 26px 30px 24px;
+        background: rgba(236, 226, 204, 0.93);
+        backdrop-filter: blur(3px);
+        border: 1px solid rgba(44, 35, 23, 0.18);
+        border-radius: 2px;
+        color: var(--ink);
+        font-family: var(--serif);
+        font-size: 15px;
+        line-height: 1.5;
+      }
+      #pause-card .pause-title {
+        font-size: 22px;
+        font-weight: 600;
+        letter-spacing: 0.2px;
+        margin: 0 0 14px;
+        padding-bottom: 8px;
+        border-bottom: 1px solid var(--rule);
+      }
+      /* Resume: a quiet ruled text action in the warm card accent, matching the
+         Wikipedia link on the inspect card, not a chunky CTA button. */
+      #pause-resume {
+        background: none;
+        border: none;
+        padding: 0 0 1px;
+        cursor: pointer;
+        color: var(--ink-accent);
+        border-bottom: 1px solid var(--ink-accent);
+        font: inherit;
+        font-weight: 500;
+      }
+      #pause-resume:hover {
+        color: var(--ink);
+        border-color: var(--ink);
+      }
+      /* readiness spinner: the Esc-exit re-lock cooldown (a fixed ~1.25s Chrome
+         constant) makes a Resume click in the first moment a silent no-op. This little
+         ring spins through that window so the wait reads as "preparing", not broken.
+         Absolutely positioned off the button's right edge, so showing/hiding it never
+         reflows the card. Ink-on-bone, no web chrome. */
+      .pause-resume-row {
+        position: relative;
+        display: inline-block;
+      }
+      #pause-spinner {
+        position: absolute;
+        left: 100%;
+        top: 50%;
+        margin: -6px 0 0 10px;
+        width: 12px;
+        height: 12px;
+        border: 2px solid var(--rule);
+        border-top-color: var(--ink-soft);
+        border-radius: 50%;
+        display: none;
+        animation: pause-spin 0.7s linear infinite;
+      }
+      #pause-spinner.show {
+        display: block;
+      }
+      @keyframes pause-spin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+      /* developer section: a hairline-topped block — the gate, then the gated opts. */
+      #pause-dev {
+        margin-top: 20px;
+        padding-top: 14px;
+        border-top: 1px solid var(--rule);
+      }
+      #dev-opts {
+        display: none;
+        margin-top: 8px;
+        padding-left: 2px;
+      }
+      .pause-toggle {
+        display: flex;
+        align-items: center;
+        gap: 9px;
+        padding: 5px 0;
+        cursor: pointer;
+        color: var(--ink);
+        user-select: none;
+      }
+      .pause-toggle input {
+        /* tint the native control to the card's warm accent so it belongs to the
+           ink-on-bone palette rather than wearing the OS blue. */
+        accent-color: var(--ink-accent);
+        width: 14px;
+        height: 14px;
+        cursor: pointer;
+      }
+      #dev-opts .pause-toggle {
+        color: var(--ink-soft);
+        font-size: 14px;
+      }
+      /* keycap chip ON the bone card: ink outline, not the bone-on-dark .key wears
+         over the scene. Pushed to the row's right edge as a reference, not a button. */
+      .pause-toggle .key {
+        margin-left: auto;
+        border: 1px solid rgba(44, 35, 23, 0.4);
+        background: rgba(44, 35, 23, 0.06);
+        color: var(--ink-soft);
+        text-shadow: none;
+        font-size: 11px;
+      }
+
       /* fade-to-black for the jump. Above everything (HUD included) while the
          camera repositions, then fades back. */
       #fade {
@@ -452,11 +580,39 @@
         <span class="key">WASD</span> move · <span class="key">Shift</span> skate
       </div>
       <div class="ctl">
-        click to look · <span class="key">Esc</span> release
+        click to look · <span class="key">Esc</span> pause
       </div>
     </div>
     <div id="overlay">
       <div id="card"></div>
+    </div>
+    <div id="pause">
+      <div id="pause-card">
+        <div class="pause-title">Paused</div>
+        <div class="pause-resume-row">
+          <button id="pause-resume">Resume</button>
+          <span id="pause-spinner" aria-hidden="true"></span>
+        </div>
+        <div id="pause-dev">
+          <label class="pause-toggle">
+            <input type="checkbox" id="dev-mode" /> Developer mode
+          </label>
+          <div id="dev-opts">
+            <label class="pause-toggle">
+              <input type="checkbox" id="dev-fly" /> Fly
+              <span class="key">F</span>
+            </label>
+            <label class="pause-toggle">
+              <input type="checkbox" id="dev-flat" /> Flat-lit
+              <span class="key">L</span>
+            </label>
+            <label class="pause-toggle">
+              <input type="checkbox" id="dev-perf" /> Performance readout
+              <span class="key">`</span>
+            </label>
+          </div>
+        </div>
+      </div>
     </div>
     <div id="fade"></div>
     <script type="module" src="/src/main.ts"></script>
