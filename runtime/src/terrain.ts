@@ -237,6 +237,11 @@ const TP_GLOW_PULSE_SPEED = 0.6; // pulse rate against the drifting uDriftTime
 const TP_GLOW_APPROACH_NEAR = 70; // player distance (world u) at which the pad reaches full intensity
 const TP_GLOW_APPROACH_FAR = 260; // beyond this the pad sits at the dim far level
 const TP_GLOW_FAR_LEVEL = 0.3; // intensity multiplier when far (0..1)
+// One-sided daylight lift, mirrors the beam (main.ts TP_BEAM_DAY_BOOST). The pad is
+// added AFTER the daylight multiply so a shadow never dims it; this only scales it UP
+// when the drifting light crosses the plaza, so pad and beam swell together. Keep the
+// value matched to TP_BEAM_DAY_BOOST so the whole beacon breathes as one.
+const TP_GLOW_DAY_BOOST = 7.5; // additive multiplier in full daylight (1 = no lift). Eyeball.
 const _tgi = TP_GLOW_INNER.clone().convertSRGBToLinear();
 const _tgo = TP_GLOW_OUTER.clone().convertSRGBToLinear();
 const TP_GLOW_INNER_RGB = `vec3(${_tgi.r.toFixed(4)}, ${_tgi.g.toFixed(4)}, ${_tgi.b.toFixed(4)})`;
@@ -458,7 +463,11 @@ function applyGroundMaterial(
          vec3 tpCol = mix(tpInner, ${TP_GLOW_OUTER_RGB}, tpT);
          // slow breathing pulse so the pad reads as powered, not painted.
          float tpPulse = 1.0 - ${TP_GLOW_PULSE.toFixed(2)} * (0.5 - 0.5 * cos(uDriftTime * ${TP_GLOW_PULSE_SPEED.toFixed(3)}));
-         gl_FragColor.rgb += tpGlow * tpCol * (${TP_GLOW_STRENGTH.toFixed(2)} * tpPulse * tpProx);
+         // one-sided daylight lift, in lockstep with the beam: never dims (added after the
+         // daylight multiply), just swells when a daylight pool crosses the plaza. beaconLit
+         // is the point-sample reader (distance-independent), not the ground's daylightAt.
+         float tpDayGain = mix(1.0, ${TP_GLOW_DAY_BOOST.toFixed(2)}, beaconLit(vWorldPos.xz) * uDaylightMix);
+         gl_FragColor.rgb += tpGlow * tpCol * (${TP_GLOW_STRENGTH.toFixed(2)} * tpPulse * tpProx * tpDayGain);
        }`
     : "";
   mat.onBeforeCompile = (shader) => {

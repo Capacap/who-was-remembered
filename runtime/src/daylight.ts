@@ -167,6 +167,19 @@ const GROUND_GAMMA = 2.1;
 // dark void with distance; the far ground just eases to an even half-lit dusk.
 const GROUND_LOD_BIAS = 1.0;
 
+// Beacons (teleporter pad + beam) read the SAME field but with their own response, because
+// a beacon is a single POINT sample, not a face spanning many texels. Two differences from
+// the ground: (1) NO distance LOD -- a far beacon must feel the sweep exactly like a near
+// one, but the ground's distance-coarsening averages a far point toward the field's 0.5
+// mean and starves it (this is why the far beams looked dead). A beacon samples at a fixed
+// modest mip instead, distance-independent. (2) a readable LINEAR ramp, not the sand's
+// gamma crush: still keyed to the same pool band so "lit" means a real daylight island is
+// crossing the plaza, but without GROUND_GAMMA flattening the swell to nothing. The pools
+// drift slowly, so this never flickers. Eyeball knobs: widen LO->HI for a softer onset.
+const BEACON_OPEN_LO = 0.5; // summed-field value where the beacon starts to lift (shadow below)
+const BEACON_OPEN_HI = 0.74; // value for full lift
+const BEACON_MIP = 1.0; // fixed base mip (distance-independent), + each layer's own lodAdj
+
 // Periodic fbm for the daylight field, wrapping over FIELD_PERIOD so the baked tile is
 // seamless. Built on the periodic Perlin lattice (pnoise/pgrad) above. Returns ~[-1, 1].
 function fieldFbm(x: number, y: number): number {
@@ -273,6 +286,20 @@ export const DAYLIGHT_FRAG_COMMON = /* glsl */ `
       .join("\n    ")}
     float t = clamp((c - ${GROUND_OPEN_LO.toFixed(2)}) / ${(GROUND_OPEN_HI - GROUND_OPEN_LO).toFixed(2)}, 0.0, 1.0);
     return pow(t, ${GROUND_GAMMA.toFixed(2)});
+  }
+  // Beacon reader: same field, point sample, NO distance LOD (fixed mip), readable linear
+  // ramp instead of the ground's gamma crush. Returns 0 in shadow, 1 when a daylight pool
+  // sits on the plaza -- distance-independent, so a far teleporter swells like a near one.
+  float beaconLit(vec2 wxz) {
+    vec2 ww = fieldWarp(wxz);
+    float c = 0.0;
+    ${_groundLayers
+      .map(
+        (L) =>
+          `c += texture2DLodEXT(uDaylight, ww * ${L.inv.toFixed(8)} + vec2(${L.dx.toFixed(8)}, ${L.dy.toFixed(8)}) * uDriftTime, clamp(${BEACON_MIP.toFixed(2)} + ${L.lodAdj.toFixed(3)}, 0.0, ${LOD_MAX.toFixed(1)})).r * ${L.w.toFixed(3)};`,
+      )
+      .join("\n    ")}
+    return smoothstep(${BEACON_OPEN_LO.toFixed(2)}, ${BEACON_OPEN_HI.toFixed(2)}, c);
   }
 `;
 

@@ -843,6 +843,13 @@ const TP_BEAM_FADE_FAR = 50;
 const TP_BEAM_APPROACH_NEAR = 70; // camera xz distance at which it reaches full intensity
 const TP_BEAM_APPROACH_FAR = 260; // beyond this it sits at the dim far level
 const TP_BEAM_FAR_LEVEL = 0.5; // intensity multiplier when far (0..1)
+// Daylight lift: the shaft is additive, so its alpha IS its brightness. The drifting
+// daylight field (daylight.ts) scales that alpha UP when the light crosses the plaza and
+// back to 1x (today's resting look) in shadow -- a one-sided boost, never a dim. The pad
+// glow beneath it is deliberately held steady against shadow too (terrain TP_GLOW, added
+// after the daylight multiply), so flooring the beam at its rest level keeps beam and pad
+// agreeing: neither ever drops below findable, the beam just gains in the sun.
+const TP_BEAM_DAY_BOOST = 7.5; // alpha multiplier in full daylight (1 = no lift). Eyeball.
 // The ground is transparent (distance fade) at the default renderOrder 0. A beam at
 // the same order could draw before the ground, which then paints its opaque-near sand
 // straight over it (the beam writes no depth, so it can't defend those pixels).
@@ -881,12 +888,15 @@ async function loadHeightmap(
   return { res, worldSize, data };
 }
 
-function buildTeleporters(list: Teleporter[]) {
+function buildTeleporters(list: Teleporter[], daylight: DaylightUniforms) {
   // The floor marker is now a blue glow baked into the terrain shader at each plaza
-  // (terrain TP_GLOW_*), not a prop built here. Being the ground itself it reacts to
-  // the light like everything else and can never read superimposed, and it carries the
-  // "stand here" cue up close exactly as the beam fades out to spare the camera. So
-  // this builds only the far beacon.
+  // (terrain TP_GLOW_*), not a prop built here -- being the ground itself it can never
+  // read superimposed, and it carries the "stand here" cue up close exactly as the beam
+  // fades out to spare the camera. So this builds only the far beacon. Note the pad does
+  // NOT dim with the drifting daylight (its glow is added AFTER the ground's daylight
+  // multiply, terrain.ts): both pad and beam instead take a one-sided sun BOOST
+  // (TP_GLOW_DAY_BOOST / TP_BEAM_DAY_BOOST, kept matched) so the beacon swells when the
+  // light crosses the plaza but never drops below findable in shadow.
   // The beam is an open-ended cylinder shaded as a volumetric light shaft. Two
   // gradients shape it: a silhouette-edge term (alpha ~ |view·normal|) that makes
   // a view ray glowing brightest where it passes through the most of the column
@@ -915,6 +925,12 @@ function buildTeleporters(list: Teleporter[]) {
       uApproachNear: { value: TP_BEAM_APPROACH_NEAR },
       uApproachFar: { value: TP_BEAM_APPROACH_FAR },
       uFarLevel: { value: TP_BEAM_FAR_LEVEL },
+      // shared with the books and the ground: same field, same drift clock, same dev
+      // kill switch, so the beam lifts on the exact light that crosses its plaza.
+      uDayBoost: { value: TP_BEAM_DAY_BOOST },
+      uDaylight: daylight.uDaylight,
+      uDriftTime: daylight.uDriftTime,
+      uDaylightMix: daylight.uDaylightMix,
     },
     transparent: true,
     blending: THREE.AdditiveBlending,
@@ -934,6 +950,7 @@ function buildTeleporters(list: Teleporter[]) {
       }
     `,
     fragmentShader: /* glsl */ `
+      ${DAYLIGHT_FRAG_COMMON}
       uniform vec3 uColor;
       uniform vec3 uColorBase;
       uniform float uOpacity;
@@ -942,6 +959,7 @@ function buildTeleporters(list: Teleporter[]) {
       uniform float uApproachNear;
       uniform float uApproachFar;
       uniform float uFarLevel;
+      uniform float uDayBoost;
       varying vec3 vWorldPos;
       varying vec3 vWorldNormal;
       varying float vT;
@@ -962,7 +980,14 @@ function buildTeleporters(list: Teleporter[]) {
         float prox = mix(uFarLevel, 1.0, approach);
         vec3 footCol = mix(uColor, uColorBase, approach); // cyan foot only emerges on approach
         vec3 col = mix(footCol, uColor, clamp(vT, 0.0, 1.0)); // foot grading to blue up the shaft
-        gl_FragColor = vec4(col, uOpacity * edge * vert * camFade * baseFade * prox);
+        // one-sided daylight lift: 1x at rest (in shadow, matching the steady pad), up to
+        // uDayBoost when a daylight pool crosses the plaza, so the beacon breathes with the
+        // world instead of holding a constant blue. beaconLit is the point-sample, distance-
+        // independent field reader (not the ground's daylightAt, which coarsens with distance
+        // and would starve this FAR beacon). uDaylightMix folds in the dev flat-lit switch.
+        float lit = beaconLit(vWorldPos.xz);
+        float dayGain = mix(1.0, uDayBoost, lit * uDaylightMix);
+        gl_FragColor = vec4(col, uOpacity * edge * vert * camFade * baseFade * prox * dayGain);
       }
     `,
   });
@@ -1604,7 +1629,7 @@ async function main() {
 
   built.update(camera.position.x, camera.position.z);
   scene.add(built.group);
-  scene.add(buildTeleporters(teleporters));
+  scene.add(buildTeleporters(teleporters, daylight.uniforms));
 
   mark("props");
 
