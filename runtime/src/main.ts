@@ -194,6 +194,26 @@ const WARM_STRENGTH = 0.18; // max hue-arc fraction rotated toward warm at the p
 // hue sits near the warm anchor so its arc is already small; lowering strength quiets it
 // while cool colours (far from the anchor) still warm visibly -- blue->cyan survives.
 
+// flatShading on the book materials (set in buildField) gives each authored facet -- the
+// cover's beveled lip, the spine sides, the page block -- its own light/dark tone instead of
+// the smoothed average, the half of the teleporter-sphere recipe that creates form. It also
+// computes normals per-face and ignores the baked vertex normals, so it sidesteps any lingering
+// normal quirk in the mesh. (A fresnel rim was tried alongside it and dropped: on the flat tops
+// it did nothing, and at distance it just whitened the far field.)
+
+// Facet self-shading. The proximity emissive is otherwise a FLAT albedo add (no normal term),
+// so near the player it swamps the Lambert gradient and close books read as flat colour. Carve
+// the self-light by a geometric facet term so a spine facing the sun glows brighter than one
+// facing away and each book's sides read as a 3D box. The covers stay near-uniform on purpose:
+// every book lies cover-up (N=+y), and a flat horizontal plane genuinely can't show a gradient.
+// The facet normal is the flat WORLD normal reconstructed from screen-space derivatives of world
+// position (true per-facet, matching flatShading) -- no extra vertex normals needed; the normal
+// is oriented toward the camera so its sign is winding-safe. Keep SUN_KEY_DIR in sync with
+// SUN_POS in the scene setup so the book sides rake the same way the sun lights the ground.
+const SUN_KEY_DIR = new THREE.Vector3(-700, 130, 380).normalize(); // = normalize(SUN_POS)
+const BOOK_FACET = 0.75; // how hard the self-light is carved by facing (0 = flat as before, 1 = full)
+const BOOK_FACET_MIN = 0.3; // floor so a back-facing facet still self-glows (never crushes to black)
+
 // Era temperature: the SAME painterly hue-rotation, but driven by a book's RADIUS (= time)
 // instead of the player's proximity. Recency bias is the subject of the piece, so the field
 // itself runs warm at the modern centre and cools to cold in the deep-past rim -- the warmth
@@ -414,22 +434,24 @@ function applyProximityGlow(
     shader.vertexShader = shader.vertexShader
       .replace(
         "#include <common>",
-        "#include <common>\nvarying vec2 vGlowXZ;\nvarying float vViewDist;",
+        "#include <common>\nvarying vec2 vGlowXZ;\nvarying float vViewDist;\nvarying vec3 vWorldPos;",
       )
-      // Carry the book's world xz (for the proximity pool) and its view distance (for the
-      // distance dim) to the fragment. No vertex displacement -- the per-book hover/bob was
+      // Carry the book's world xz (for the proximity pool), its full world position (for the
+      // facet self-shading normal, reconstructed by derivative in the fragment) and its view
+      // distance (for the distance dim). No vertex displacement -- the per-book hover/bob was
       // removed -- so project_vertex's gl_Position stands unchanged.
       .replace(
         "#include <project_vertex>",
         `#include <project_vertex>
          vec4 _wpos = modelMatrix * instanceMatrix * vec4(transformed, 1.0);
          vGlowXZ = _wpos.xz;
+         vWorldPos = _wpos.xyz;
          vViewDist = length(mvPosition.xyz);`,
       );
     shader.fragmentShader = shader.fragmentShader
       .replace(
         "#include <common>",
-        "#include <common>\nvarying vec2 vGlowXZ;\nvarying float vViewDist;\nuniform vec2 uPlayer;\n" +
+        "#include <common>\nvarying vec2 vGlowXZ;\nvarying float vViewDist;\nvarying vec3 vWorldPos;\nuniform vec2 uPlayer;\n" +
           "uniform float uGlowRadius;\nuniform float uGlowInner;\n" +
           "uniform float uRestDim;\nuniform float uRestFar;\nuniform float uGlowBoost;\n" +
           "uniform float uEmissive;\nuniform float uEmissiveNear;\n" +
@@ -463,9 +485,18 @@ function applyProximityGlow(
           // ground reads daylight, the book emits its hue warmed by the SAME DAY colour
           // the ground tints to, so a passing sun patch lights book and sand together. It
           // falls to zero at night, leaving only the floor that keeps books visible there.
-          `gl_FragColor.rgb += diffuseColor.rgb * (uEmissive + glow * uEmissiveNear);
+          // facet self-shading: carve the otherwise-flat emissive add by the facet's facing to
+          // the sun, so a spine catching the sun glows brighter than one in shade and the sides
+          // read 3D. The flat world normal comes from screen-space derivatives of world position
+          // (the true per-facet normal under flatShading); _facet floors at BOOK_FACET_MIN so a
+          // back-facing side still self-glows, and BOOK_FACET dials the whole effect to zero.
+          `vec3 _wn = normalize(cross(dFdx(vWorldPos), dFdy(vWorldPos)));
+           _wn *= sign(dot(_wn, cameraPosition - vWorldPos)); // orient outward (toward camera) -> sign-safe
+           float _facing = dot(_wn, vec3(${SUN_KEY_DIR.x.toFixed(4)}, ${SUN_KEY_DIR.y.toFixed(4)}, ${SUN_KEY_DIR.z.toFixed(4)})) * 0.5 + 0.5;
+           float _facet = mix(1.0, mix(${BOOK_FACET_MIN.toFixed(3)}, 1.0, _facing), ${BOOK_FACET.toFixed(3)});
+           gl_FragColor.rgb += diffuseColor.rgb * (uEmissive + glow * uEmissiveNear) * _facet;
            float _sun = daylightAt(vGlowXZ, vViewDist);
-           gl_FragColor.rgb += diffuseColor.rgb * ${DAY_GLSL} * (_sun * ${GLOW_REVEAL.toFixed(3)});` +
+           gl_FragColor.rgb += diffuseColor.rgb * ${DAY_GLSL} * (_sun * ${GLOW_REVEAL.toFixed(3)}) * _facet;` +
           // temperature: warm the pooled book toward the yellow anchor by the shortest hue
           // arc (blue->cyan, green->yellow, purple->red), scaled by the pool so it heats on
           // approach and cools as the player leaves. Low-saturation page cream barely moves.
@@ -554,14 +585,17 @@ function buildField(
     uEmissive: { value: GLOW_EMISSIVE },
     uEmissiveNear: { value: GLOW_EMISSIVE_NEAR },
   };
-  const farMat = new THREE.MeshLambertMaterial();
+  // flatShading: each authored facet carries its own light/dark tone (the sphere's recipe), so
+  // the facet self-shading in applyProximityGlow has real per-face normals to rake. Goes on
+  // every tier so a book reads the same through an LOD swap; the box base gets it too.
+  const farMat = new THREE.MeshLambertMaterial({ flatShading: true });
   applyDistanceFade(farMat);
   applyProximityGlow(farMat, glow, daylight);
-  const midMat = new THREE.MeshLambertMaterial();
+  const midMat = new THREE.MeshLambertMaterial({ flatShading: true });
   applyDistanceFade(midMat);
   applyPageMask(midMat);
   applyProximityGlow(midMat, glow, daylight);
-  const nearMat = new THREE.MeshLambertMaterial();
+  const nearMat = new THREE.MeshLambertMaterial({ flatShading: true });
   applyDistanceFade(nearMat);
   applyPageMask(nearMat);
   applyProximityGlow(nearMat, glow, daylight);
