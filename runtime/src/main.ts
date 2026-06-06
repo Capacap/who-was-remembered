@@ -864,10 +864,6 @@ const TP_BEAM_DAY_BOOST = 7.5; // alpha multiplier in full daylight (1 = no lift
 // (which does write depth) still occludes the beam behind nearer dunes, so physical
 // occlusion is preserved. Stays above the ground and the books (renderOrder 5).
 const TP_BEAM_RENDER_ORDER = 10;
-// Horizontal radius around a plaza's centre within which the travel prompt arms.
-// Sits just inside the floor glow (terrain TP_GLOW_RADIUS = 9), so you arm while
-// standing in the bright pad rather than only dead centre or out at its faint edge.
-const TP_ENTER_RADIUS = 7;
 
 // Floating-crystal beacon: an alternative to the rising shard -- a faceted diamond hovering
 // just out of reach over the plaza, slowly turning and bobbing (the "subtle animation" idea
@@ -1259,14 +1255,22 @@ function escapeHtml(s: string): string {
   );
 }
 
+// What the reticle is over: a book to inspect or a teleporter ball to step
+// through. One grammar -- look at it, press E -- so both flow through the picker
+// and the single #glance prompt; the kind only decides which panel E opens.
+type Aim = { kind: "book" | "tp"; i: number } | null;
+
 // Look-at picker: each tick, find the book nearest the camera whose seat lies
 // within a thin cylinder around the view ray. A distance cull rejects almost all
 // 576k instances before the alignment test, so the brute-force sweep is cheap at
-// the throttled cadence. Aims at jittered positions (matching what's drawn).
+// the throttled cadence. Aims at jittered positions (matching what's drawn). The
+// 26 teleporter balls are swept the same way (as spheres, not points) right after
+// and compete for the reticle by eye-distance, so a book in front of a ball wins.
 function createPicker(
   camera: THREE.PerspectiveCamera,
   px: Float32Array,
   pz: Float32Array,
+  teleporters: Teleporter[],
 ) {
   // reading is close-up only: you have to travel and walk up to a book to learn
   // who it is. Long-range legibility (landmarks visible from afar) is a separate
@@ -1284,7 +1288,22 @@ function createPicker(
   const n = px.length;
   const fwd = new THREE.Vector3();
 
-  return function pick(): number {
+  // The teleporter ball is a far larger target than a book and one you walk up to
+  // as a landmark, so it gets a more generous reach and the tolerance is its own
+  // silhouette (the ball radius, with a little forgiveness) rather than a hair-thin
+  // cylinder. Its centre sits TP_BALL embed-offset above the baked ground; the ball
+  // never moves, so precompute the aim sphere once (sampleHeight is fixed by now).
+  const TP_AIM_REACH = 16;
+  const TP_AIM_RADIUS = TP_BALL_RADIUS + 0.3;
+  const TP_AIM_RADIUS2 = TP_AIM_RADIUS * TP_AIM_RADIUS;
+  const tpCentreY = TP_BALL_RADIUS * (1.0 - 2.0 * TP_BALL_BURY);
+  const tpAim = teleporters.map((tp) => ({
+    x: tp.x,
+    z: tp.y,
+    cy: sampleHeight(tp.x, tp.y) + tpCentreY,
+  }));
+
+  return function pick(): Aim {
     camera.getWorldDirection(fwd);
     const cx = camera.position.x;
     const cy = camera.position.y;
@@ -1314,7 +1333,32 @@ function createPicker(
         best = i;
       }
     }
-    return best;
+    // teleporter balls: same along-ray / perpendicular split, but tested as a
+    // sphere of the ball's own radius so the whole silhouette is targetable.
+    let bestTp = -1;
+    let bestTpDist2 = Infinity;
+    for (let i = 0; i < tpAim.length; i++) {
+      const a = tpAim[i];
+      const dx = a.x - cx;
+      const dy = a.cy - cy;
+      const dz = a.z - cz;
+      const t = dx * fwd.x + dy * fwd.y + dz * fwd.z;
+      if (t <= 0 || t > TP_AIM_REACH) continue;
+      const dist2 = dx * dx + dy * dy + dz * dz;
+      const perp2 = dist2 - t * t;
+      if (perp2 > TP_AIM_RADIUS2) continue;
+      if (dist2 < bestTpDist2) {
+        bestTpDist2 = dist2;
+        bestTp = i;
+      }
+    }
+    // both can sit under the reticle (a book just in front of a ball); the nearer
+    // to the eye wins, so an actual book you're nose-to-nose with takes priority.
+    if (bestTp >= 0 && (best < 0 || bestTpDist2 < bestDist2)) {
+      return { kind: "tp", i: bestTp };
+    }
+    if (best >= 0) return { kind: "book", i: best };
+    return null;
   };
 }
 
@@ -1836,19 +1880,31 @@ async function main() {
   const controlsHud = document.getElementById("controls") as HTMLDivElement;
   const overlay = document.getElementById("overlay") as HTMLDivElement;
   const card = document.getElementById("card") as HTMLDivElement;
-  const tpPrompt = document.getElementById("tp-prompt") as HTMLDivElement;
   const fade = document.getElementById("fade") as HTMLDivElement;
-  const pick = createPicker(camera, built.px, built.pz);
+  const pick = createPicker(camera, built.px, built.pz, teleporters);
   const compass = createCompass(camera, built.px, built.pz, meta, world);
 
-  let target = -1; // instanceId under the reticle, or -1
+  let aim: Aim = null; // what the reticle is over (book or teleporter), or null
   let overlayOpen = false;
-  let nearTp = -1; // teleporter circle the player is standing in, or -1
 
   const renderName = (i: number) => escapeHtml(meta.name(i) || "(untitled)");
   const renderDesc = (i: number) => escapeHtml(meta.desc(i));
 
-  function showGlance(i: number) {
+  // The look-at prompt for whatever's under the reticle. A teleporter borrows the
+  // book's glance layout exactly -- name / detail / era / action -- so the two read
+  // as one grammar; only the words and the verb ("travel" vs "inspect") differ.
+  function showGlance(a: { kind: "book" | "tp"; i: number }) {
+    if (a.kind === "tp") {
+      const tp = teleporters[a.i];
+      glance.innerHTML =
+        `<div class="name">◎ ${escapeHtml(tp.label)}</div>` +
+        (tp.seat ? `<div class="desc">${escapeHtml(tp.seat)}</div>` : "") +
+        (tp.era ? `<div class="years">${escapeHtml(tp.era)}</div>` : "") +
+        `<div class="act"><span class="key">E</span> travel</div>`;
+      glance.style.display = "block";
+      return;
+    }
+    const i = a.i;
     const desc = renderDesc(i);
     const years = fmtYears(meta.birth[i], meta.death[i]);
     glance.innerHTML =
@@ -1896,9 +1952,9 @@ async function main() {
   }
 
   // --- teleporter travel ----------------------------------------------------
-  // The 26 circles are an any-to-any fast-travel network across a disc too wide
-  // to walk. Standing in a circle arms the prompt (loop below); T opens this
-  // menu of the other anchors, nearest first, and a pick jumps you there.
+  // The 26 balls are an any-to-any fast-travel network across a disc too wide to
+  // walk. You look at a ball (the picker arms the glance, same as a book) and press
+  // E to open this menu of the other anchors, nearest first; a pick jumps you there.
   let traveling = false;
   function travelTo(dest: number) {
     if (traveling) return;
@@ -1937,7 +1993,7 @@ async function main() {
       .join("");
     card.innerHTML =
       `<div class="name">◎ ${escapeHtml(here.label)}</div>` +
-      `<div class="desc">Step through to another circle.</div>` +
+      `<div class="desc">Visit another time and place.</div>` +
       `<div class="tp-list">${rows}</div>` +
       `<div class="hint">Esc or click outside to close</div>`;
     card.querySelectorAll<HTMLButtonElement>(".tp-dest").forEach((btn) => {
@@ -1946,7 +2002,6 @@ async function main() {
     overlay.style.display = "flex";
     overlayOpen = true;
     glance.style.display = "none";
-    tpPrompt.style.display = "none";
     controls.unlock(); // free the cursor so destinations are clickable
   }
 
@@ -1955,10 +2010,9 @@ async function main() {
     if (e.target === overlay) closeOverlay();
   });
   document.addEventListener("keydown", (e) => {
-    if (e.code === "KeyE" && !overlayOpen && controls.isLocked && target >= 0) {
-      openOverlay(target);
-    } else if (e.code === "KeyT" && !overlayOpen && controls.isLocked && nearTp >= 0) {
-      openTravel(nearTp);
+    if (e.code === "KeyE" && !overlayOpen && controls.isLocked && aim) {
+      if (aim.kind === "tp") openTravel(aim.i);
+      else openOverlay(aim.i);
     } else if (e.code === "KeyL") {
       // dev: toggle the daylight (storm-shadow) field off, so the ground shows its
       // full Lambert-lit albedo with no day/night darkening. Lets the sand colours be
@@ -2017,43 +2071,15 @@ async function main() {
     if (!overlayOpen && controls.isLocked && mode !== "skate") {
       if (sincePick >= PICK_INTERVAL) {
         sincePick = 0;
-        target = pick();
-        if (target >= 0) showGlance(target);
+        aim = pick();
+        if (aim) showGlance(aim);
         else glance.style.display = "none";
-        reticle.classList.toggle("armed", target >= 0); // affordance: inspectable
+        reticle.classList.toggle("armed", aim !== null); // affordance: actionable
       }
     } else if (glance.style.display !== "none") {
       glance.style.display = "none";
       reticle.classList.remove("armed");
-      target = -1;
-    }
-
-    // teleporter proximity: arm the travel prompt when standing in a circle.
-    // xz only (height is irrelevant) and just 26 anchors, so it runs every frame
-    // for an instant prompt. Rebuild the prompt text only when the circle changes.
-    {
-      let found = -1;
-      const cx = camera.position.x;
-      const cz = camera.position.z;
-      for (let i = 0; i < teleporters.length; i++) {
-        const dx = teleporters[i].x - cx;
-        const dz = teleporters[i].y - cz;
-        if (dx * dx + dz * dz <= TP_ENTER_RADIUS * TP_ENTER_RADIUS) {
-          found = i;
-          break;
-        }
-      }
-      if (found !== nearTp) {
-        nearTp = found;
-        if (nearTp >= 0) {
-          const tp = teleporters[nearTp];
-          tpPrompt.innerHTML =
-            `<div class="tp-here">◎ ${escapeHtml(tp.label)}</div>` +
-            `<div class="act"><span class="key">T</span> travel</div>`;
-        }
-      }
-      const armed = nearTp >= 0 && !overlayOpen && controls.isLocked && mode !== "skate";
-      tpPrompt.style.display = armed ? "block" : "none";
+      aim = null;
     }
 
     // intro controls: toggle .show at the centre radius (hysteresis below); the

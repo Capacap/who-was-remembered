@@ -371,32 +371,6 @@
         display: none;
       }
 
-      /* ── teleporter prompt ───────────────────────────────────────────────
-         "Where am I + how to leave" — place information, the same category as the
-         compass's "when am I", so it docks just beneath the compass in the top
-         orientation cluster rather than floating at the foot of the screen. This
-         keeps the centre reserved for the gaze prompt (the book glance): the two
-         are different kinds of information and can be on screen at once, so they
-         must not share the centre. Same engraved-light family; the cool accent
-         rides only the keycap. Never interactive (T drives it). */
-      #tp-prompt {
-        position: fixed;
-        left: 50%;
-        top: 70px;
-        transform: translateX(-50%);
-        font-family: var(--serif);
-        color: var(--bone-text);
-        text-align: center;
-        text-shadow: var(--engrave);
-        pointer-events: none;
-        user-select: none;
-        display: none;
-      }
-      #tp-prompt .tp-here {
-        font-size: 18px;
-        font-weight: 600;
-      }
-
       /* ── travel list (reuses #overlay/#card) ─────────────────────────────
          The 26 anchors as an index: flat rows divided by hairlines, hover lights
          an accent edge. No tan blocks, no blue hover. The seat name stays in
@@ -473,7 +447,6 @@
       <div id="compass-era"></div>
       <div id="compass-label"></div>
     </div>
-    <div id="tp-prompt"></div>
     <div id="controls">
       <div class="ctl">
         <span class="key">WASD</span> move · <span class="key">Shift</span> skate
