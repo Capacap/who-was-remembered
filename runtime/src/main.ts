@@ -884,6 +884,33 @@ const TP_CRYSTAL_SPIN = 0.3; // turn rate, rad/s against the drift clock
 const TP_CRYSTAL_BOB_AMP = 0.45; // gentle vertical float, world units
 const TP_CRYSTAL_BOB_SPEED = 0.5; // bob rate
 
+// Embedded-ball beacon (the current direction, 2026-06-06): the teleporter stops being a
+// floating prop and becomes an OBJECT in the field like a book -- a beach-ball-sized icosphere
+// half-sunk in the sand. The aim is one interaction grammar (look + E, same as a book) and to
+// let the anchor join the topology relaxation pass instead of carving a plaza. It keeps the
+// crystalline additive/faceted/daylight-reactive vocabulary of the crystal (so it still reads as
+// a teal NODE, not a geo-hued book), just planted and grounded: no hover, no spin/bob -- the
+// facet flare off the derivative normal already shimmers as the PLAYER walks past it. Sized and
+// glowing a notch hotter than a book so it still carries at a distance; if that proves too weak,
+// TP_BEAM_OVERHEAD flips the old vertical shaft back on above the ball. TP_BALL takes priority
+// over TP_FLOATING_CRYSTAL / the beam path below (both kept behind their flags for A/B).
+const TP_BALL = true; // true: embedded icosphere; false: fall through to crystal/beam
+const TP_BALL_RADIUS = 1.4; // world units; ~a couple of book-lengths -- a beach ball among books
+const TP_BALL_DETAIL = 1; // icosahedron subdivisions: 0 = 20 chunky faces, 1 = 80 (faceted sphere)
+const TP_BALL_BURY = 0.4; // fraction of the DIAMETER below the sand: 0.5 = a clean half-dome
+const TP_BALL_COLOR = new THREE.Color(0x2fb6e0); // teal albedo: a NODE hue, distinct from geo books
+const TP_BALL_GLOW = 0.18; // steady self-glow as a fraction of the hue; flat add, keeps the gradient
+const TP_BALL_NIGHT_FLOOR = 0.5; // how dark the ball goes in night shadow (1 = no darkening). Unlike
+// the books it never crushes to NIGHT: a sphere needs its sun/sky shading to survive or it reads
+// as a flat silhouette. So it darkens into the field's mood but keeps its form, full-lit in a pool.
+// Fresnel rim: brighten the grazing silhouette so the ball reads as a glowing NODE lit from within,
+// not a matte stone. View-dependent, added steady (glows at night) and AFTER the daylight floor so
+// the edge is the node's own light. Falls on the lit facets untouched -> keeps the form we earned.
+const TP_BALL_RIM = 0.7; // rim glow strength
+const TP_BALL_RIM_POWER = 2.5; // falloff: higher = thinner, sharper rim
+const TP_BALL_RIM_COLOR = new THREE.Color(0x6fe6ff); // a hotter cyan than the albedo -> luminous edge
+const TP_BEAM_OVERHEAD = false; // also raise the vertical shaft above the ball (distance fallback)
+
 interface Teleporter {
   label: string;
   x: number;
@@ -1085,10 +1112,78 @@ function buildTeleporters(list: Teleporter[], daylight: DaylightUniforms) {
       }
     `,
   });
+  // Embedded ball: a SOLID, opaque, flat-shaded icosphere lit by the scene hemisphere + warm sun
+  // (MeshLambertMaterial, flatShading) so the facets carry a real light/dark gradient -- that is
+  // what makes a sphere read as a sphere, and it is the one thing a flat book can do without and
+  // a ball cannot. It does NOT take the books' daylight chain, which multiplies toward near-black
+  // NIGHT and would crush all that shading flat (fatal on a curved surface). Instead daylight is a
+  // FLOORED darkening (beaconLit, the point-sample reader): the ball sinks into the field's night
+  // mood but never below TP_BALL_NIGHT_FLOOR, so its form always survives, and lifts to full in a
+  // sun pool. A small teal self-glow rides on top as the node's own light. Opaque + depth-writing,
+  // so the buried hemisphere is occluded by the ground and books behind it sort right.
+  const ballGeom = new THREE.IcosahedronGeometry(TP_BALL_RADIUS, TP_BALL_DETAIL);
+  const ballMat = new THREE.MeshLambertMaterial({
+    color: TP_BALL_COLOR,
+    flatShading: true,
+  });
+  ballMat.onBeforeCompile = (shader) => {
+    shader.uniforms.uDaylight = daylight.uDaylight;
+    shader.uniforms.uDriftTime = daylight.uDriftTime;
+    shader.uniforms.uDaylightMix = daylight.uDaylightMix;
+    shader.uniforms.uRimColor = { value: TP_BALL_RIM_COLOR };
+    shader.vertexShader = shader.vertexShader
+      .replace(
+        "#include <common>",
+        "#include <common>\nvarying vec2 vBallXZ;",
+      )
+      // carry world xz for the daylight field reader.
+      .replace(
+        "#include <project_vertex>",
+        `#include <project_vertex>
+         vBallXZ = (modelMatrix * vec4(transformed, 1.0)).xz;`,
+      );
+    shader.fragmentShader = shader.fragmentShader
+      .replace(
+        "#include <common>",
+        "#include <common>\nvarying vec2 vBallXZ;\nuniform vec3 uRimColor;\n" +
+          DAYLIGHT_FRAG_COMMON,
+      )
+      .replace(
+        "#include <opaque_fragment>",
+        `#include <opaque_fragment>
+         // floored daylight: darken into the field at night but keep the sphere's sun/sky form,
+         // lift to full in a pool. beaconLit is the distance-independent point reader; uDaylightMix
+         // is the dev flat-lit kill switch (-> no darkening).
+         float _day = beaconLit(vBallXZ);
+         float _mul = mix(${TP_BALL_NIGHT_FLOOR.toFixed(3)}, 1.0, _day);
+         gl_FragColor.rgb *= mix(1.0, _mul, uDaylightMix);
+         // node self-glow: a flat add, so it brightens without flattening the facet gradient.
+         gl_FragColor.rgb += diffuseColor.rgb * ${TP_BALL_GLOW.toFixed(3)};
+         // fresnel rim: the grazing silhouette glows, so the ball reads as lit from within. normal
+         // is the flat facet normal (flatShading), so the rim is faceted too; added steady, after
+         // the daylight floor, as the node's own light. vViewPosition points fragment->camera.
+         float _fres = pow(1.0 - clamp(dot(normalize(vViewPosition), normal), 0.0, 1.0), ${TP_BALL_RIM_POWER.toFixed(2)});
+         gl_FragColor.rgb += uRimColor * (_fres * ${TP_BALL_RIM.toFixed(3)});`,
+      );
+  };
+  // centre height so a (1 - TP_BALL_BURY) fraction of the diameter clears the sand.
+  const ballCentreY = TP_BALL_RADIUS * (1.0 - 2.0 * TP_BALL_BURY);
   const group = new THREE.Group();
   for (const tp of list) {
     const h = sampleHeight(tp.x, tp.y);
-    if (TP_FLOATING_CRYSTAL) {
+    if (TP_BALL) {
+      // a beach-ball icosphere half-sunk in the sand at the anchor, a solid teal node.
+      const ball = new THREE.Mesh(ballGeom, ballMat);
+      ball.position.set(tp.x, h + ballCentreY, tp.y);
+      group.add(ball);
+      if (TP_BEAM_OVERHEAD) {
+        // optional vertical shaft rising above the ball as a distance beacon.
+        const beam = new THREE.Mesh(beamGeom, beamMat);
+        beam.position.set(tp.x, h + ballCentreY + TP_BEAM_HEIGHT / 2, tp.y);
+        beam.renderOrder = TP_BEAM_RENDER_ORDER;
+        group.add(beam);
+      }
+    } else if (TP_FLOATING_CRYSTAL) {
       // a faceted diamond hovering just out of reach over the plaza, slowly turning.
       const crystal = new THREE.Mesh(crystalGeom, crystalMat);
       crystal.position.set(tp.x, h + TP_CRYSTAL_HOVER, tp.y);
