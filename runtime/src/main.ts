@@ -1940,7 +1940,9 @@ async function main() {
   // now a sane auto-default + a dev cycle key (P) to measure the win against the gpu line.
   const PR_CAP = 2;
   const isTouch = window.matchMedia("(pointer: coarse)").matches;
-  let renderScale = isTouch ? 0.67 : 1.0;
+  // default to one of the menu's offered steps (1 / 0.75 / 0.5) so the control reflects
+  // a highlighted value out of the box; touch starts at 0.75 (reads decent, real saving).
+  let renderScale = isTouch ? 0.75 : 1.0;
   const applyRenderScale = (): void => {
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, PR_CAP) * renderScale);
     renderer.setSize(window.innerWidth, window.innerHeight);
@@ -2267,6 +2269,25 @@ async function main() {
   const devPerfEl = document.getElementById("dev-perf") as HTMLInputElement;
   const spinnerEl = document.getElementById("pause-spinner") as HTMLSpanElement;
 
+  // Resolution (render scale) — player-facing, NOT behind the dev gate. A segmented
+  // choice over the same steps the P dev key cycles; the active one wears the accent.
+  // syncQuality re-reads renderScale so the menu reflects a default or a P-key change.
+  const qualityOpts = Array.from(
+    document.querySelectorAll<HTMLButtonElement>("#quality-seg button"),
+  );
+  const syncQuality = (): void => {
+    for (const b of qualityOpts) {
+      b.classList.toggle("active", Number(b.dataset.scale) === renderScale);
+    }
+  };
+  for (const b of qualityOpts) {
+    b.addEventListener("click", () => {
+      setRenderScale(Number(b.dataset.scale));
+      syncQuality();
+    });
+  }
+  syncQuality();
+
   // The menu only ever opens on an Esc exit (overlay unlocks are suppressed above), so
   // the post-Esc re-lock cooldown is ALWAYS ticking when it appears — a documented fixed
   // 1250ms (Chromium kEffectiveUserEscapeDuration). Spin a little indicator for that
@@ -2284,6 +2305,7 @@ async function main() {
     devFlyEl.checked = getFlying();
     devFlatEl.checked = isFlatLit();
     devPerfEl.checked = isPerf();
+    syncQuality();
     syncDevOpts();
     pauseEl.style.display = "flex";
     spinnerEl.classList.add("show");
