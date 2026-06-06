@@ -826,16 +826,23 @@ function buildField(
 // does the long-range wayfinding); it's the reward you crest a ridge to find,
 // marking a known place once you're near enough to see it.
 const TP_BEAM_HEIGHT = 80; // visible shaft height above the ground
-const TP_BEAM_RADIUS = 0.6;
+const TP_BEAM_RADIUS = 0.6; // radius at the TOP of the shaft
+// The beam flares wider where it meets the ground, so its own faceted foot IS the ground
+// marker -- there is no separate soft glow pad anymore. That smooth additive pool was the
+// last thing breaking the lowpoly look (a blurry light blob in a world of hard facets); the
+// flared foot is geometry, faceted like everything else. Pad switched off in terrain
+// (TP_GLOW_STRENGTH = 0); raise it back to bring the old pad glow back.
+const TP_BEAM_RADIUS_BASE = 3.0; // radius at the foot: the flared base, the marker itself
 const TP_BEAM_COLOR = new THREE.Color(0x2f6cff); // blue, up the shaft; matches the pad rim
 const TP_BEAM_COLOR_BASE = new THREE.Color(0x3df0ff); // cyan at the foot, handing off to the pad core
-// A round tube crossing the ground plane reveals its tube shape at the waterline
-// (curved bottom rim, the far wall seen through the near one), which breaks the
-// flat-pillar illusion up close. So the beam fades out by horizontal camera
-// distance: a clean shaft from afar, gone before you are near enough to see the
-// intersection. Full strength beyond FAR, gone within NEAR (≈ at the stones).
-const TP_BEAM_FADE_NEAR = 18;
-const TP_BEAM_FADE_FAR = 50;
+// Now the flared faceted foot IS the marker, so the beam must stay visible as you walk in
+// (the old pad that carried the near-field cue is gone). It only dissolves once you are
+// basically centred on the stand point, sparing the camera the view straight down the
+// open cone. Full strength beyond FAR, gone within NEAR. Push these back up toward 18/50
+// if the foot reads messy up close (the faceted cone may not need hiding the way the old
+// round tube did -- that is the thing to eyeball).
+const TP_BEAM_FADE_NEAR = 3;
+const TP_BEAM_FADE_FAR = 14;
 // Proximity ramp: far away the beam is a dim, plain-blue beacon so it draws the eye
 // without dominating the horizon; it brightens to full cyan/blue intensity as the
 // player closes in (and the FADE_NEAR clip still takes over once you're on the pad).
@@ -897,23 +904,25 @@ function buildTeleporters(list: Teleporter[], daylight: DaylightUniforms) {
   // multiply, terrain.ts): both pad and beam instead take a one-sided sun BOOST
   // (TP_GLOW_DAY_BOOST / TP_BEAM_DAY_BOOST, kept matched) so the beacon swells when the
   // light crosses the plaza but never drops below findable in shadow.
-  // The beam is an open-ended cylinder shaded as a volumetric light shaft. Two
-  // gradients shape it: a silhouette-edge term (alpha ~ |view·normal|) that makes
-  // a view ray glowing brightest where it passes through the most of the column
-  // and dissolving to nothing at the rounded edges, so there is no hard outline;
-  // and a vertical fade that thins the shaft to transparent toward the top, as if
-  // the light dissipates as it rises. Additive with no depth write so the layers
-  // accumulate into a bright core, but depth TEST stays on: dunes occlude it, and
-  // the player crests a ridge to find the light waiting (the compass, not the
-  // beam, does the long-range wayfinding).
+  // The beam is an open-ended low-sided PRISM shaded as a crystalline light shard --
+  // angular to match the faceted lowpoly dunes, not a smooth CG tube (the smoothness
+  // was the one thing marking it as foreign in this world). Three terms shape it: a
+  // facet term (alpha ~ |view·faceNormal|, the face normal taken from screen-space
+  // derivatives the way the terrain does it) so each flat side flares as it turns to
+  // face the eye and the silhouette sides still fade out (no hard outline); a vertical
+  // fade that thins the shaft to transparent toward the top, as if the light dissipates
+  // as it rises; and the colour/proximity grading below. Additive with no depth write so
+  // the layers accumulate into a bright core, but depth TEST stays on: dunes occlude it,
+  // and the player crests a ridge to find the light waiting (the compass, not the beam,
+  // does the long-range wayfinding).
   const beamGeom = new THREE.CylinderGeometry(
-    TP_BEAM_RADIUS,
-    TP_BEAM_RADIUS,
+    TP_BEAM_RADIUS, // top
+    TP_BEAM_RADIUS_BASE, // foot: flared
     TP_BEAM_HEIGHT,
-    16,
+    5, // few sides: an angular shard, not a round tube. Odd count breaks the dead-on symmetry
     1,
     true, // open-ended: no caps to flare as flat discs when seen from above
-  );
+  ); // radiusTop < radiusBottom: a faceted cone, narrow aloft, flaring at the foot
   const beamMat = new THREE.ShaderMaterial({
     uniforms: {
       uColor: { value: TP_BEAM_COLOR },
@@ -939,12 +948,10 @@ function buildTeleporters(list: Teleporter[], daylight: DaylightUniforms) {
     vertexShader: /* glsl */ `
       uniform float uHeight;
       varying vec3 vWorldPos;
-      varying vec3 vWorldNormal;
       varying float vT;
       void main() {
         vec4 wp = modelMatrix * vec4(position, 1.0);
         vWorldPos = wp.xyz;
-        vWorldNormal = normalize(mat3(modelMatrix) * normal);
         vT = (position.y + uHeight * 0.5) / uHeight; // 0 at base, 1 at top
         gl_Position = projectionMatrix * viewMatrix * wp;
       }
@@ -961,20 +968,22 @@ function buildTeleporters(list: Teleporter[], daylight: DaylightUniforms) {
       uniform float uFarLevel;
       uniform float uDayBoost;
       varying vec3 vWorldPos;
-      varying vec3 vWorldNormal;
       varying float vT;
       void main() {
         vec3 viewDir = normalize(cameraPosition - vWorldPos);
-        float edge = abs(dot(viewDir, vWorldNormal));   // 1 through the core, 0 at the silhouette
+        // flat FACE normal from screen-space derivatives (the terrain's trick): the prism's
+        // few flat sides each shade as a panel, brightest when turned to face the eye and
+        // fading at the grazing silhouette sides -- a faceted shard, not a smooth tube.
+        vec3 faceN = normalize(cross(dFdx(vWorldPos), dFdy(vWorldPos)));
+        float edge = abs(dot(viewDir, faceN));   // 1 on a face turned to the eye, 0 at the silhouette
         float vert = pow(1.0 - clamp(vT, 0.0, 1.0), 1.5); // dissipates toward the top
         // horizontal camera distance (xz only, so looking up the tall shaft doesn't
         // trigger it): fade the whole beam out as you approach, hiding the waterline.
         float camDist = distance(cameraPosition.xz, vWorldPos.xz);
         float camFade = smoothstep(uFadeNear, uFadeFar, camDist);
-        // lift the foot off the ground: the pad glow owns the centre, so fading the
-        // lowest sliver of the shaft to zero stops the two additive sources stacking
-        // into a white hotspot where they meet.
-        float baseFade = smoothstep(0.0, 0.14, vT);
+        // the flared foot is the marker now, so keep it bright -- only the very bottom
+        // sliver softens, just to ease the contact line where the cone meets the ground.
+        float baseFade = smoothstep(0.0, 0.03, vT);
         // proximity: dim, plain-blue when far; bright, cyan-footed when near.
         float approach = smoothstep(uApproachFar, uApproachNear, camDist); // 0 far, 1 near
         float prox = mix(uFarLevel, 1.0, approach);

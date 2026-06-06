@@ -228,7 +228,16 @@ const TP_GLOW_INNER = new THREE.Color(0x3df0ff); // cyan at the centre of the pa
 const TP_GLOW_OUTER = new THREE.Color(0x2f6cff); // blue at the rim, matches main.ts TP_BEAM_COLOR
 const TP_GLOW_RADIUS = 9; // disc footprint, world units; tracks main.ts TP_ENTER_RADIUS (the travel zone)
 const TP_GLOW_FALLOFF = 1.6; // intensity exponent over the radius; >1 keeps a bright core with a soft skirt
-const TP_GLOW_STRENGTH = 0.85; // additive intensity at the centre
+// The pad is no longer a perfect disc -- a stamped circle was the one CG-smooth shape in a
+// faceted lowpoly world. Its glow is inscribed into an irregular POLYGON instead: the
+// bearing is cut into SIDES facets, each facet's reach jittered, so the rim has flat,
+// uneven edges like the dunes around it. The radial falloff then follows that polygon, so
+// the whole pool is angular, not just its outline.
+const TP_GLOW_SIDES = 7; // facet count of the pad polygon
+const TP_GLOW_FACET_JITTER = 0.32; // how far each facet's reach varies inward (fraction of radius)
+const TP_GLOW_STRENGTH = 0.0; // pad OFF: the beam's flared faceted foot is the marker now
+// (main.ts TP_BEAM_RADIUS_BASE). The soft glow pool was the last un-lowpoly element. Raise
+// back to 0.85 to restore the old ground glow. The polygon/jitter knobs below stay wired.
 const TP_GLOW_PULSE = 0.18; // pulse depth as a fraction of strength (0 = steady)
 const TP_GLOW_PULSE_SPEED = 0.6; // pulse rate against the drifting uDriftTime
 // Proximity ramp off the player position: far away the pad is a dim, plain-blue
@@ -450,8 +459,22 @@ function applyGroundMaterial(
          float tpT = 0.0; // radial fraction (0 centre, 1 rim) of the dominant pad
          float tpApproach = 1.0; // 0 when the player is far from that pad, 1 when near
          for (int i = 0; i < ${tpPos.length}; i++) {
-           float t = clamp(distance(vWorldPos.xz, uTpPos[i]) / ${TP_GLOW_RADIUS.toFixed(2)}, 0.0, 1.0);
-           float g = pow(1.0 - t, ${TP_GLOW_FALLOFF.toFixed(2)}); // soft falloff across the whole disc
+           vec2 d2 = vWorldPos.xz - uTpPos[i];
+           float dr = length(d2);
+           // inscribe the pool into an irregular polygon: cut the bearing into facets, jitter
+           // each facet's reach, and inscribe a flat chord at its apothem, so the rim is flat-
+           // sided and uneven like the dunes. Only near fragments pay the atan.
+           float t = 1.0;
+           if (dr < ${(TP_GLOW_RADIUS * 1.35).toFixed(2)}) {
+             float ang = atan(d2.y, d2.x);
+             float seg = 6.2831853 / ${TP_GLOW_SIDES.toFixed(1)};
+             float fi = floor(ang / seg);                 // facet index
+             float a2 = ang - (fi + 0.5) * seg;           // bearing off this facet's normal
+             float rj = 1.0 - ${TP_GLOW_FACET_JITTER.toFixed(3)} * fract(sin(fi * 127.1 + 311.7) * 43758.5453);
+             float reach = (${TP_GLOW_RADIUS.toFixed(2)} * rj) / cos(a2); // flat chord at the facet apothem
+             t = clamp(dr / reach, 0.0, 1.0);
+           }
+           float g = pow(1.0 - t, ${TP_GLOW_FALLOFF.toFixed(2)}); // soft falloff across the whole polygon
            if (g > tpGlow) {
              tpGlow = g; tpT = t;
              tpApproach = smoothstep(${TP_GLOW_APPROACH_FAR.toFixed(1)}, ${TP_GLOW_APPROACH_NEAR.toFixed(1)}, distance(uPlayer, uTpPos[i]));
