@@ -12,6 +12,8 @@ import {
   facetHeight,
   buildGround,
   applyDistanceFade,
+  FADE_START,
+  FADE_END,
   type PlayerUniform,
 } from "./terrain";
 import { buildSky } from "./sky";
@@ -161,6 +163,89 @@ const GLOW_BOOST = 1.3; // additive bloom at the pool centre: the reactive light
 // player burns brighter than the distant field (see applyProximityGlow).
 const GLOW_EMISSIVE = 0.14; // base self-glow as a fraction of the book's hue
 const GLOW_EMISSIVE_NEAR = 0.85; // extra emission at the pool centre
+
+// The far base is GL points (see applyFarPointsShading / buildField): the always-drawn book
+// speck past R_MID. SIZE is the camera-facing sprite's world size fed to three's size-
+// attenuation (gl_PointSize = SIZE * (drawingBufferHeight/2) / dist), so it shrinks with
+// distance like a real book; it's tuned to match a book's apparent size AT the R_MID boundary
+// (footprint ~0.58u * 1/tan(fov/2)) so the speck is the same on-screen size as the mid mesh it
+// takes over from -- the match holds at all distances (both scale as 1/dist). MIN_PX is the
+// on-screen floor: kept at the natural ~1px so a far speck never inflates into a bright stipple
+// (the books' rest-floor dim + the distance fade are what shade and dissolve it, mirrored in
+// applyFarPointsShading). These are the knobs to tune the far field's weight on-device.
+const FAR_POINT_SIZE = 0.4; // world size for size-attenuation (half a book's apparent footprint at R_MID — undersized on purpose so the speck reads as a distant book, not a dot, and more of the field falls below MIN_PX into the alpha-fade)
+const FAR_POINT_MIN_PX = 1.0; // floor on the on-screen speck (framebuffer px); sub-pixel
+// specks keep the floor SIZE but fade their alpha (vPointFade) so the dense field stays stipple
+// The lit-multiply the books get and a raw point doesn't: a PointsMaterial is unlit, so a point
+// starts from the full vertex colour, while a book's MeshLambert base = colour * (hemisphere +
+// sun irradiance). Computed for an up-facing book cover (the dominant visible facet): cool sky
+// 0x7e95bd*0.5 + warm sun 0xffb066*2.3*NdotL(+Y=0.161), Lambert /PI, in linear space (colour
+// management on). The result is DIM and WARM — without it the points read brighter and greener
+// than the books they continue. Tunable: nudge toward the books' average lit tone on-device.
+const FAR_LIT = new THREE.Vector3(0.151, 0.099, 0.097);
+// DIAGNOSTIC: flatten every far POINT to pure red and every detail BOOK mesh to pure blue (alpha,
+// fades and coverage untouched) so the point<->mesh handoff is unmistakable on-device -- where red
+// shows past the blue edge, the point is the visible layer; a red crescent inside the blue disc is
+// a hole; a blue ring with no red beyond it is a mesh that out-ran its point. Set false to ship.
+const DIAG_LOD_COLORS = false;
+// Near the camera the books are SOLID and sit OVER the dot floor, but a dot sprite peeks past its
+// flat book at grazing angle. So fade the dot floor IN over [DOT_NEAR_FADE_IN, FAR_MESH_FULL] of
+// live horizontal distance: gone across the solid-book core (no peeking), full by FAR_MESH_FULL
+// where the books begin to dissolve and the floor is needed. Safe on raw distance (unlike the
+// abandoned cap-blind fade) because the cap fills nearest-first, so within FAR_MESH_FULL a mesh is
+// ALWAYS present to cover the faded-out dot -- the fade-out can never expose a gap here.
+const DOT_NEAR_FADE_IN = 30;
+// The mid<->points handoff: the far point is a binary brightness FLOOR (full wherever it's DRAWN,
+// hidden only once a real mesh book has reached full alpha to replace it), under which the mesh
+// fades in by HORIZONTAL distance from the player. NOT an alpha crossfade on the point -- three
+// earlier failures taught why:
+//   - a complementary alpha fade does NOT conserve brightness (thin foreshortened sliver vs a
+//     book's real area), so the 50/50 crossover dips into a dark band before the books arrive;
+//   - the point's fade ran on a fixed DISTANCE schedule, blind to whether a book was actually
+//     there -- so where MID_CAP runs out (the dense recent eras hold far more than 24000 books in
+//     the mid disc) the orphaned specks faded into an EMPTY band, then the whole annulus snapped to
+//     mesh on one rebuild when the cap finally reached it ("section pops in");
+//   - both the mesh fade and the point fade keyed on 3D VIEW distance, so flying straight up made
+//     every book within the mesh disc exceed CROSS_OUT and vanish -- a black hole under the player.
+// So the rule is membership-driven and altitude-invariant:
+//   - MESH fades 0->1 over [FAR_MESH_FULL, FAR_CROSS_OUT] of LIVE HORIZONTAL glowD, full inward of
+//     FAR_MESH_FULL -- independent of camera height.
+//   - POINT is a binary brightness FLOOR: full wherever DRAWN, no alpha fade. update() -- the one
+//     place that KNOWS whether a book actually got a mesh slot (so it respects the MID_CAP, unlike a
+//     blind distance schedule) -- hides it (aShow=0) only where a real mesh book covers it.
+// The catch that bred TWO crescents: update() runs only on a rebuild (every REBUILD_DIST of travel),
+// so its hide decision is a SNAPSHOT taken against the rebuild centre, while the mesh's alpha is
+// LIVE against the current player. The hide must therefore be robust to a full REBUILD_DIST of drift
+// before the next refill:
+//   - hiding at FAR_MESH_FULL (v1) had ZERO margin -- a 30u walk dragged a hidden book straight into
+//     the live [FAR_MESH_FULL, FAR_CROSS_OUT] fade band, where the mesh had faded but the point was
+//     still hidden -> a dark TRAILING crescent (hole, no dots).
+//   - a live distance fade on the POINT (v2) removed the snapshot but was blind to the cap: in dense
+//     eras the cap fills nearest-first from the stale centre and falls SHORT of FAR_MESH_FULL on the
+//     leading side, so the point faded out where no mesh arrived -> a dim crescent (dots, but faint).
+// Fix: keep the binary membership-driven floor, but hide only within FAR_HIDE_R = FAR_MESH_FULL -
+// REBUILD_DIST of the centre. Then a hidden book, even after a full REBUILD_DIST of drift, is still
+// within FAR_MESH_FULL of the live player -> mesh at FULL alpha, covering it. And a book the cap
+// never meshed keeps its full point -> a SPECK, never a hole or a faded gap. The point switches on
+// (FAR_HIDE_R..out) over an identically-coloured FULL mesh book, so the switch is invisible; only
+// past FAR_MESH_FULL, where the mesh fades, does the always-full point become the visible layer.
+// Result: coverage shortfalls degrade to specks (not empty sections, pops, or crescents), from any
+// camera height, in any density.
+//
+// The remaining "pop": a book only JOINS the mesh set on a rebuild (every REBUILD_DIST of travel),
+// but its alpha is live. If the join radius (RMID_OUTER) equals the fade-out radius (FAR_CROSS_OUT),
+// a book that was just outside last rebuild can be a full REBUILD_DIST inside the fade band by the
+// time the next rebuild adds it -- so it appears at alpha ~1.0 (popped in), not 0. The fade band
+// can't smooth a book that materialises INSIDE it. Fix: the join radius must sit a full REBUILD_DIST
+// BEYOND the fade-out, so a book always joins while still INVISIBLE (glowD >= FAR_CROSS_OUT, alpha 0)
+// and then glides in via the live alpha as the player approaches. That's the invisible margin
+// [FAR_CROSS_OUT, RMID_OUTER]: meshed-but-transparent books waiting to fade in. It costs no extra
+// geometry -- RMID_OUTER/MID_CAP are unchanged; we just pull the VISIBLE fade inward to 70 and leave
+// the outer 30u of the already-meshed disc transparent. Invariant: FAR_CROSS_OUT <= RMID_OUTER -
+// REBUILD_DIST (and the join dither is gone -- MID_DITHER=0 -- since joins are now invisible, so
+// there's no ring of simultaneous pops left to fuzz). Kept loosely in sync with R_MID.
+const FAR_CROSS_OUT = 70; // mesh alpha 0 / point is the only VISIBLE layer beyond this HORIZONTAL distance. Sits REBUILD_DIST inside RMID_OUTER(100) so books join (at RMID_OUTER) while invisible and glide in -- never materialise mid-fade
+const FAR_MESH_FULL = 45; // mesh full here and inward; the point is also full from here OUTWARD. Fade band [45,70]
 
 // What keeps the field from reading as static plotted data, both REACTIVE rather than a
 // constant animation (an earlier per-book hover/bob was removed: with no contact shadows
@@ -515,16 +600,149 @@ function applyProximityGlow(
              float _dh = mod(${WARM_HUE.toFixed(3)} - _hsv.x + 0.5, 1.0) - 0.5;
              _hsv.x = fract(_hsv.x + _dh * _warmth);
              gl_FragColor.rgb = hsv2rgb(_hsv);
-           }`,
+           }` +
+          // mid<->far-points crossfade (mesh side): fade the book IN as the camera approaches so a
+          // freshly-promoted book ramps up under its still-drawn far point instead of popping. The
+          // rebuild promotes a whole boundary band on a single frame every REBUILD_DIST; keyed to
+          // live view distance this dissolves that wave. Books well inside CROSS_IN are alpha 1
+          // (full); the near tier (always inside) is unaffected. Compounds with applyDistanceFade's
+          // far dissolve, which patches the alpha again downstream. Keyed on glowD (HORIZONTAL
+          // player distance, computed above for the pool), NOT vViewDist -- so the fade tracks the
+          // same axis the rebuild classifies on and is altitude-invariant (flying up no longer
+          // makes the whole mesh disc exceed CROSS_OUT and vanish). Reaches FULL at FAR_MESH_FULL
+          // and inward, so a meshed book the point hides (aShow=0) is already fully opaque. NB:
+          // edge0<edge1 then invert -- GLSL smoothstep is UNDEFINED for edge0>=edge1 (garbage on
+          // Mali: full-alpha pops + empty chunks), so never write smoothstep(OUT, IN, x).
+          `gl_FragColor.a *= 1.0 - smoothstep(${FAR_MESH_FULL.toFixed(1)}, ${FAR_CROSS_OUT.toFixed(1)}, glowD);` +
+          (DIAG_LOD_COLORS ? "\n           gl_FragColor.rgb = vec3(0.0, 0.0, 1.0); // DIAG: detail meshes = blue" : ""),
+      );
+  };
+}
+
+// The far base material: each book as a camera-facing GL point. It can't run the mesh book's
+// facet/page/glow stack (a point has no faces and no instanceMatrix) and doesn't need to --
+// past R_MID a book is a sub-pixel speck. A point is also the RIGHT primitive at grazing
+// desert angle, where a ground-flat quad would go edge-on and vanish; the box only stayed
+// visible by its vertical spine, which a screen-facing sprite keeps for free at ~1/36th the
+// vertices. It keeps only what reads at speck scale: the per-book colour (vertexColors), the
+// drifting daylight tint faded to night with distance (the same daylightAt + fade the ground
+// and detail books take, so the far field darkens in the same swaths and dissolves into the
+// dome), and a small self-emissive floor so a speck still burns through the night.
+// Promoted books (drawn by the near/mid detail tiers) carry aShow = 0, collapsing their speck
+// so the base never double-draws a book the detail already covers. Not applyDistanceFade:
+// the points fragment shader has no <dithering_fragment> for it to patch, so the fade is
+// folded in here.
+function applyFarPointsShading(
+  mat: THREE.PointsMaterial,
+  uPlayer: PlayerUniform, // shared player position -- the dots fade IN with live horizontal distance
+  daylight: DaylightUniforms,
+): void {
+  mat.transparent = true;
+  mat.onBeforeCompile = (shader) => {
+    shader.uniforms.uPlayer = uPlayer;
+    shader.uniforms.uDaylight = daylight.uDaylight;
+    shader.uniforms.uDriftTime = daylight.uDriftTime;
+    shader.uniforms.uDaylightMix = daylight.uDaylightMix;
+    shader.vertexShader = shader.vertexShader
+      .replace(
+        "#include <common>",
+        "#include <common>\nattribute float aShow;\nvarying vec2 vGlowXZ;\nvarying float vViewDist;\nvarying float vGroundFade;\nvarying float vPointFade;\nvarying float vSquash;",
+      )
+      .replace(
+        "#include <project_vertex>",
+        `#include <project_vertex>
+         vec3 _wp = (modelMatrix * vec4(transformed, 1.0)).xyz;
+         vGlowXZ = _wp.xz;
+         vViewDist = length(mvPosition.xyz);
+         vGroundFade = clamp(
+           (vViewDist - ${FADE_START.toFixed(1)}) / ${(FADE_END - FADE_START).toFixed(1)}, 0.0, 1.0);
+         // Foreshorten the sprite the way the flat ground foreshortens: a camera-facing point
+         // is always a SQUARE, but a book lies flat, so from above it shows its full cover (square,
+         // matches) and at grazing angle it collapses to a thin sliver (the square does NOT —
+         // that's the ground-level tell). vSquash = |view-ray.y| is exactly that foreshortening:
+         // ~1 looking straight down, ~0 at the horizon. The fragment keeps only the central
+         // vertical band of this height. Floored so a fully-grazing book keeps a hairline (its
+         // spine thickness) instead of vanishing.
+         vSquash = clamp(abs(normalize(_wp - cameraPosition).y), 0.12, 1.0);`,
+      )
+      // aShow zeroes a promoted book's speck; three's size-attenuation block then scales the
+      // rest by distance. After it (before logdepthbuf_vertex), floor the on-screen size to
+      // MIN_PX so a far speck never vanishes — but a speck whose TRUE attenuated size is sub-
+      // pixel would, at the floor, over-claim coverage and the dense mid-field packs into a
+      // solid bright carpet. So carry vPointFade = trueSize/MIN_PX (<1 when sub-pixel) and fade
+      // the speck's ALPHA by it in the fragment: a distant book covers a fraction of a pixel,
+      // so the carpet thins back to stipple-on-black and reads like the sparse near field.
+      .replace("gl_PointSize = size;", "gl_PointSize = size * aShow;")
+      .replace(
+        "#include <logdepthbuf_vertex>",
+        `float _natural = gl_PointSize; // true attenuated size (0 if promoted/aShow=0)
+         vPointFade = _natural > 0.0 ? clamp(_natural / ${FAR_POINT_MIN_PX.toFixed(1)}, 0.0, 1.0) : 0.0;
+         if (_natural > 0.0) gl_PointSize = max(_natural, ${FAR_POINT_MIN_PX.toFixed(1)});\n\t#include <logdepthbuf_vertex>`,
+      );
+    shader.fragmentShader = shader.fragmentShader
+      .replace(
+        "#include <common>",
+        "#include <common>\nuniform vec2 uPlayer;\nvarying vec2 vGlowXZ;\nvarying float vViewDist;\nvarying float vGroundFade;\nvarying float vPointFade;\nvarying float vSquash;\n" +
+          DAYLIGHT_FRAG_COMMON,
+      )
+      .replace(
+        "#include <opaque_fragment>",
+        `#include <opaque_fragment>
+           // The unlit point's base IS the raw vertex colour; the books multiply that same colour
+           // by the scene's hemisphere+sun irradiance. Apply the SAME multiply (FAR_LIT) here, so
+           // the points' base matches the books' lit base before the shared restFloor/emissive
+           // stack below — without it the field reads brighter and greener than the books it
+           // continues. Only the reflected base is lit; the additive emissive/sun-reveal below are
+           // self-light and stay un-multiplied, exactly as on the books.
+           gl_FragColor.rgb *= vec3(${FAR_LIT.x.toFixed(4)}, ${FAR_LIT.y.toFixed(4)}, ${FAR_LIT.z.toFixed(4)});` +
+          // Match the detail books' distance shading EXACTLY, or the far field reads brighter
+          // than the books it continues (the box base did this via applyProximityGlow; the
+          // points dropped it and lit up the intentionally-dark dim ring). A point never enters
+          // the glow pool -- the nearest is past R_MID, well beyond GLOW_RADIUS -- so glow is
+          // always 0 and the pool/boost/warm/facet terms all drop out, leaving just the resting
+          // floor: crushed to REST_DIM in the near dim ring, lifted toward REST_FAR with camera
+          // distance (aerial perspective) and with the ground fade.
+          `float _distLift = smoothstep(${HAZE_NEAR.toFixed(1)}, ${HAZE_FAR.toFixed(1)}, vViewDist);
+           float _restFloor = mix(${GLOW_REST_DIM.toFixed(3)}, ${GLOW_REST_FAR.toFixed(3)}, max(vGroundFade, _distLift));
+           gl_FragColor.rgb *= _restFloor;` +
+          // the same drifting daylight the ground + books take, faded to night with distance
+          applyDaylightGLSL("vGlowXZ", "vGroundFade", "vViewDist") +
+          // self-emission AFTER the tint (true self-light) so a speck survives the night as its
+          // own dim hue, plus the sun-reveal -- both as on the books, minus the facet self-shade
+          // (a point has no facet). These keep the mid->points handoff continuous.
+          `gl_FragColor.rgb += diffuseColor.rgb * ${GLOW_EMISSIVE.toFixed(3)};
+           float _sun = daylightAt(vGlowXZ, vViewDist);
+           gl_FragColor.rgb += diffuseColor.rgb * ${DAY_GLSL} * (_sun * ${GLOW_REVEAL.toFixed(3)});
+           // distance dissolve into the dome (the box took this from applyDistanceFade's
+           // dithering_fragment splice, which the points shader lacks), the sub-pixel coverage
+           // fade so the dense mid-field thins to stipple instead of a solid carpet, and the
+           // vertical foreshortening band: keep the central vSquash-tall slab, soft-edged. At
+           // top-down vSquash~1 so the whole sprite survives (square, matches a book's cover);
+           // at grazing vSquash~0 so only a thin horizontal sliver remains (a flat book edge-on).
+           // A floored 1px speck is a single centre fragment (_vy~0) so it always survives intact.
+           float _vy = abs(gl_PointCoord.y - 0.5) * 2.0;
+           float _band = 1.0 - smoothstep(vSquash, vSquash + 0.20, _vy);
+           // Near fade-in: drop the dot floor across the solid-book core so a dot sprite can't peek
+           // past its flat book, ramping to full by FAR_MESH_FULL where the books start dissolving.
+           // Keyed on LIVE horizontal distance -- safe here (unlike the abandoned cap-blind fade)
+           // because within FAR_MESH_FULL the cap (nearest-first) ALWAYS has a mesh covering the
+           // faded dot, so this can't expose a gap. Beyond FAR_MESH_FULL the factor is 1 and the dot
+           // is the full floor under the fading / absent mesh.
+           float _nearFade = smoothstep(${DOT_NEAR_FADE_IN.toFixed(1)}, ${FAR_MESH_FULL.toFixed(1)}, distance(vGlowXZ, uPlayer));
+           // The far speck stays a brightness FLOOR otherwise (no distance fade-OUT): update() still
+           // hides a meshed book's point (aShow=0) within FAR_HIDE_R for the giant-near-sprite cull,
+           // staleness-safe and cap-aware. A distance fade-OUT on the point caused a dark band /
+           // empty-on-overflow / fly-up hole / dense-area crescent -- see the FAR_* notes above.
+           gl_FragColor.a *= (1.0 - vGroundFade) * vPointFade * _band * _nearFade;` +
+          (DIAG_LOD_COLORS ? "\n           gl_FragColor.rgb = vec3(1.0, 0.0, 0.0); // DIAG: points = red" : ""),
       );
   };
 }
 
 function buildField(
   field: Awaited<ReturnType<typeof loadPositions>>,
-  bookNear: THREE.BufferGeometry, // LOD00, full detail, drawn closest
-  bookMid: THREE.BufferGeometry, // LOD01, drawn across the mid band
-  bookFar: THREE.BufferGeometry, // LOD02, the authored 12-tri book box, the always-drawn base
+  bookNear: THREE.BufferGeometry, // LOD01 (near tier; LOD00 dropped), drawn closest
+  bookMid: THREE.BufferGeometry, // LOD02 box, drawn across the mid band (the far base is GL points)
   uPlayer: PlayerUniform, // shared player-position uniform (also drives the ground rake)
   daylight: DaylightUniforms, // shared daylight uniforms (also drift over the ground)
   world: World, // R_INNER/R_MAX define the era-temperature radial ramp
@@ -543,49 +761,51 @@ function buildField(
   const bb = bookNear.boundingBox!;
   const SPINE = bb.max.y - bb.min.y;
 
-  // Three-tier distance LOD. A 230-tri book instanced 574k times and drawn mostly
-  // sub-pixel is hopeless; a book is only a legible shape within tens of units and
-  // only READABLE within 6u (the picker's reach), so detail past that is wasted.
-  // Each book is drawn by exactly ONE detail tier over an always-present box base:
-  // full LOD00 within R_FULL, LOD01 out to R_MID, the LOD02 box beyond. A promoted book's
-  // box instance is hidden (zeroed matrix), so the box never covers the same book as a
-  // detail mesh (no z-fight); the two detailed tiers never cover the same book either.
-  // Splitting the old single detailed tier in two keeps each swap small on screen:
-  // full->mid lands where a book is already a few px, mid->box smaller still. A
-  // per-book dither on the inner boundary scatters that swap so it isn't a clean ring
-  // sweeping the field as the camera moves.
-  // Each book is drawn by EXACTLY ONE mesh. The box draws the whole field; when a book is
-  // promoted to a near/mid detail tier (see update()), its box instance is hidden (zeroed
-  // matrix), so the box and the detail never cover the same book. That removes the overlap
-  // outright, which is what every depth trick here was fighting: a shrunk box read dimmer
-  // than the detail (emission scales with on-screen area), so the detail region glowed in a
-  // cell-quantized bright zone; a depth-biased box sank behind the terrain at grazing angles
-  // and the mid-field vanished. With no overlap the box keeps a plain depth relationship
-  // with the ground (never disappears) and there is no box-vs-detail seam to hide.
-  // The far tier draws the authored book_LOD02 (bookFar), a 12-tri book box baked through
-  // the same uniform pipeline as the detail tiers, so its footprint, thickness and origin
-  // match exactly (no box drawn for the same instance as a detail mesh, so no shrink is
-  // needed: the no-overlap invariant — a promoted book's box instance is hidden, see
-  // update() — is what removes the z-fight). LOD02 also carries COLOR_0 page paint, so the
-  // far material runs the page mask too (below) and the cream page edges read continuously
-  // across the mid->far boundary.
+  // Distance LOD: two detail mesh tiers over an always-present GL points base. A 230-tri book
+  // instanced 574k times and drawn mostly sub-pixel is hopeless; a book is only a legible shape
+  // within tens of units and only READABLE within 6u (the picker's reach), so detail past that
+  // is wasted. Each book is drawn by exactly ONE layer: full LOD00 within R_FULL, LOD01 out to
+  // R_MID, a points speck beyond. A promoted book's speck is collapsed (aShow=0), so the base
+  // never covers the same book as a detail mesh (no z-fight / double-draw); the two detailed
+  // tiers never cover the same book either. Splitting the detail in two keeps each swap small:
+  // full->mid lands where a book is a few px, mid->points smaller still. A per-book dither on
+  // the inner boundary scatters that swap so it isn't a clean ring sweeping the field.
+  // The far base was a box mesh tier (LOD02) tiled for frustum culling; it was the measured
+  // vertex-bound cost on mobile (~19 vs ~40fps) and the recency-concentrated field barely
+  // culled, so it's now one GL points cloud (1 vertex/book vs ~36) -- see applyFarPointsShading
+  // and the cloud build below. A camera-facing point is also the right primitive at grazing
+  // desert angle, where the box only stayed visible by its vertical spine.
   const R_FULL = 30; // LOD00 within this radius (a book is still >~8px here)
-  const R_MID = 120; // LOD01 out to here; books are box-indistinguishable past it
+  // The mid mesh must cover out to the FIXED transition radius (FAR_CROSS_OUT=100) at PEAK density
+  // or the transition floats inward where the cap runs out (the "sporadic" load-in). Measured peak
+  // is ~54k books in a 100u disc at "the present" (the densest era), so the mid tier is LOD02 (the
+  // 24-vert box, NOT LOD01's 118) and MID_CAP is sized to that peak: 54k LOD02 = ~1.3M verts, far
+  // cheaper than 54k LOD01 (~6.4M) and even lighter than the old 24k-LOD01 mid -- LOD02 keeps the
+  // baked cover/page vertex colours and at >=30u its missing bevels are sub-pixel. R_MID is the JOIN
+  // radius and sits REBUILD_DIST beyond the VISIBLE fade-out (FAR_CROSS_OUT=70): the outer 30u
+  // [70,100] is the invisible margin where books are meshed-but-transparent (alpha 0), so a book
+  // joins while invisible and glides in instead of popping mid-fade. The cap still only has to cover
+  // the 100u disc (~49k mid at peak, headroom under 54k) -- same budget as before, the margin is
+  // just the outer slice of the disc we already paid for.
+  const R_MID = 100; // mid JOIN radius (= RMID_OUTER, MID_DITHER=0); speck beyond. Visible fade-out is FAR_CROSS_OUT=70, REBUILD_DIST inside this
   const BOUND_DITHER = 12; // per-book spread (world units) on the full->mid boundary
   const NEAR_CAP = 6000; // LOD00 instances; the R_FULL disc holds far fewer than this
-  const MID_CAP = 24000; // LOD01 instances; overflow in the dense band drops the
-  //   farthest-in-band to box (a shorter, still sub-pixel mid radius there), the same
-  //   graceful degradation the single tier had.
-  const REBUILD_DIST = 25; // refill the near/mid sets only after the camera moves this far
+  const MID_CAP = 54000; // LOD02 instances; sized to the peak density in the 100u mid disc so the
+  //   transition is reliable. Any residual overflow drops to the points floor (a full speck, never
+  //   a hole -- membership-driven hiding), so slight under-sizing degrades gracefully.
+  const REBUILD_DIST = 30; // refill the near/mid sets after the camera moves this far. The invisible
+  //   margin (RMID_OUTER - FAR_CROSS_OUT = 30) must be >= this, so a book can't cross from outside
+  //   the join radius to inside the VISIBLE fade in one rebuild step -> it always joins at alpha 0.
 
   // books dissolve with the ground: the same camera-distance fade to transparent,
   // so the field thins into the dome at the horizon rather than leaving sharp specks
   // floating over ground that has already faded out. The page mask chains on after
-  // the fade so cover vertices keep the geo hue and page edges stay cream; all three
-  // tiers carry it (LOD02 was repainted with COLOR_0 page faces, so the box base shows
-  // cream edges too and there's no colour pop at the mid->far boundary).
-  // shared proximity-glow uniforms: one object referenced by every book material,
-  // so moving uPlayer once per frame lights the pool on all three LOD tiers.
+  // the fade so cover vertices keep the geo hue and page edges stay cream; both detail
+  // tiers carry it. The points base can't mask faces (a point has none) and doesn't need
+  // to — a speck is one colour — but it takes the same distance fade (folded into its own
+  // shader) so it dissolves into the dome with the rest.
+  // shared proximity-glow uniforms: one object referenced by every detail book material,
+  // so moving uPlayer once per frame lights the pool on both detail LOD tiers.
   const glow: GlowUniforms = {
     uPlayer,
     uGlowRadius: { value: GLOW_RADIUS },
@@ -598,45 +818,60 @@ function buildField(
   };
   // flatShading: each authored facet carries its own light/dark tone (the sphere's recipe), so
   // the facet self-shading in applyProximityGlow has real per-face normals to rake. Goes on
-  // every tier so a book reads the same through an LOD swap; the box base gets it too.
-  const farMat = new THREE.MeshLambertMaterial({ flatShading: true });
-  applyDistanceFade(farMat);
-  applyPageMask(farMat);
-  applyProximityGlow(farMat, glow, daylight);
+  // both detail tiers so a book reads the same through an LOD swap. The far base is no longer
+  // a mesh tier -- it's a GL points cloud (farPointsMat), built once the positions exist.
+  const farPointsMat = new THREE.PointsMaterial({
+    vertexColors: true,
+    sizeAttenuation: true,
+    size: FAR_POINT_SIZE,
+  });
+  applyFarPointsShading(farPointsMat, uPlayer, daylight);
+  // depthWrite OFF on the whole field. The dots are a CONTINUOUS floor that the books layer over
+  // (points render first, RO_BOX < RO_DETAIL); the books must NOT depth-occlude the dots. The bug
+  // this kills: a transparent fragment still writes depth, so the invisible-margin books (alpha 0
+  // in [FAR_CROSS_OUT, RMID_OUTER]) were punching holes in the dot field while drawing nothing --
+  // an occlusion ring that JUMPED with the rebuild snapshot ("sparse dot ring"). With no depth
+  // write the books just alpha-blend over the dot floor: a full book covers its dot (same colour,
+  // seamless), a fading book lets the dot show through proportionally (brightness conserved for
+  // free), and an invisible book does nothing. Trade-off: books no longer depth-occlude EACH OTHER,
+  // so overlaps resolve by draw order -- acceptable here (stage 8 forbids subsumption, books barely
+  // overlap, and they're near-opaque within FAR_MESH_FULL).
+  farPointsMat.depthWrite = false;
   const midMat = new THREE.MeshLambertMaterial({ flatShading: true });
   applyDistanceFade(midMat);
   applyPageMask(midMat);
   applyProximityGlow(midMat, glow, daylight);
+  midMat.depthWrite = false;
   const nearMat = new THREE.MeshLambertMaterial({ flatShading: true });
   applyDistanceFade(nearMat);
   applyPageMask(nearMat);
   applyProximityGlow(nearMat, glow, daylight);
-  // All three now run the identical patch stack (fade+page+glow), so they legitimately
+  nearMat.depthWrite = false;
+  // The two detail tiers run the identical patch stack (fade+page+glow), so they legitimately
   // share one program. Their default cache keys (= onBeforeCompile.toString(), closure
   // vars excluded) collide, which here is correct — but three's collision is by accident
   // of stringification, so we still pin an explicit shared key to make the sharing
   // intentional and robust to a future patch divergence. Same defence the ground uses.
   const bookProgramKey = () => "book:fade+page+glow+daylight";
-  farMat.customProgramCacheKey = bookProgramKey;
   midMat.customProgramCacheKey = bookProgramKey;
   nearMat.customProgramCacheKey = bookProgramKey;
 
-  // Explicit renderOrder. The books are transparent (distance fade) and were all left
-  // at renderOrder 0, tied with each other and with the ground, so Three's distance sort
-  // flipped per frame. Since a book is now drawn by exactly one mesh (promoted instances
-  // are hidden in the box), the tiers never overlap, so this is purely a deterministic
-  // transparent-sort order: ground first (renderOrder 0), then the books, below the
-  // teleporter beam (renderOrder 10). Keep detail before box so blends are stable.
-  const RO_DETAIL = 5; // near/mid detail: after the ground
-  const RO_BOX = 7; // the box base: the rest of the field
-  // The box base (every book's lowest LOD) is the dominant GPU cost — ~2.8ms flat,
-  // measured vertex/instance-bound, the same whether on or off screen because the old
-  // single mesh set frustumCulled=false and ran the vertex shader on all 574k every
-  // frame. It's built below as a COARSE GRID of per-tile InstancedMeshes (after the
-  // positions exist) so the renderer can frustum-cull the tiles behind the camera —
-  // at ground level inside the ring most of the disc is off-screen — and so a finite
-  // view distance can drop far tiles for weak/mobile GPUs. Tiles are created post-loop
-  // straight from fullMat/fullCol, so the loop only fills those arrays now.
+  // Explicit renderOrder, and the POINTS now draw BEFORE the detail meshes (was the reverse). With
+  // depthWrite off across the field, draw order alone decides layering: the dot floor must paint
+  // first so the books alpha-blend OVER it (a full book hides its dot, a fading book reveals it).
+  // Ground first (renderOrder 0, writes depth), then the points floor, then the books over them,
+  // all below the teleporter beam (renderOrder 10).
+  const RO_BOX = 4; // the far points: the continuous dot floor, painted first
+  const RO_DETAIL = 5; // near/mid detail: layered OVER the dot floor
+  // The far base (every book's lowest LOD) was the dominant GPU cost — measured
+  // vertex-bound (~19fps with it on mobile, ~40 without; flat-lit and half pixel-ratio
+  // both did nothing, so neither lighting nor fill). It was a box mesh tiled for frustum
+  // culling, but the field is recency-concentrated at the centre where the player surveys,
+  // so culling barely bit (only ~1.6% culls past half-radius from spawn). It's now a single
+  // GL points cloud (built after the positions exist): one vertex per book vs the box's ~36,
+  // attacking the vertex cost directly and uniformly across the whole field. No tiling —
+  // 574k point-vertices is cheap to run in full, so the frustum-cull split (and its draw
+  // calls) is gone too.
   const midMesh = new THREE.InstancedMesh(bookMid, midMat, MID_CAP);
   midMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
   midMesh.frustumCulled = false; // rebuilt around the camera, bounds don't apply
@@ -767,108 +1002,75 @@ function buildField(
   const cursor = cellStart.slice(0, gw * gh);
   for (let i = 0; i < n; i++) cellItems[cursor[cellOf(i)]++] = i;
 
-  // Box base as a coarse tile grid. Each non-empty TILE-sized cell becomes its own
-  // InstancedMesh with frustumCulled=true, so the renderer drops the tiles behind the
-  // camera (at ground level inside the ring, most of the disc) and a finite view
-  // distance can drop the far ones. TILE is the knob: smaller -> tighter culling but
-  // more draw calls; larger -> fewer calls, coarser cull. ~1200u keeps the box field
-  // to a few dozen calls while culling most of it from a ground view.
-  const TILE = 1200;
-  const tcols = Math.floor((maxX - minX) / TILE) + 1;
-  const trows = Math.floor((maxZ - minZ) / TILE) + 1;
-  const tileOfBook = (i: number): number =>
-    Math.floor((pz[i] - minZ) / TILE) * tcols + Math.floor((px[i] - minX) / TILE);
-  // count per grid cell, then hand each non-empty cell a compact mesh slot (empty cells
-  // — the centre plaza, the gaps between longitude wedges — never get a mesh).
-  const tileFill = new Int32Array(tcols * trows);
-  for (let i = 0; i < n; i++) tileFill[tileOfBook(i)]++;
-  const tileMeshIndex = new Int32Array(tcols * trows).fill(-1);
-  const farTiles: THREE.InstancedMesh[] = [];
-  for (let t = 0; t < tcols * trows; t++) {
-    if (tileFill[t] === 0) continue;
-    tileMeshIndex[t] = farTiles.length;
-    const mesh = new THREE.InstancedMesh(bookFar, farMat, tileFill[t]);
-    // dynamic: update() zero-scales promoted books in place and restores them, so a
-    // tile's matrices are rewritten as the camera roams (colours never change).
-    mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-    mesh.frustumCulled = true; // the whole point: cull the tile when it's off-screen
-    mesh.renderOrder = RO_BOX;
-    farTiles.push(mesh);
-  }
-  // per-book maps so the refill hot path stays O(1): book i lives in tile mesh
-  // tileMeshOf[i] at instance slot slotOf[i]. Fill straight from fullMat/fullCol.
-  const tileMeshOf = new Int32Array(n);
-  const slotOf = new Int32Array(n);
-  const tileCursor = new Int32Array(farTiles.length);
-  const mBox = new THREE.Matrix4();
-  const cBox = new THREE.Color();
+  // Far base as ONE GL points cloud: one camera-facing sprite per book, drawn at the book's
+  // standing position. No tiling — 574k point-vertices is cheap to run in full, so the box's
+  // frustum-cull split (and its draw-call overhead) is unnecessary. Positions are the book
+  // translation (lifted seat) lifted to the spine centre, so a speck sits where its book mass
+  // is; colour reuses the per-book fullCol; aShow gates promoted books (set in update()).
+  const farGeo = new THREE.BufferGeometry();
+  const farPos = new Float32Array(n * 3);
+  const farShow = new Float32Array(n).fill(1); // 1 = drawn by the base; 0 = promoted to detail
   for (let i = 0; i < n; i++) {
-    const mi = tileMeshIndex[tileOfBook(i)];
-    const slot = tileCursor[mi]++;
-    tileMeshOf[i] = mi;
-    slotOf[i] = slot;
-    farTiles[mi].setMatrixAt(slot, mBox.fromArray(fullMat, i * 16));
-    farTiles[mi].setColorAt(slot, cBox.fromArray(fullCol, i * 3));
+    // fullMat translation (cols 12..14) is the book's seated centre; raise by half a spine so
+    // the speck floats at the book's middle rather than its underside.
+    farPos[i * 3] = fullMat[i * 16 + 12];
+    farPos[i * 3 + 1] = fullMat[i * 16 + 13] + SPINE * 0.5;
+    farPos[i * 3 + 2] = fullMat[i * 16 + 14];
   }
-  // freeze each tile's culling sphere over its real instance spread, once. update()
-  // only zero-scales promoted instances in place (count stays full), so this build-time
-  // sphere stays correct and is never recomputed. Cache centre/radius (xz) for the
-  // optional view-distance gate below.
-  const tileCx = new Float32Array(farTiles.length);
-  const tileCz = new Float32Array(farTiles.length);
-  const tileRad = new Float32Array(farTiles.length);
-  for (let t = 0; t < farTiles.length; t++) {
-    const mesh = farTiles[t];
-    mesh.instanceMatrix.needsUpdate = true;
-    if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
-    mesh.computeBoundingSphere();
-    const s = mesh.boundingSphere!;
-    tileCx[t] = s.center.x;
-    tileCz[t] = s.center.z;
-    tileRad[t] = s.radius;
-  }
+  farGeo.setAttribute("position", new THREE.BufferAttribute(farPos, 3));
+  // reuse the per-book colours (vertexColors); the points shader multiplies diffuse by these.
+  farGeo.setAttribute("color", new THREE.BufferAttribute(fullCol, 3));
+  const farShowAttr = new THREE.BufferAttribute(farShow, 1);
+  farShowAttr.setUsage(THREE.DynamicDrawUsage); // promotion flips a few thousand per rebuild
+  farGeo.setAttribute("aShow", farShowAttr);
+  const farPoints = new THREE.Points(farGeo, farPointsMat);
+  // whole-disc bounds always intersect the frustum and the cloud is cheap to run in full, so
+  // don't pay computeBoundingSphere or per-frame cull tests — never culled, always drawn.
+  farPoints.frustumCulled = false;
+  farPoints.renderOrder = RO_BOX;
 
-  const RMID2 = R_MID * R_MID;
+  // No join dither on the mid->points boundary anymore. It used to fuzz the JOIN radius so books
+  // didn't all swap to mesh on one ring (a visible pop), but with the invisible margin a book joins
+  // at R_MID while still alpha 0 (FAR_CROSS_OUT is REBUILD_DIST inside R_MID), so the join is
+  // invisible -- there's no ring of pops left to scatter, and the live alpha fade does all the
+  // visible smoothing. (The full->mid LOD swap at R_FULL is a different, VISIBLE geometry change and
+  // keeps its BOUND_DITHER.) RMID_OUTER = R_MID is the membership cap.
+  const MID_DITHER = 0; // join is invisible (alpha 0 at R_MID), so no dither needed
+  const RMID_OUTER = R_MID + MID_DITHER * 0.5;
+  const RMID2 = RMID_OUTER * RMID_OUTER;
+  // Hide a book's point only where a real mesh book COVERS it: meshed AND within FAR_HIDE_R of the
+  // rebuild centre. FAR_HIDE_R = FAR_MESH_FULL - REBUILD_DIST is the staleness margin -- a book
+  // hidden here is, even after a full REBUILD_DIST of drift before the next refill, still within
+  // FAR_MESH_FULL of the LIVE player, where the mesh is at full alpha and covers the removed point
+  // (so the snapshot can never punch a hole; the v1 hide at FAR_MESH_FULL had no margin). The point
+  // switches on at FAR_HIDE_R over a FULL mesh book, so the switch is invisible; it only becomes the
+  // visible layer past FAR_MESH_FULL where the mesh fades. A book the cap never meshed isn't hidden
+  // -> keeps its full point, a speck not a gap (membership-driven, not a blind distance fade).
+  const FAR_HIDE_R = Math.max(0, FAR_MESH_FULL - REBUILD_DIST);
+  const FAR_HIDE_R2 = FAR_HIDE_R * FAR_HIDE_R;
   const RB2 = REBUILD_DIST * REBUILD_DIST;
-  const maxRing = Math.ceil(R_MID / CELL) + 1; // cells beyond this are wholly out of range
+  const maxRing = Math.ceil(RMID_OUTER / CELL) + 1; // cells beyond this are wholly out of range
   const m = new THREE.Matrix4();
   const c = new THREE.Color();
-  // a book promoted to a detail tier has its box instance collapsed to a point (zero
-  // scale -> degenerate, no fragments), so the box never double-draws it. We track the
-  // promoted ids so the next rebuild can restore their box matrix before re-promoting.
-  const HIDE = new THREE.Matrix4().makeScale(0, 0, 0);
+  // a book promoted to a detail tier has its far speck collapsed (aShow=0 -> gl_PointSize 0,
+  // not rasterised), so the base never double-draws it. We track the promoted ids so the next
+  // rebuild can restore their speck before re-promoting.
   const hidden = new Int32Array(NEAR_CAP + MID_CAP);
   let nHidden = 0;
   let lastX = Infinity;
   let lastZ = Infinity;
-  // touched-tile set for the rebuild: hides/restores rewrite a few tiles' matrices, so
-  // we flip needsUpdate only on those, not all ~100. dirtyList collects, tileDirty dedups.
-  const tileDirty = new Uint8Array(farTiles.length);
-  const dirtyList: number[] = [];
-  const markTile = (mi: number): void => {
-    if (!tileDirty[mi]) {
-      tileDirty[mi] = 1;
-      dirtyList.push(mi);
-    }
-  };
-  // box-field master switch (dev B toggle) and optional view-distance cull (mobile/low
-  // preset). viewDist = Infinity -> the full vista, the default; finite -> hide tiles
-  // whose nearest point is beyond it. Both resolve to per-tile .visible in update().
+  // far-base master switch (dev toggle, for the perf baseline). The points cloud is cheap
+  // enough that the old per-tile view-distance cull is gone; this is just on/off.
   let boxShown = true;
-  let viewDist = Infinity;
   function update(camX: number, camZ: number): void {
     const mdx = camX - lastX;
     const mdz = camZ - lastZ;
     if (mdx * mdx + mdz * mdz < RB2) return;
     lastX = camX;
     lastZ = camZ;
-    // restore the box instances hidden last rebuild; the walk below re-hides whichever
-    // are still promoted, so a book that fell out of the detail tiers reappears in the box.
-    for (let h = 0; h < nHidden; h++) {
-      const i = hidden[h];
-      farTiles[tileMeshOf[i]].setMatrixAt(slotOf[i], m.fromArray(fullMat, i * 16));
-      markTile(tileMeshOf[i]);
-    }
+    // restore the far specks hidden last rebuild; the walk below re-hides whichever are still
+    // promoted, so a book that fell out of the detail tiers reappears in the far base.
+    for (let h = 0; h < nHidden; h++) farShow[hidden[h]] = 1;
     nHidden = 0;
     const cgx = Math.floor((camX - minX) / CELL);
     const cgz = Math.floor((camZ - minZ) / CELL);
@@ -884,28 +1086,42 @@ function buildField(
         const dz = pz[i] - camZ;
         const d2 = dx * dx + dz * dz;
         if (d2 > RMID2) continue;
-        // per-book dither on the full->mid radius so the swap is a fuzzy band of
-        // individual books rather than a clean ring sweeping the field. Stable hash
-        // of the book index, so a given book's boundary doesn't change frame to frame.
+        // per-book dither on BOTH boundaries so each swap is a fuzzy band of individual books
+        // rather than a clean ring sweeping the field. Two independent stable hashes of the
+        // book index (so a given book's boundaries don't change frame to frame, and the two
+        // boundaries don't correlate): h for full->mid, h2 for mid->points.
         const h = (Math.imul(i, 2654435761) >>> 0) / 4294967296; // [0, 1)
+        const h2 = (Math.imul(i ^ 0x9e3779b9, 2246822519) >>> 0) / 4294967296; // [0, 1)
         const rf = R_FULL + (h - 0.5) * BOUND_DITHER;
+        const rm = R_MID + (h2 - 0.5) * MID_DITHER;
         if (d2 < rf * rf && kNear < NEAR_CAP) {
           nearMesh.setMatrixAt(kNear, m.fromArray(fullMat, i * 16));
           nearMesh.setColorAt(kNear, c.fromArray(fullCol, i * 3));
           kNear++;
-          farTiles[tileMeshOf[i]].setMatrixAt(slotOf[i], HIDE); // detail draws it; collapse the box copy
-          markTile(tileMeshOf[i]);
-          hidden[nHidden++] = i;
-        } else if (kMid < MID_CAP) {
+          // hide the speck where the mesh book covers it: within FAR_HIDE_R (= FAR_MESH_FULL -
+          // REBUILD_DIST), the staleness-safe radius inside which the live mesh stays full alpha
+          // through a whole rebuild interval. Books between FAR_HIDE_R and FAR_MESH_FULL keep their
+          // full point as the floor under the still-full mesh (the switch is invisible there); past
+          // FAR_MESH_FULL the point is the visible layer as the mesh fades. Near books are well
+          // inside, so they always collapse.
+          if (d2 < FAR_HIDE_R2) {
+            farShow[i] = 0;
+            hidden[nHidden++] = i;
+          }
+        } else if (d2 < rm * rm && kMid < MID_CAP) {
           // mid band, or a near-band book that overflowed NEAR_CAP (still gets detail)
           midMesh.setMatrixAt(kMid, m.fromArray(fullMat, i * 16));
           midMesh.setColorAt(kMid, c.fromArray(fullCol, i * 3));
           kMid++;
-          farTiles[tileMeshOf[i]].setMatrixAt(slotOf[i], HIDE); // detail draws it; collapse the box copy
-          markTile(tileMeshOf[i]);
-          hidden[nHidden++] = i;
+          if (d2 < FAR_HIDE_R2) {
+            farShow[i] = 0; // mesh covers it (staleness-safe radius) -> hide the redundant speck
+            hidden[nHidden++] = i;
+          } // else: keep the full speck as the floor; the mesh fades in/out under it past here
         }
-        // else: both detail caps full, the always-drawn box base covers this book
+        // NB: a book that falls through here (mid cap full, so unmeshed) keeps farShow[i]=1 -> a
+        // full speck, never an empty hole. That's the whole point of membership-driven hiding.
+        // else: past the dithered mid radius (stays a speck), or both detail caps full — the
+        // always-drawn far points base covers this book
       }
     };
     // expand in Chebyshev rings from the camera cell: nearest cells first, so the
@@ -932,44 +1148,23 @@ function buildField(
     midMesh.count = kMid;
     midMesh.instanceMatrix.needsUpdate = true;
     if (midMesh.instanceColor) midMesh.instanceColor.needsUpdate = true;
-    // the restores and re-hides above rewrote a few tiles' matrices; push only those.
-    for (let d = 0; d < dirtyList.length; d++) {
-      const mi = dirtyList[d];
-      farTiles[mi].instanceMatrix.needsUpdate = true;
-      tileDirty[mi] = 0;
-    }
-    dirtyList.length = 0;
-    // view-distance / box-master visibility. Frustum culling is automatic (per tile);
-    // this only adds the optional distance gate. Skip the loop entirely on the default
-    // (infinite vista, box shown) so capable hardware pays nothing for it.
-    if (!boxShown || viewDist !== Infinity) {
-      for (let t = 0; t < farTiles.length; t++) {
-        const dx = camX - tileCx[t];
-        const dz = camZ - tileCz[t];
-        farTiles[t].visible =
-          boxShown && Math.hypot(dx, dz) - tileRad[t] <= viewDist;
-      }
-    }
+    // the restores + re-hides above flipped aShow on a few thousand books; one upload of the
+    // (small, 1 float/book) attribute pushes them all. Only fires on a rebuild (camera moved
+    // REBUILD_DIST), not per frame.
+    farShowAttr.needsUpdate = true;
   }
 
   const group = new THREE.Group();
-  for (const t of farTiles) group.add(t);
+  group.add(farPoints);
   group.add(midMesh);
   group.add(nearMesh);
-  // box-field controls: dev visibility toggle (B, for the perf baseline) and the
-  // view-distance setter (a future mobile/quality preset). setBoxVisible forces an
-  // immediate apply; the view-distance gate then re-resolves visibility on the next
-  // rebuild. n is the total instance count for the readout; farTiles.length the draw
-  // count when nothing is culled.
+  // far-base dev visibility toggle (for the perf baseline). The points cloud is cheap enough
+  // that the old per-tile view-distance cull is gone. n is the total book count for the readout.
   const setBoxVisible = (on: boolean): void => {
     boxShown = on;
-    for (const t of farTiles) t.visible = on;
+    farPoints.visible = on;
   };
   const isBoxVisible = (): boolean => boxShown;
-  const setViewDistance = (d: number): void => {
-    viewDist = d;
-    lastX = Infinity; // force the next update() to re-resolve tile visibility
-  };
   return {
     group,
     px,
@@ -978,11 +1173,9 @@ function buildField(
     update,
     nearMesh,
     midMesh,
+    farPoints,
     setBoxVisible,
     isBoxVisible,
-    setViewDistance,
-    farTiles,
-    farTileCount: farTiles.length,
   };
 }
 
@@ -2119,7 +2312,9 @@ async function main() {
       loadMeta("meta.bin"),
       loadWorld("world.json"),
       loadHeightmap("heightmap.bin"),
-      loadBookLods(bookUrl, ["book_LOD00", "book_LOD01", "book_LOD02"]),
+      // near = LOD01 (118v), mid = LOD02 box (24v); LOD00 (628v) is skipped -- it was the heaviest
+      // tier and LOD01 reads the same at the close ranges, so the whole field is now ~2.6M verts.
+      loadBookLods(bookUrl, ["book_LOD01", "book_LOD02"]),
     ]);
   mark("fetch+decode");
   // the heightmap is the ground-height source for the ground mesh and the player's
@@ -2146,7 +2341,7 @@ async function main() {
   // placed on the analytic fallback before the fetch resolved).
   camera.position.y = sampleHeight(camera.position.x, camera.position.z) + EYE_HEIGHT;
   mark("terrain");
-  const built = buildField(field, bookLods[0], bookLods[1], bookLods[2], uPlayer, daylight.uniforms, world);
+  const built = buildField(field, bookLods[0], bookLods[1], uPlayer, daylight.uniforms, world);
   mark("seat books");
 
   // Wall the player just past the outermost book. R_MAX (the nominal time-radius) is
@@ -2603,11 +2798,6 @@ async function main() {
   // worst-case ms for the two camera-driven rebuilds, reset each readout window,
   // so a bursty re-tessellation spike shows up instead of being averaged away.
   let booksMs = 0;
-  // scratch for the readout's post-cull box count: rebuild the camera frustum at the
-  // ~4 Hz readout tick and test each box tile's sphere, so we can show how many box
-  // tiles/books actually survive culling (the proof the tiling is doing its job).
-  const perfFrustum = new THREE.Frustum();
-  const perfPM = new THREE.Matrix4();
   const PICK_INTERVAL = 0.12; // ~8 Hz; the look-at label needn't be per-frame
   renderer.setAnimationLoop(() => {
     const dt = Math.min(clock.getDelta(), 0.1); // clamp after tab-out stalls
@@ -2711,25 +2901,17 @@ async function main() {
       sinceStat = 0;
       const r = renderer.info.render;
       const gpuStr = !timerExt ? "n/a (no ext)" : gpuMs < 0 ? "…" : `${gpuMs.toFixed(2)}ms`;
-      // post-cull box count: how many tiles (and their instances) survive the frustum
-      // this view. The gap from farTileCount/field.n is exactly what tiling removed.
-      perfPM.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
-      perfFrustum.setFromProjectionMatrix(perfPM);
-      let visTiles = 0;
-      let visBoxBooks = 0;
-      for (const t of built.farTiles) {
-        if (t.visible && perfFrustum.intersectsObject(t)) {
-          visTiles++;
-          visBoxBooks += t.count;
-        }
-      }
+      // the far base is now one points cloud: it runs the vertex shader on all n every frame
+      // (the promoted ones collapse to 0px), so "drawn" is just the field total minus the
+      // promoted detail books — no per-tile cull count to report anymore.
+      const farBooks = field.n - built.nearMesh.count - built.midMesh.count;
       perf.textContent =
         `gpu    ${gpuStr}\n` +
         `scale  ${renderScale.toFixed(2)}x (pr ${renderer.getPixelRatio().toFixed(2)})\n` +
         `calls  ${r.calls}\n` +
         `tris   ${(r.triangles / 1e6).toFixed(2)}M\n` +
         `near   ${built.nearMesh.count.toLocaleString()} full + ${built.midMesh.count.toLocaleString()} mid\n` +
-        `box    ${visBoxBooks.toLocaleString()} / ${field.n.toLocaleString()} drawn, ${visTiles}/${built.farTileCount} tiles${built.isBoxVisible() ? "" : " (HIDDEN)"}\n` +
+        `far    ${farBooks.toLocaleString()} / ${field.n.toLocaleString()} pts${built.isBoxVisible() ? "" : " (HIDDEN)"}\n` +
         `bookfl ${booksMs.toFixed(1)}ms (peak)`;
       booksMs = 0;
     }
