@@ -348,18 +348,25 @@ function bakeBook(src: THREE.Mesh): THREE.BufferGeometry {
   );
   // COLOR_0 -> aPage. GLTFLoader maps COLOR_0 to attributes.color (vec4, uint16
   // normalized). Pages were painted black, so a low red channel marks a page vertex.
+  // All three LODs are page-painted, but guard a missing channel anyway (an unpainted
+  // LOD is an easy authoring slip): default aPage to 0 (all cover) rather than
+  // dereferencing a missing attribute.
   const color = g.getAttribute("color");
-  const aPage = new Float32Array(color.count);
-  for (let i = 0; i < color.count; i++) aPage[i] = color.getX(i) < 0.5 ? 1 : 0;
+  const vcount = color ? color.count : g.getAttribute("position").count;
+  const aPage = new Float32Array(vcount);
+  if (color) for (let i = 0; i < vcount; i++) aPage[i] = color.getX(i) < 0.5 ? 1 : 0;
   g.setAttribute("aPage", new THREE.BufferAttribute(aPage, 1));
-  g.deleteAttribute("color");
+  if (color) g.deleteAttribute("color");
   return g;
 }
 
 // Load the named book LODs from book.glb (one fetch, in ladder order) and bake each.
-// book.glb carries book_LOD00 (full), book_LOD01 (mid) and book_LOD02 (an authored
-// box); the field uses the first two and synthesises its own box proxy, so LOD02
-// isn't requested here.
+// book.glb carries book_LOD00 (full, ~308 tri), book_LOD01 (mid, ~56 tri) and book_LOD02
+// (a 12-tri book box, the always-drawn far base); all three bake through the same uniform
+// pipeline so their footprint and origin match exactly. NOTE the bakeBook clone takes
+// geometry only — node transforms are dropped — so every LOD must have its SCALE APPLIED
+// in Blender. LOD02 once shipped with an unapplied object scale and baked to a fat cube;
+// the fix was Ctrl+A->Scale on the source, not code. All three carry COLOR_0 page paint.
 async function loadBookLods(
   url: string,
   nodes: string[],
@@ -516,6 +523,7 @@ function buildField(
   field: Awaited<ReturnType<typeof loadPositions>>,
   bookNear: THREE.BufferGeometry, // LOD00, full detail, drawn closest
   bookMid: THREE.BufferGeometry, // LOD01, drawn across the mid band
+  bookFar: THREE.BufferGeometry, // LOD02, the authored 12-tri book box, the always-drawn base
   uPlayer: PlayerUniform, // shared player-position uniform (also drives the ground rake)
   daylight: DaylightUniforms, // shared daylight uniforms (also drift over the ground)
   world: World, // R_INNER/R_MAX define the era-temperature radial ramp
@@ -538,9 +546,9 @@ function buildField(
   // sub-pixel is hopeless; a book is only a legible shape within tens of units and
   // only READABLE within 6u (the picker's reach), so detail past that is wasted.
   // Each book is drawn by exactly ONE detail tier over an always-present box base:
-  // full LOD00 within R_FULL, LOD01 out to R_MID, the bare box beyond. The box is
-  // shrunk to PROXY so it hides INSIDE whichever detailed mesh covers it (no z-fight);
-  // the two detailed tiers never cover the same book, so they can't fight each other.
+  // full LOD00 within R_FULL, LOD01 out to R_MID, the LOD02 box beyond. A promoted book's
+  // box instance is hidden (zeroed matrix), so the box never covers the same book as a
+  // detail mesh (no z-fight); the two detailed tiers never cover the same book either.
   // Splitting the old single detailed tier in two keeps each swap small on screen:
   // full->mid lands where a book is already a few px, mid->box smaller still. A
   // per-book dither on the inner boundary scatters that swap so it isn't a clean ring
@@ -553,12 +561,13 @@ function buildField(
   // cell-quantized bright zone; a depth-biased box sank behind the terrain at grazing angles
   // and the mid-field vanished. With no overlap the box keeps a plain depth relationship
   // with the ground (never disappears) and there is no box-vs-detail seam to hide.
-  const PROXY = 1.0;
-  const boxGeo = new THREE.BoxGeometry(
-    (bb.max.x - bb.min.x) * PROXY,
-    SPINE * PROXY,
-    (bb.max.z - bb.min.z) * PROXY,
-  );
+  // The far tier draws the authored book_LOD02 (bookFar), a 12-tri book box baked through
+  // the same uniform pipeline as the detail tiers, so its footprint, thickness and origin
+  // match exactly (no box drawn for the same instance as a detail mesh, so no shrink is
+  // needed: the no-overlap invariant — a promoted book's box instance is hidden, see
+  // update() — is what removes the z-fight). LOD02 also carries COLOR_0 page paint, so the
+  // far material runs the page mask too (below) and the cream page edges read continuously
+  // across the mid->far boundary.
   const R_FULL = 30; // LOD00 within this radius (a book is still >~8px here)
   const R_MID = 120; // LOD01 out to here; books are box-indistinguishable past it
   const BOUND_DITHER = 12; // per-book spread (world units) on the full->mid boundary
@@ -571,8 +580,9 @@ function buildField(
   // books dissolve with the ground: the same camera-distance fade to transparent,
   // so the field thins into the dome at the horizon rather than leaving sharp specks
   // floating over ground that has already faded out. The page mask chains on after
-  // the fade so cover vertices keep the geo hue and page edges stay cream; both
-  // detailed tiers carry it (both have aPage), the box has no pages so it only fades.
+  // the fade so cover vertices keep the geo hue and page edges stay cream; all three
+  // tiers carry it (LOD02 was repainted with COLOR_0 page faces, so the box base shows
+  // cream edges too and there's no colour pop at the mid->far boundary).
   // shared proximity-glow uniforms: one object referenced by every book material,
   // so moving uPlayer once per frame lights the pool on all three LOD tiers.
   const glow: GlowUniforms = {
@@ -590,6 +600,7 @@ function buildField(
   // every tier so a book reads the same through an LOD swap; the box base gets it too.
   const farMat = new THREE.MeshLambertMaterial({ flatShading: true });
   applyDistanceFade(farMat);
+  applyPageMask(farMat);
   applyProximityGlow(farMat, glow, daylight);
   const midMat = new THREE.MeshLambertMaterial({ flatShading: true });
   applyDistanceFade(midMat);
@@ -599,15 +610,15 @@ function buildField(
   applyDistanceFade(nearMat);
   applyPageMask(nearMat);
   applyProximityGlow(nearMat, glow, daylight);
-  // All three now share applyProximityGlow as their outermost onBeforeCompile, so
-  // their default program-cache keys (= onBeforeCompile.toString(), closure vars
-  // excluded) collide. far has no page mask while mid/near do, so without a
-  // distinguishing key three would hand all three whichever program compiled
-  // first. Key on the actual patch stack: mid/near are identical (share a program,
-  // correct), far is its own. Same defence the ground material uses for its holes.
-  farMat.customProgramCacheKey = () => "book:fade+glow+daylight";
-  midMat.customProgramCacheKey = () => "book:fade+page+glow+daylight";
-  nearMat.customProgramCacheKey = () => "book:fade+page+glow+daylight";
+  // All three now run the identical patch stack (fade+page+glow), so they legitimately
+  // share one program. Their default cache keys (= onBeforeCompile.toString(), closure
+  // vars excluded) collide, which here is correct — but three's collision is by accident
+  // of stringification, so we still pin an explicit shared key to make the sharing
+  // intentional and robust to a future patch divergence. Same defence the ground uses.
+  const bookProgramKey = () => "book:fade+page+glow+daylight";
+  farMat.customProgramCacheKey = bookProgramKey;
+  midMat.customProgramCacheKey = bookProgramKey;
+  nearMat.customProgramCacheKey = bookProgramKey;
 
   // Explicit renderOrder. The books are transparent (distance fade) and were all left
   // at renderOrder 0, tied with each other and with the ground, so Three's distance sort
@@ -617,7 +628,7 @@ function buildField(
   // teleporter beam (renderOrder 10). Keep detail before box so blends are stable.
   const RO_DETAIL = 5; // near/mid detail: after the ground
   const RO_BOX = 7; // the box base: the rest of the field
-  const farMesh = new THREE.InstancedMesh(boxGeo, farMat, n);
+  const farMesh = new THREE.InstancedMesh(bookFar, farMat, n);
   // dynamic: update() hides/restores instances as books move in and out of the detail
   // tiers, so the box matrix is rewritten on each rebuild, not just once at build.
   farMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
@@ -1871,7 +1882,7 @@ async function main() {
       loadMeta("meta.bin"),
       loadWorld("world.json"),
       loadHeightmap("heightmap.bin"),
-      loadBookLods(bookUrl, ["book_LOD00", "book_LOD01"]),
+      loadBookLods(bookUrl, ["book_LOD00", "book_LOD01", "book_LOD02"]),
     ]);
   mark("fetch+decode");
   // the heightmap is the ground-height source for the ground mesh and the player's
@@ -1898,7 +1909,7 @@ async function main() {
   // placed on the analytic fallback before the fetch resolved).
   camera.position.y = sampleHeight(camera.position.x, camera.position.z) + EYE_HEIGHT;
   mark("terrain");
-  const built = buildField(field, bookLods[0], bookLods[1], uPlayer, daylight.uniforms, world);
+  const built = buildField(field, bookLods[0], bookLods[1], bookLods[2], uPlayer, daylight.uniforms, world);
   mark("seat books");
 
   // Wall the player just past the outermost book. R_MAX (the nominal time-radius) is
