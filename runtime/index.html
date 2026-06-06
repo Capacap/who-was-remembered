@@ -509,6 +509,23 @@
           transform: rotate(360deg);
         }
       }
+      /* Return to start: a quiet ruled text action in the neutral ink (a rung below
+         Resume's warm accent), for a lost player to jump back to the spawn centre. */
+      #pause-respawn {
+        display: block;
+        margin-top: 14px;
+        background: none;
+        border: none;
+        padding: 0 0 1px;
+        cursor: pointer;
+        color: var(--ink-soft);
+        border-bottom: 1px solid var(--rule);
+        font: inherit;
+      }
+      #pause-respawn:hover {
+        color: var(--ink);
+        border-color: var(--ink);
+      }
       /* developer section: a hairline-topped block — the gate, then the gated opts. */
       #pause-dev {
         margin-top: 20px;
@@ -593,6 +610,7 @@
           <button id="pause-resume">Resume</button>
           <span id="pause-spinner" aria-hidden="true"></span>
         </div>
+        <button id="pause-respawn">Return to start</button>
         <div id="pause-dev">
           <label class="pause-toggle">
             <input type="checkbox" id="dev-mode" /> Developer mode

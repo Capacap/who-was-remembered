@@ -2150,6 +2150,24 @@ async function main() {
   if (errLogger)
     renderer.domElement.ownerDocument.removeEventListener("pointerlockerror", errLogger);
 
+  // Return to start: a lost player jumps back to the spawn centre. Reuses the
+  // teleporter's fade-to-black so the position pop is never seen, and restores the
+  // FULL opening framing — eye on the summit at (0,0) AND the outward gaze across the
+  // plaza (lookAt; PointerLockControls reads the camera each pointermove, so deltas
+  // resume from the reset heading). resume() runs SYNCHRONOUSLY on the click so the
+  // re-lock rides this gesture (a setTimeout re-lock would be rejected as
+  // kRequiresUserGesture); the reposition waits for the black frame.
+  const returnToStart = () => {
+    resume(); // re-lock back to walking, on this click's user gesture
+    fade.style.opacity = "1"; // fade to black (CSS transition: 0.3s)
+    window.setTimeout(() => {
+      camera.position.set(0, sampleHeight(0, 0) + EYE_HEIGHT, 0);
+      camera.lookAt(0, 0, 8000);
+      stop(); // arrive at rest, not mid-glide
+      fade.style.opacity = "0"; // fade back in at the centre
+    }, 300);
+  };
+
   devModeEl.addEventListener("change", syncDevOpts);
   devFlyEl.addEventListener("change", () => setFlying(devFlyEl.checked));
   devFlatEl.addEventListener("change", () => setFlatLit(devFlatEl.checked));
@@ -2157,6 +2175,10 @@ async function main() {
   (document.getElementById("pause-resume") as HTMLButtonElement).addEventListener(
     "click",
     resume,
+  );
+  (document.getElementById("pause-respawn") as HTMLButtonElement).addEventListener(
+    "click",
+    returnToStart,
   );
   pauseEl.addEventListener("click", (e) => {
     if (e.target === pauseEl) resume(); // scrim click resumes; clicks on the card don't
