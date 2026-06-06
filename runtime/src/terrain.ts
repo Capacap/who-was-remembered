@@ -226,18 +226,23 @@ const PLAYER_SKATE_OUTER_RGB = _glsl(PLAYER_SKATE_OUTER);
 // teleporters sit inside (a blue pad there has to fight the near-white eye glow).
 const TP_GLOW_INNER = new THREE.Color(0x3df0ff); // cyan at the centre of the pad
 const TP_GLOW_OUTER = new THREE.Color(0x2f6cff); // blue at the rim, matches main.ts TP_BEAM_COLOR
-const TP_GLOW_RADIUS = 9; // disc footprint, world units; tracks main.ts TP_ENTER_RADIUS (the travel zone)
-const TP_GLOW_FALLOFF = 1.6; // intensity exponent over the radius; >1 keeps a bright core with a soft skirt
-// The pad is no longer a perfect disc -- a stamped circle was the one CG-smooth shape in a
-// faceted lowpoly world. Its glow is inscribed into an irregular POLYGON instead: the
-// bearing is cut into SIDES facets, each facet's reach jittered, so the rim has flat,
-// uneven edges like the dunes around it. The radial falloff then follows that polygon, so
-// the whole pool is angular, not just its outline.
-const TP_GLOW_SIDES = 7; // facet count of the pad polygon
-const TP_GLOW_FACET_JITTER = 0.32; // how far each facet's reach varies inward (fraction of radius)
-const TP_GLOW_STRENGTH = 0.0; // pad OFF: the beam's flared faceted foot is the marker now
-// (main.ts TP_BEAM_RADIUS_BASE). The soft glow pool was the last un-lowpoly element. Raise
-// back to 0.85 to restore the old ground glow. The polygon/jitter knobs below stay wired.
+const TP_GLOW_RADIUS = 11; // soft pool footprint, world units; broader/softer than the old pad
+const TP_GLOW_FALLOFF = 1.4; // intensity exponent over the radius; gentle -> a soft skirt
+// The ground pool is back, but now it is light CAST by the floating crystal overhead (main.ts
+// TP_FLOATING_CRYSTAL), not a self-glowing pad. Because it has a source above it, a soft pool
+// beneath is motivated light, not a stamp on the sand -- which is exactly why the old pad
+// failed. To keep it in the lowpoly language it RAKES the dune facets from that overhead
+// source (the same trick the player lamp uses) instead of being a smooth additive disc, so
+// the faceted relief reads through it. Dim and soft on purpose. The old stamped-circle /
+// polygon-pad experiment is superseded by the floating beacon and gone.
+const TP_GLOW_STRENGTH = 0.0; // cast pool OFF. A static pool can't sell light cast by a
+// crystal that turns and bobs above it -- the eye reads two unrelated objects, a spinning
+// gem and a frozen stamp. Selling it would mean animating the pool itself (a caustic turning
+// with the spin), which is exactly the gamey UI-pool look the crystal was meant to escape.
+// The crystal reads as planted on its own, so it doesn't need grounding. Code kept dormant;
+// raise to ~0.3 to revive the raked cast wash if we ever want to chase the animated version.
+const TP_CAST_HEIGHT = 9.0; // height of the casting crystal; sets the rake angle. Mirror main.ts TP_CRYSTAL_HOVER
+const TP_CAST_RAKE_FLOOR = 0.45; // ambient floor of the facet rake (1 = flat, no relief); keeps the wash soft
 const TP_GLOW_PULSE = 0.18; // pulse depth as a fraction of strength (0 = steady)
 const TP_GLOW_PULSE_SPEED = 0.6; // pulse rate against the drifting uDriftTime
 // Proximity ramp off the player position: far away the pad is a dim, plain-blue
@@ -458,25 +463,12 @@ function applyGroundMaterial(
          float tpGlow = 0.0;
          float tpT = 0.0; // radial fraction (0 centre, 1 rim) of the dominant pad
          float tpApproach = 1.0; // 0 when the player is far from that pad, 1 when near
+         vec2 tpCenter = vec2(0.0); // xz of the dominant pad, for the overhead rake direction
          for (int i = 0; i < ${tpPos.length}; i++) {
-           vec2 d2 = vWorldPos.xz - uTpPos[i];
-           float dr = length(d2);
-           // inscribe the pool into an irregular polygon: cut the bearing into facets, jitter
-           // each facet's reach, and inscribe a flat chord at its apothem, so the rim is flat-
-           // sided and uneven like the dunes. Only near fragments pay the atan.
-           float t = 1.0;
-           if (dr < ${(TP_GLOW_RADIUS * 1.35).toFixed(2)}) {
-             float ang = atan(d2.y, d2.x);
-             float seg = 6.2831853 / ${TP_GLOW_SIDES.toFixed(1)};
-             float fi = floor(ang / seg);                 // facet index
-             float a2 = ang - (fi + 0.5) * seg;           // bearing off this facet's normal
-             float rj = 1.0 - ${TP_GLOW_FACET_JITTER.toFixed(3)} * fract(sin(fi * 127.1 + 311.7) * 43758.5453);
-             float reach = (${TP_GLOW_RADIUS.toFixed(2)} * rj) / cos(a2); // flat chord at the facet apothem
-             t = clamp(dr / reach, 0.0, 1.0);
-           }
-           float g = pow(1.0 - t, ${TP_GLOW_FALLOFF.toFixed(2)}); // soft falloff across the whole polygon
+           float t = clamp(distance(vWorldPos.xz, uTpPos[i]) / ${TP_GLOW_RADIUS.toFixed(2)}, 0.0, 1.0);
+           float g = pow(1.0 - t, ${TP_GLOW_FALLOFF.toFixed(2)}); // soft radial skirt
            if (g > tpGlow) {
-             tpGlow = g; tpT = t;
+             tpGlow = g; tpT = t; tpCenter = uTpPos[i];
              tpApproach = smoothstep(${TP_GLOW_APPROACH_FAR.toFixed(1)}, ${TP_GLOW_APPROACH_NEAR.toFixed(1)}, distance(uPlayer, uTpPos[i]));
            }
          }
@@ -484,13 +476,18 @@ function applyGroundMaterial(
          float tpProx = mix(${TP_GLOW_FAR_LEVEL.toFixed(2)}, 1.0, tpApproach);
          vec3 tpInner = mix(${TP_GLOW_OUTER_RGB}, ${TP_GLOW_INNER_RGB}, tpApproach);
          vec3 tpCol = mix(tpInner, ${TP_GLOW_OUTER_RGB}, tpT);
-         // slow breathing pulse so the pad reads as powered, not painted.
+         // slow breathing pulse so the pool reads as powered, not painted.
          float tpPulse = 1.0 - ${TP_GLOW_PULSE.toFixed(2)} * (0.5 - 0.5 * cos(uDriftTime * ${TP_GLOW_PULSE_SPEED.toFixed(3)}));
-         // one-sided daylight lift, in lockstep with the beam: never dims (added after the
-         // daylight multiply), just swells when a daylight pool crosses the plaza. beaconLit
-         // is the point-sample reader (distance-independent), not the ground's daylightAt.
+         // one-sided daylight lift, in lockstep with the crystal: never dims, just swells when
+         // a daylight pool crosses the plaza. beaconLit is the point-sample reader.
          float tpDayGain = mix(1.0, ${TP_GLOW_DAY_BOOST.toFixed(2)}, beaconLit(vWorldPos.xz) * uDaylightMix);
-         gl_FragColor.rgb += tpGlow * tpCol * (${TP_GLOW_STRENGTH.toFixed(2)} * tpPulse * tpProx * tpDayGain);
+         // rake the dune facets from the crystal overhead, so the faceted relief reads through
+         // the soft wash instead of a flat disc -- the lowpoly-honest form of a glow pad.
+         vec3 tpWN = normalize(cross(dFdx(vWorldPos), dFdy(vWorldPos)));
+         if (tpWN.y < 0.0) tpWN = -tpWN;
+         vec3 tpToL = normalize(vec3(tpCenter.x - vWorldPos.x, ${TP_CAST_HEIGHT.toFixed(1)}, tpCenter.y - vWorldPos.z));
+         float tpRake = ${TP_CAST_RAKE_FLOOR.toFixed(2)} + (1.0 - ${TP_CAST_RAKE_FLOOR.toFixed(2)}) * max(dot(tpWN, tpToL), 0.0);
+         gl_FragColor.rgb += tpGlow * tpCol * (${TP_GLOW_STRENGTH.toFixed(2)} * tpPulse * tpProx * tpDayGain * tpRake);
        }`
     : "";
   mat.onBeforeCompile = (shader) => {

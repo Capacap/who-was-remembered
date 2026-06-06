@@ -869,6 +869,21 @@ const TP_BEAM_RENDER_ORDER = 10;
 // standing in the bright pad rather than only dead centre or out at its faint edge.
 const TP_ENTER_RADIUS = 7;
 
+// Floating-crystal beacon: an alternative to the rising shard -- a faceted diamond hovering
+// just out of reach over the plaza, slowly turning and bobbing (the "subtle animation" idea
+// finds its home here: a turning jewel reads as alive, not as a gamey pulse). An octahedron
+// is faceted by nature, so it belongs in the lowpoly world without any coaxing. Flip
+// TP_FLOATING_CRYSTAL to A/B it against the shard; the spin/bob run off the shared drift
+// clock in the vertex shader, so no per-frame JS.
+const TP_FLOATING_CRYSTAL = true; // true: hovering crystal; false: the rising flared shard
+const TP_CRYSTAL_SIZE = 2.0; // octahedron radius before the vertical stretch
+const TP_CRYSTAL_STRETCH = 2.3; // taller than wide -> an elongated diamond shard
+const TP_CRYSTAL_HOVER = 9.0; // centre height above ground; floats well clear, out of reach
+const TP_CRYSTAL_OPACITY = 0.5; // additive base alpha
+const TP_CRYSTAL_SPIN = 0.3; // turn rate, rad/s against the drift clock
+const TP_CRYSTAL_BOB_AMP = 0.45; // gentle vertical float, world units
+const TP_CRYSTAL_BOB_SPEED = 0.5; // bob rate
+
 interface Teleporter {
   label: string;
   x: number;
@@ -1000,16 +1015,94 @@ function buildTeleporters(list: Teleporter[], daylight: DaylightUniforms) {
       }
     `,
   });
+  // Floating crystal: a faceted diamond hovering over the plaza. Same crystalline shading
+  // language as the shard (additive, faceted off the derivative face normal, daylight +
+  // proximity reactive) but it floats clear of the ground, so no waterline/camFade machinery
+  // is needed. The slow spin + bob live in the vertex shader off the shared drift clock.
+  const crystalGeom = new THREE.OctahedronGeometry(TP_CRYSTAL_SIZE, 0);
+  crystalGeom.scale(1, TP_CRYSTAL_STRETCH, 1); // stretch tall: a diamond, not a ball
+  const crystalMat = new THREE.ShaderMaterial({
+    uniforms: {
+      uColor: { value: TP_BEAM_COLOR },
+      uColorCore: { value: TP_BEAM_COLOR_BASE },
+      uOpacity: { value: TP_CRYSTAL_OPACITY },
+      uApproachNear: { value: TP_BEAM_APPROACH_NEAR },
+      uApproachFar: { value: TP_BEAM_APPROACH_FAR },
+      uFarLevel: { value: TP_BEAM_FAR_LEVEL },
+      uDayBoost: { value: TP_BEAM_DAY_BOOST },
+      uSpin: { value: TP_CRYSTAL_SPIN },
+      uBobAmp: { value: TP_CRYSTAL_BOB_AMP },
+      uBobSpeed: { value: TP_CRYSTAL_BOB_SPEED },
+      uDaylight: daylight.uDaylight,
+      uDriftTime: daylight.uDriftTime,
+      uDaylightMix: daylight.uDaylightMix,
+    },
+    transparent: true,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+    side: THREE.DoubleSide,
+    vertexShader: /* glsl */ `
+      uniform float uDriftTime;
+      uniform float uSpin;
+      uniform float uBobAmp;
+      uniform float uBobSpeed;
+      varying vec3 vWorldPos;
+      void main() {
+        float a = uDriftTime * uSpin;
+        float s = sin(a), c = cos(a);
+        vec3 p = position;
+        p.xz = mat2(c, -s, s, c) * p.xz;               // slow turn about the vertical
+        vec4 wp = modelMatrix * vec4(p, 1.0);
+        wp.y += sin(uDriftTime * uBobSpeed) * uBobAmp; // gentle float
+        vWorldPos = wp.xyz;
+        gl_Position = projectionMatrix * viewMatrix * wp;
+      }
+    `,
+    fragmentShader: /* glsl */ `
+      ${DAYLIGHT_FRAG_COMMON}
+      uniform vec3 uColor;
+      uniform vec3 uColorCore;
+      uniform float uOpacity;
+      uniform float uApproachNear;
+      uniform float uApproachFar;
+      uniform float uFarLevel;
+      uniform float uDayBoost;
+      varying vec3 vWorldPos;
+      void main() {
+        vec3 viewDir = normalize(cameraPosition - vWorldPos);
+        // flat FACE normal from derivatives: each facet flares as it turns to the eye, so the
+        // turning crystal sparkles facet by facet rather than glowing as a smooth ball.
+        vec3 faceN = normalize(cross(dFdx(vWorldPos), dFdy(vWorldPos)));
+        float edge = abs(dot(viewDir, faceN));
+        float camDist = distance(cameraPosition.xz, vWorldPos.xz);
+        float approach = smoothstep(uApproachFar, uApproachNear, camDist); // 0 far, 1 near
+        float prox = mix(uFarLevel, 1.0, approach);
+        vec3 col = mix(uColor, uColorCore, edge); // cyan on the facing facets, blue at grazing
+        // one-sided daylight lift, same as the shard: swells when a pool crosses the plaza.
+        float lit = beaconLit(vWorldPos.xz);
+        float dayGain = mix(1.0, uDayBoost, lit * uDaylightMix);
+        gl_FragColor = vec4(col, uOpacity * edge * prox * dayGain);
+      }
+    `,
+  });
   const group = new THREE.Group();
   for (const tp of list) {
     const h = sampleHeight(tp.x, tp.y);
-    // beam rising from the plaza centre, base at the ground. Drawn after the
-    // transparent ground levels (see TP_BEAM_RENDER_ORDER) so they can't overpaint
-    // it; it fades out by camera distance (shader) before the waterline shows.
-    const beam = new THREE.Mesh(beamGeom, beamMat);
-    beam.position.set(tp.x, h + TP_BEAM_HEIGHT / 2, tp.y);
-    beam.renderOrder = TP_BEAM_RENDER_ORDER;
-    group.add(beam);
+    if (TP_FLOATING_CRYSTAL) {
+      // a faceted diamond hovering just out of reach over the plaza, slowly turning.
+      const crystal = new THREE.Mesh(crystalGeom, crystalMat);
+      crystal.position.set(tp.x, h + TP_CRYSTAL_HOVER, tp.y);
+      crystal.renderOrder = TP_BEAM_RENDER_ORDER;
+      group.add(crystal);
+    } else {
+      // beam rising from the plaza centre, base at the ground. Drawn after the
+      // transparent ground levels (see TP_BEAM_RENDER_ORDER) so they can't overpaint
+      // it; it fades out by camera distance (shader) before the waterline shows.
+      const beam = new THREE.Mesh(beamGeom, beamMat);
+      beam.position.set(tp.x, h + TP_BEAM_HEIGHT / 2, tp.y);
+      beam.renderOrder = TP_BEAM_RENDER_ORDER;
+      group.add(beam);
+    }
   }
   return group;
 }
