@@ -26,10 +26,11 @@ Two filters keep a pin honest:
 - A geo-less member (geo_source is None in Stage 6) has no real coordinate; its
   angle is a per-QID hash, pure noise. Such members are dropped from the centroid
   and reported. Pinning to them would drag the monument into the void.
-- The monument is placed at the surviving members' centroid pushed radially
-  outward (TP_RADIAL_OFFSET), so it stands at the cluster's outer threshold
-  rather than on its densest, most important figure. The most cross-lingually
-  covered member is kept only as a representative label, not a coordinate.
+- The monument is placed at the surviving members' centroid itself: it sits on
+  its people, at their true place and era. (It used to be pushed radially outward
+  to spare the dense graves a 10u plaza; Stage 8 now clears only a tight sphere-
+  hug, so there is no plaza to keep off them.) The most cross-lingually covered
+  member is kept only as a representative label, not a coordinate.
 
 Prominence is used here only to label the gate and choose which places are worth
 a waypoint. It never moved a book in Stage 6 and does not move one here.
@@ -60,15 +61,13 @@ OUT_PATH = ROOT / "cache" / "teleporters.parquet"
 # of Europe; beyond it the pin is averaging across separate regions.
 SPREAD_LIMIT = 40.0
 
-# The monument is NOT placed on its members. It sits at their centroid pushed
-# radially OUTWARD (toward deeper time) by this much, so it stands at the outer
-# threshold of the cluster rather than on top of it. This keeps it off the most
-# important grave in the region (the seat member is the densest, most recognized
-# figure there: the last person you want to evict to make room for a monument's
-# clearing), preserves the longitude/place exactly, and lands the clear-zone in
-# the sparser outward band where it displaces few books. You arrive at the gate
-# facing inward, with the era's crowd laid out ahead. Stage 8 clears the books.
-TP_RADIAL_OFFSET = 30.0  # world units outward from the member centroid
+# The monument sits ON its members, at their centroid -- its true place and era.
+# It used to be pushed radially outward (toward deeper time) to stand at the
+# cluster's outer threshold, sparing the densest grave a 10u plaza's clearing.
+# That offset is gone: the runtime now draws the monument as an embedded sphere
+# (an object in the field like a book), and Stage 8 clears only a tight sphere-
+# hug around it, not a plaza -- so there is no clearing to keep off the graves,
+# and the honest place to stand is on the cluster itself.
 
 # --- the authored anchor set: (label, [defining people]) ---
 # Grouped by PLACE first, era second, never by theme. Names are English
@@ -202,19 +201,15 @@ def main() -> None:
                 f"{SPREAD_LIMIT:.0f}; its people are not co-located. Split by place."
             )
 
-        # Position: the member centroid pushed radially outward by
-        # TP_RADIAL_OFFSET, so the gate stands at the cluster's outer threshold,
-        # not on anyone (see the constant). seat is kept only as a representative
-        # label (the recognizable face of the group), no longer a coordinate.
+        # Position: the member centroid itself -- the gate sits on its people, at
+        # their true place and era (no outward offset; see the constant block).
+        # seat is kept only as a representative label (the recognizable face of
+        # the group), no longer a coordinate.
         seat = max(members, key=lambda i: sit[i])
         median_era = float(np.median([death[i] for i in members]))
-        cx = float(np.mean([x[i] for i in members]))
-        cy = float(np.mean([y[i] for i in members]))
-        c_r = math.hypot(cx, cy)
-        c_ang = math.atan2(cy, cx)
-        out_r = c_r + TP_RADIAL_OFFSET
-        mx = out_r * math.cos(c_ang)
-        my = out_r * math.sin(c_ang)
+        mx = float(np.mean([x[i] for i in members]))
+        my = float(np.mean([y[i] for i in members]))
+        mr = math.hypot(mx, my)
 
         flags = ""
         if missing:
@@ -223,7 +218,7 @@ def main() -> None:
             flags += f"  dropped-geoless={geoless}"
         print(
             f"  {label:28s} {len(members)}p spread={spread:3.0f} "
-            f"r={out_r:5.0f} gate-of:{title[seat]}{flags}"
+            f"r={mr:5.0f} gate-of:{title[seat]}{flags}"
         )
 
         rows.append(dict(

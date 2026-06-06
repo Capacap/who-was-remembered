@@ -27,13 +27,13 @@ Two operations, run together as one relaxation:
   apex) books pile to the tether and stay a crush, which is honest, not an
   artefact; they pile but no longer subsume.
 
-- Teleporter clearings. Each monument needs a small empty plaza around it (for
-  the waypoint's visual, and so it does not bury books). The clear-zones act as
-  obstacles inside the same relaxation: books within TP_CLEAR_RADIUS are pushed
-  radially out of the zone, and because the spacing relaxation runs in the same
-  loop, the evicted books disperse into the surrounding gaps instead of piling
-  into a dense ring at the boundary. A final hard projection guarantees the plaza
-  is empty.
+- Teleporter sphere clearance. Each monument is an embedded sphere larger than a
+  book, so books are kept just clear of its footprint (TP_CLEAR_RADIUS, the ball
+  radius plus a small gap) -- no plaza, just enough that nothing pokes into the
+  ball. The spheres act as fixed obstacles inside the same relaxation: books
+  within the radius are pushed radially out, and because the spacing relaxation
+  runs in the same loop, the few evicted books disperse into the surrounding gaps
+  instead of piling into a ring. A final hard projection guarantees the gap holds.
 
 Writes layout.parquet: the full placement table with x/y (and the derived
 radius/angle) replaced by the relaxed positions. placement.parquet stays the
@@ -81,11 +81,17 @@ SUBSUME_K = 0.9         # fraction of the larger radius centres must clear
 SEP_DAMP = 0.9          # share of each pair's overlap corrected per iteration
 RELAX_MAX_DRIFT = 20.0  # world units
 
-# Teleporter plaza. The clear radius around each monument: empty ground for the
-# waypoint visual (a stone circle or similar). TP_PUSH is how hard a book is
-# shoved out per iteration; < 1 lets the spacing relaxation disperse the evicted
-# books before the final projection so they do not bunch at the rim.
-TP_CLEAR_RADIUS = 10.0  # world units
+# Teleporter sphere clearance. The runtime draws each monument as an embedded
+# sphere (TP_SPHERE_RADIUS, matching the runtime ball) larger than any book, so
+# books are kept clear of its footprint plus a small gap (TP_BOOK_GAP, from the
+# sphere surface to a book's centre) -- enough that no book pokes into the ball.
+# This is no longer a plaza: there is no empty ground to reserve, the field packs
+# right up to the gap and the sphere relaxes in like an oversized book. TP_PUSH
+# is how hard a book is shoved out per iteration; < 1 lets the spacing relaxation
+# disperse the few evicted books before the final projection so they do not bunch.
+TP_SPHERE_RADIUS = 1.4   # world units; must match runtime TP_BALL_RADIUS
+TP_BOOK_GAP = 0.9        # clearance from the sphere surface to a book's centre
+TP_CLEAR_RADIUS = TP_SPHERE_RADIUS + TP_BOOK_GAP  # books kept this far from centre
 TP_PUSH = 0.6
 
 
@@ -99,7 +105,7 @@ def relax(x: np.ndarray, y: np.ndarray, R: np.ndarray,
     query_r = SUBSUME_K * float(R.max())
 
     def push_out_of_zones(scale: float) -> None:
-        # push books inside any clear-zone radially outward from that monument
+        # push books inside a sphere clearance radially outward from that monument
         for j in range(mx.size):
             dx, dy = x - mx[j], y - my[j]
             dist = np.hypot(dx, dy)
@@ -140,7 +146,7 @@ def relax(x: np.ndarray, y: np.ndarray, R: np.ndarray,
                 x += dispx
                 y += dispy
 
-        # teleporter clearings, dispersed by the same relaxation
+        # teleporter sphere clearances, dispersed by the same relaxation
         push_out_of_zones(TP_PUSH)
 
         # tether: clamp drift from placement so nothing wanders off its data
@@ -151,7 +157,7 @@ def relax(x: np.ndarray, y: np.ndarray, R: np.ndarray,
         x[over] = ax[over] + ddx[over] * scale
         y[over] = ay[over] + ddy[over] * scale
 
-    # final hard projection: guarantee no book remains inside a plaza
+    # final hard projection: guarantee no book remains inside a sphere clearance
     push_out_of_zones(1.0)
     return x, y
 
@@ -178,7 +184,7 @@ def main() -> None:
     tp = pq.read_table(args.teleporters, columns=["x", "y"])
     mx = np.asarray(tp["x"].to_pylist(), dtype=np.float64)
     my = np.asarray(tp["y"].to_pylist(), dtype=np.float64)
-    print(f"  {mx.size} teleporter clearings (r={TP_CLEAR_RADIUS:.0f}u)")
+    print(f"  {mx.size} teleporter sphere clearances (r={TP_CLEAR_RADIUS:.1f}u)")
 
     x2, y2 = relax(x, y, R, mx, my)
 
