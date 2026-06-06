@@ -1929,8 +1929,27 @@ async function main() {
   );
 
   const renderer = new THREE.WebGLRenderer({ antialias: true });
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-  renderer.setSize(window.innerWidth, window.innerHeight);
+  // Render scale — the biggest mobile lever. The scene is fill-bound (full-screen
+  // sky/daylight/ground shaders) and the box field's vertex cost can't be culled (the
+  // books are too concentrated for frustum/distance culling to bite), so the win has to
+  // come from fragments, not geometry. Lowering the pixel ratio cuts fragment work
+  // across the WHOLE scene at once. devicePixelRatio is capped at 2 (denser retina is
+  // wasted on this flat-shaded look), then scaled by renderScale; touch-primary devices
+  // default lower since they're both higher-DPI and weaker. Re-applied on resize so a
+  // browser-zoom dpr change is picked up too. Player-facing quality setting later; for
+  // now a sane auto-default + a dev cycle key (P) to measure the win against the gpu line.
+  const PR_CAP = 2;
+  const isTouch = window.matchMedia("(pointer: coarse)").matches;
+  let renderScale = isTouch ? 0.67 : 1.0;
+  const applyRenderScale = (): void => {
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, PR_CAP) * renderScale);
+    renderer.setSize(window.innerWidth, window.innerHeight);
+  };
+  const setRenderScale = (s: number): void => {
+    renderScale = s;
+    applyRenderScale();
+  };
+  applyRenderScale();
   document.body.appendChild(renderer.domElement);
 
   const { controls, update, stop, getFlying, setFlying } = createController(
@@ -2358,6 +2377,17 @@ async function main() {
       // before we decide whether tiling can recover enough of it to be worth building.
       built.setBoxVisible(!built.isBoxVisible());
       console.log(`[perf] box field ${built.isBoxVisible() ? "shown" : "HIDDEN"}`);
+    } else if (e.code === "KeyP") {
+      // dev cycle for the render-scale (pixel-ratio) lever: 1.0 -> 0.75 -> 0.5, so the
+      // gpu line can be read at each step. The auto-default (0.67 on touch) is off-cycle;
+      // pressing P enters the measurement steps. The player-facing control lands in the
+      // pause menu's quality section once the win is confirmed.
+      const steps = [1.0, 0.75, 0.5];
+      const idx = steps.indexOf(renderScale);
+      setRenderScale(steps[(idx + 1) % steps.length]);
+      console.log(
+        `[perf] render scale ${renderScale} -> pixel ratio ${renderer.getPixelRatio().toFixed(2)}`,
+      );
     } else if (e.code === "Escape" && overlayOpen) {
       closeOverlay();
     }
@@ -2372,7 +2402,7 @@ async function main() {
   window.addEventListener("resize", () => {
     camera.aspect = window.innerWidth / window.innerHeight;
     camera.updateProjectionMatrix();
-    renderer.setSize(window.innerWidth, window.innerHeight);
+    applyRenderScale(); // re-reads dpr (zoom) and renderScale, then resizes
   });
 
   mark("wiring");
@@ -2513,6 +2543,7 @@ async function main() {
       }
       perf.textContent =
         `gpu    ${gpuStr}\n` +
+        `scale  ${renderScale.toFixed(2)}x (pr ${renderer.getPixelRatio().toFixed(2)})\n` +
         `calls  ${r.calls}\n` +
         `tris   ${(r.triangles / 1e6).toFixed(2)}M\n` +
         `near   ${built.nearMesh.count.toLocaleString()} full + ${built.midMesh.count.toLocaleString()} mid\n` +
