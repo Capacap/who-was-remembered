@@ -174,8 +174,21 @@ const GLOW_EMISSIVE_NEAR = 0.85; // extra emission at the pool centre
 // (the books' rest-floor dim + the distance fade are what shade and dissolve it, mirrored in
 // applyFarPointsShading). These are the knobs to tune the far field's weight on-device.
 const FAR_POINT_SIZE = 0.4; // world size for size-attenuation (half a book's apparent footprint at R_MID — undersized on purpose so the speck reads as a distant book, not a dot, and more of the field falls below MIN_PX into the alpha-fade)
-const FAR_POINT_MIN_PX = 1.0; // floor on the on-screen speck (framebuffer px); sub-pixel
-// specks keep the floor SIZE but fade their alpha (vPointFade) so the dense field stays stipple
+const FAR_POINT_MIN_CSS = 2.5; // floor on the on-screen speck in CSS px (NOT framebuffer px --
+// pushed through the live pixel ratio into the uMinPx uniform on every resize). A framebuffer-px
+// floor was a sub-CSS-pixel dot on a low-res / low-renderScale mobile buffer, so the whole far
+// field (incl. the nearest R_INNER ring ~600u from the centre spawn) was invisible regardless of
+// device pixel ratio. A CSS-px floor is physically the same size on any screen -- the headline
+// mobile fix. ~2.5 reads as a clear speck without fattening the dense field into a blob.
+// FAR_POINT_ALPHA_FLOOR — the lower bound on that sub-pixel alpha fade. The energy-true fade
+// (floor 0) crushes a speck's alpha to its fractional framebuffer coverage; on a small mobile
+// buffer the WHOLE field (incl. the nearest R_INNER ring the player must orient toward, ~600u
+// from the centre spawn) is sub-pixel, so it fades to black and the player has nothing to walk
+// toward. This floors the fade so every live speck keeps at least this alpha: the density
+// gradient (present = many overlapping specks = a luminous mass; antiquity = sparse faint
+// specks) now comes from how MANY books land per pixel, not from per-speck dimming. 1.0 = no
+// thinning at all (pure "embrace the band"); lower it if the dense present blows out to flat fog.
+const FAR_POINT_ALPHA_FLOOR = 0.85;
 // The lit-multiply the books get and a raw point doesn't: a PointsMaterial is unlit, so a point
 // starts from the full vertex colour, while a book's MeshLambert base = colour * (hemisphere +
 // sun irradiance). Computed for an up-facing book cover (the dominant visible facet): cool sky
@@ -636,17 +649,19 @@ function applyFarPointsShading(
   mat: THREE.PointsMaterial,
   uPlayer: PlayerUniform, // shared player position -- the dots fade IN with live horizontal distance
   daylight: DaylightUniforms,
+  uMinPx: { value: number }, // CSS->framebuffer size floor, re-derived on every resize/dpr change
 ): void {
   mat.transparent = true;
   mat.onBeforeCompile = (shader) => {
     shader.uniforms.uPlayer = uPlayer;
+    shader.uniforms.uMinPx = uMinPx;
     shader.uniforms.uDaylight = daylight.uDaylight;
     shader.uniforms.uDriftTime = daylight.uDriftTime;
     shader.uniforms.uDaylightMix = daylight.uDaylightMix;
     shader.vertexShader = shader.vertexShader
       .replace(
         "#include <common>",
-        "#include <common>\nattribute float aShow;\nvarying vec2 vGlowXZ;\nvarying float vViewDist;\nvarying float vGroundFade;\nvarying float vPointFade;\nvarying float vSquash;",
+        "#include <common>\nattribute float aShow;\nuniform float uMinPx;\nvarying vec2 vGlowXZ;\nvarying float vViewDist;\nvarying float vGroundFade;\nvarying float vPointFade;\nvarying float vSquash;",
       )
       .replace(
         "#include <project_vertex>",
@@ -667,17 +682,20 @@ function applyFarPointsShading(
       )
       // aShow zeroes a promoted book's speck; three's size-attenuation block then scales the
       // rest by distance. After it (before logdepthbuf_vertex), floor the on-screen size to
-      // MIN_PX so a far speck never vanishes — but a speck whose TRUE attenuated size is sub-
-      // pixel would, at the floor, over-claim coverage and the dense mid-field packs into a
-      // solid bright carpet. So carry vPointFade = trueSize/MIN_PX (<1 when sub-pixel) and fade
-      // the speck's ALPHA by it in the fragment: a distant book covers a fraction of a pixel,
-      // so the carpet thins back to stipple-on-black and reads like the sparse near field.
+      // uMinPx so a far speck never vanishes. uMinPx is a CSS-pixel floor pushed through the
+      // framebuffer pixel ratio every resize (NOT a baked framebuffer-px constant): the size-
+      // attenuation result is in framebuffer px, so a constant floor was a TINY dot on a low-res /
+      // low-renderScale mobile buffer and the field was invisible "across all pixel ratios". A
+      // CSS-px floor is physically consistent on any screen. vPointFade = trueSize/uMinPx (<1 when
+      // sub-pixel) still rides along, floored to FAR_POINT_ALPHA_FLOOR so a floored speck stays
+      // bright -- the dense/sparse gradient comes from overlap COUNT, not per-speck alpha.
       .replace("gl_PointSize = size;", "gl_PointSize = size * aShow;")
       .replace(
         "#include <logdepthbuf_vertex>",
         `float _natural = gl_PointSize; // true attenuated size (0 if promoted/aShow=0)
-         vPointFade = _natural > 0.0 ? clamp(_natural / ${FAR_POINT_MIN_PX.toFixed(1)}, 0.0, 1.0) : 0.0;
-         if (_natural > 0.0) gl_PointSize = max(_natural, ${FAR_POINT_MIN_PX.toFixed(1)});\n\t#include <logdepthbuf_vertex>`,
+         // Promoted specks (aShow=0) stay 0; everything else floors to FAR_POINT_ALPHA_FLOOR.
+         vPointFade = _natural > 0.0 ? clamp(${FAR_POINT_ALPHA_FLOOR.toFixed(2)} + ${(1 - FAR_POINT_ALPHA_FLOOR).toFixed(2)} * (_natural / uMinPx), 0.0, 1.0) : 0.0;
+         if (_natural > 0.0) gl_PointSize = max(_natural, uMinPx);\n\t#include <logdepthbuf_vertex>`,
       );
     shader.fragmentShader = shader.fragmentShader
       .replace(
@@ -746,6 +764,7 @@ function buildField(
   uPlayer: PlayerUniform, // shared player-position uniform (also drives the ground rake)
   daylight: DaylightUniforms, // shared daylight uniforms (also drift over the ground)
   world: World, // R_INNER/R_MAX define the era-temperature radial ramp
+  uFarMinPx: { value: number }, // CSS->framebuffer far-speck size floor, updated on resize
 ) {
   const { n, x, y, tier, geo, lon, scale } = field;
   // the scale byte is the normalized article length (export_runtime quantized the
@@ -825,7 +844,7 @@ function buildField(
     sizeAttenuation: true,
     size: FAR_POINT_SIZE,
   });
-  applyFarPointsShading(farPointsMat, uPlayer, daylight);
+  applyFarPointsShading(farPointsMat, uPlayer, daylight, uFarMinPx);
   // depthWrite OFF on the whole field. The dots are a CONTINUOUS floor that the books layer over
   // (points render first, RO_BOX < RO_DETAIL); the books must NOT depth-occlude the dots. The bug
   // this kills: a transparent fragment still writes depth, so the invisible-margin books (alpha 0
@@ -2208,9 +2227,15 @@ async function main() {
   // default to one of the menu's offered steps (1 / 0.75 / 0.5) so the control reflects
   // a highlighted value out of the box; touch starts at 0.75 (reads decent, real saving).
   let renderScale = isTouch ? 0.75 : 1.0;
+  // Far-speck size floor, carried in FRAMEBUFFER px (what gl_PointSize wants) but authored in CSS
+  // px (FAR_POINT_MIN_CSS) and re-derived from the live pixel ratio on every resize/dpr/renderScale
+  // change -- so a far book stays the same PHYSICAL size on any screen. buildField wires it into the
+  // points shader; without the resize update a dpr/zoom change would silently shrink the field again.
+  const uFarMinPx = { value: FAR_POINT_MIN_CSS };
   const applyRenderScale = (): void => {
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, PR_CAP) * renderScale);
     renderer.setSize(window.innerWidth, window.innerHeight);
+    uFarMinPx.value = FAR_POINT_MIN_CSS * renderer.getPixelRatio();
   };
   const setRenderScale = (s: number): void => {
     renderScale = s;
@@ -2341,7 +2366,7 @@ async function main() {
   // placed on the analytic fallback before the fetch resolved).
   camera.position.y = sampleHeight(camera.position.x, camera.position.z) + EYE_HEIGHT;
   mark("terrain");
-  const built = buildField(field, bookLods[0], bookLods[1], uPlayer, daylight.uniforms, world);
+  const built = buildField(field, bookLods[0], bookLods[1], uPlayer, daylight.uniforms, world, uFarMinPx);
   mark("seat books");
 
   // Wall the player just past the outermost book. R_MAX (the nominal time-radius) is
