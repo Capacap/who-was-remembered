@@ -27,11 +27,13 @@ import {
 } from "./daylight";
 
 // --- walkable field --------------------------------------------------------
-// One instanced box per figure, placed straight from the pipeline's (x, y), with
-// a first-person controller so the disc can be walked. The ground is the baked
-// heightmap (see terrain.ts): books are seated on it and tilted to its normal, and
-// the player's walk height samples the same surface so nothing floats.
-// Books are still placeholder primitives. Everything visual here is scaffolding.
+// One book per figure, placed straight from the pipeline's (x, y) and walkable
+// with a first-person controller. Each book is drawn in one of three distance
+// tiers off a shared baked footprint: a near LOD01 book mesh, a mid LOD02 book
+// mesh (both InstancedMesh), and a far GL-points carpet (one rectangular dot per
+// figure) that covers the whole field cheaply. The ground is the baked heightmap
+// (see terrain.ts): books are seated on it and tilted to its normal, and the
+// player's walk height samples the same surface so nothing floats.
 
 const info = document.getElementById("info") as HTMLDivElement;
 
@@ -465,7 +467,7 @@ function bakeBook(src: THREE.Mesh): THREE.BufferGeometry {
 
 // Load the named book LODs from book.glb (one fetch, in ladder order) and bake each.
 // book.glb carries book_LOD00 (full, ~308 tri), book_LOD01 (mid, ~56 tri) and book_LOD02
-// (a 12-tri book box, the always-drawn far base); all three bake through the same uniform
+// (a 12-tri book box, the mid-band tier above the far points carpet); all three bake through the same uniform
 // pipeline so their footprint and origin match exactly. NOTE the bakeBook clone takes
 // geometry only — node transforms are dropped — so every LOD must have its SCALE APPLIED
 // in Blender. LOD02 once shipped with an unapplied object scale and baked to a fat cube;
@@ -516,7 +518,7 @@ function applyPageMask(mat: THREE.Material): void {
 // is already set (call AFTER applyDistanceFade / applyPageMask). The book's world
 // xz is carried to the fragment shader; the patch then dims the final lit colour
 // toward uRestDim with distance and adds a soft additive glow inside the pool.
-// Works on the box base, the mid and the near tiers alike (all InstancedMesh, so
+// Works on the mid and near tiers alike (both InstancedMesh, so
 // instanceMatrix is in scope), so a book reveals identically whichever LOD draws
 // it. The dim/glow run on gl_FragColor after lighting (at <opaque_fragment>),
 // before the distance-fade alpha at <dithering_fragment>, so a far book both dims
@@ -856,7 +858,7 @@ function buildField(
   });
   applyFarPointsShading(farPointsMat, uPlayer, daylight, uFarMinPx);
   // depthWrite OFF on the whole field. The dots are a CONTINUOUS floor that the books layer over
-  // (points render first, RO_BOX < RO_DETAIL); the books must NOT depth-occlude the dots. The bug
+  // (points render first, RO_CARPET < RO_DETAIL); the books must NOT depth-occlude the dots. The bug
   // this kills: a transparent fragment still writes depth, so the invisible-margin books (alpha 0
   // in [FAR_CROSS_OUT, RMID_OUTER]) were punching holes in the dot field while drawing nothing --
   // an occlusion ring that JUMPED with the rebuild snapshot ("sparse dot ring"). With no depth
@@ -890,7 +892,7 @@ function buildField(
   // first so the books alpha-blend OVER it (a full book hides its dot, a fading book reveals it).
   // Ground first (renderOrder 0, writes depth), then the points floor, then the books over them,
   // all below the teleporter beam (renderOrder 10).
-  const RO_BOX = 4; // the far points: the continuous dot floor, painted first
+  const RO_CARPET = 4; // the far points: the continuous dot floor, painted first
   const RO_DETAIL = 5; // near/mid detail: layered OVER the dot floor
   // The far base (every book's lowest LOD) was the dominant GPU cost — measured
   // vertex-bound (~19fps with it on mobile, ~40 without; flat-lit and half pixel-ratio
@@ -917,7 +919,7 @@ function buildField(
   const px = new Float32Array(n);
   const pz = new Float32Array(n);
   // every book's full transform + colour, kept so the near mesh can be refilled
-  // from the global set as the camera moves (the far box mesh is written once).
+  // from the global set as the camera moves (the far points carpet is written once).
   const fullMat = new Float32Array(n * 16);
   const fullCol = new Float32Array(n * 3);
 
@@ -1105,7 +1107,7 @@ function buildField(
   // whole-disc bounds always intersect the frustum and the cloud is cheap to run in full, so
   // don't pay computeBoundingSphere or per-frame cull tests — never culled, always drawn.
   farPoints.frustumCulled = false;
-  farPoints.renderOrder = RO_BOX;
+  farPoints.renderOrder = RO_CARPET;
 
   // No join dither on the mid->points boundary anymore. It used to fuzz the JOIN radius so books
   // didn't all swap to mesh on one ring (a visible pop), but with the invisible margin a book joins
@@ -1143,8 +1145,8 @@ function buildField(
   let lastZ = Infinity;
   // far-base master switch (dev toggle, for the perf baseline). The points cloud is cheap
   // enough that the old per-tile view-distance cull is gone; this is just on/off.
-  let boxShown = true;
-  // book-mesh master switch (dev toggle). Pairs with boxShown: toggling the dot carpet and the
+  let carpetShown = true;
+  // book-mesh master switch (dev toggle). Pairs with carpetShown: toggling the dot carpet and the
   // book meshes independently is how we ATTRIBUTE the GPU cost between the two field layers --
   // read the gpu line with each off in turn (e.g. at a horizon angle where overdraw peaks).
   let booksShown = true;
@@ -1272,11 +1274,11 @@ function buildField(
   group.add(nearMesh);
   // far-base dev visibility toggle (for the perf baseline). The points cloud is cheap enough
   // that the old per-tile view-distance cull is gone. n is the total book count for the readout.
-  const setBoxVisible = (on: boolean): void => {
-    boxShown = on;
+  const setCarpetVisible = (on: boolean): void => {
+    carpetShown = on;
     farPoints.visible = on;
   };
-  const isBoxVisible = (): boolean => boxShown;
+  const isCarpetVisible = (): boolean => carpetShown;
   // the two detail tiers move together: they're the same conceptual layer (the legible book
   // meshes), split only by LOD distance, so one switch hides both for the perf baseline.
   const setBooksVisible = (on: boolean): void => {
@@ -1294,8 +1296,8 @@ function buildField(
     nearMesh,
     midMesh,
     farPoints,
-    setBoxVisible,
-    isBoxVisible,
+    setCarpetVisible,
+    isCarpetVisible,
     setBooksVisible,
     isBooksVisible,
     setCarpetThin,
@@ -2462,7 +2464,7 @@ async function main() {
   const devFlyEl = document.getElementById("dev-fly") as HTMLInputElement;
   const devFlatEl = document.getElementById("dev-flat") as HTMLInputElement;
   const devPerfEl = document.getElementById("dev-perf") as HTMLInputElement;
-  const devBoxEl = document.getElementById("dev-box") as HTMLInputElement;
+  const devCarpetEl = document.getElementById("dev-carpet") as HTMLInputElement;
   const devBooksEl = document.getElementById("dev-books") as HTMLInputElement;
   const spinnerEl = document.getElementById("pause-spinner") as HTMLSpanElement;
 
@@ -2522,7 +2524,7 @@ async function main() {
     devFlyEl.checked = getFlying();
     devFlatEl.checked = isFlatLit();
     devPerfEl.checked = isPerf();
-    devBoxEl.checked = built.isBoxVisible();
+    devCarpetEl.checked = built.isCarpetVisible();
     devBooksEl.checked = built.isBooksVisible();
     syncQuality();
     syncLod();
@@ -2589,7 +2591,7 @@ async function main() {
   devFlyEl.addEventListener("change", () => setFlying(devFlyEl.checked));
   devFlatEl.addEventListener("change", () => setFlatLit(devFlatEl.checked));
   devPerfEl.addEventListener("change", () => setPerf(devPerfEl.checked));
-  devBoxEl.addEventListener("change", () => built.setBoxVisible(devBoxEl.checked));
+  devCarpetEl.addEventListener("change", () => built.setCarpetVisible(devCarpetEl.checked));
   devBooksEl.addEventListener("change", () => built.setBooksVisible(devBooksEl.checked));
   // DEV_DEFAULT: surface the perf HUD and pre-expand the dev section so a test build is ready
   // to read the instant it loads -- no Esc-into-menu-and-tick-Developer-mode each run.
@@ -2629,7 +2631,7 @@ async function main() {
       paint();
       bar.appendChild(b);
     };
-    mkBtn("dots", () => built.isBoxVisible(), (on) => built.setBoxVisible(on));
+    mkBtn("dots", () => built.isCarpetVisible(), (on) => built.setCarpetVisible(on));
     mkBtn("books", () => built.isBooksVisible(), (on) => built.setBooksVisible(on));
     mkBtn("thin", () => built.isCarpetThin(), (on) => built.setCarpetThin(on));
     mkBtn("flat", () => isFlatLit(), (on) => setFlatLit(on));
@@ -2695,12 +2697,12 @@ async function main() {
     } else if (e.code === "Backquote") {
       setPerf(!isPerf());
     } else if (e.code === "KeyB") {
-      // baseline instrument (dev-only, throwaway): hide the entire far/box tier.
-      // box-off is the ceiling of perfect frustum culling — watch the gpu line with
-      // it on vs off, looking outward at spawn, to see what 574k boxes actually cost
+      // baseline instrument (dev-only, throwaway): hide the entire far dot carpet.
+      // carpet-off is the ceiling of perfect frustum culling — watch the gpu line with
+      // it on vs off, looking outward at spawn, to see what 574k points actually cost
       // before we decide whether tiling can recover enough of it to be worth building.
-      built.setBoxVisible(!built.isBoxVisible());
-      console.log(`[perf] dot carpet ${built.isBoxVisible() ? "shown" : "HIDDEN"}`);
+      built.setCarpetVisible(!built.isCarpetVisible());
+      console.log(`[perf] dot carpet ${built.isCarpetVisible() ? "shown" : "HIDDEN"}`);
     } else if (e.code === "KeyM") {
       // perf-attribution partner to B: hide the book MESHES (near+mid) so B(dots)+M(books)
       // isolate each field layer's GPU cost. Watch the gpu line: all-on, then dots-only,
@@ -2880,7 +2882,7 @@ async function main() {
         `calls  ${r.calls}\n` +
         `tris   ${(r.triangles / 1e6).toFixed(2)}M\n` +
         `near   ${built.nearMesh.count.toLocaleString()} full + ${built.midMesh.count.toLocaleString()} mid${built.isBooksVisible() ? "" : " (HIDDEN)"}\n` +
-        `far    ${farBooks.toLocaleString()} / ${field.n.toLocaleString()} pts${built.isBoxVisible() ? "" : " (HIDDEN)"}\n` +
+        `far    ${farBooks.toLocaleString()} / ${field.n.toLocaleString()} pts${built.isCarpetVisible() ? "" : " (HIDDEN)"}\n` +
         `bookfl ${booksMs.toFixed(1)}ms (peak)`;
       booksMs = 0;
     }
