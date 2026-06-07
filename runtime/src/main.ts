@@ -1304,78 +1304,20 @@ function buildField(
   };
 }
 
-// Teleporter monuments (26): a ring of standing stones on the ground that the
-// player walks into, with a tall emissive-blue light shaft rising from its centre,
-// the cool complement to the hot-orange landmark books. The shaft is occluded by
-// the dunes like everything else, so it isn't a cross-disc beacon (the compass
-// does the long-range wayfinding); it's the reward you crest a ridge to find,
-// marking a known place once you're near enough to see it.
-const TP_BEAM_HEIGHT = 80; // visible shaft height above the ground
-const TP_BEAM_RADIUS = 0.6; // radius at the TOP of the shaft
-// The beam flares wider where it meets the ground, so its own faceted foot IS the ground
-// marker -- there is no separate soft glow pad anymore. That smooth additive pool was the
-// last thing breaking the lowpoly look (a blurry light blob in a world of hard facets); the
-// flared foot is geometry, faceted like everything else. Pad switched off in terrain
-// (TP_GLOW_STRENGTH = 0); raise it back to bring the old pad glow back.
-const TP_BEAM_RADIUS_BASE = 3.0; // radius at the foot: the flared base, the marker itself
-const TP_BEAM_COLOR = new THREE.Color(0x2f6cff); // blue, up the shaft; matches the pad rim
-const TP_BEAM_COLOR_BASE = new THREE.Color(0x3df0ff); // cyan at the foot, handing off to the pad core
-// Now the flared faceted foot IS the marker, so the beam must stay visible as you walk in
-// (the old pad that carried the near-field cue is gone). It only dissolves once you are
-// basically centred on the stand point, sparing the camera the view straight down the
-// open cone. Full strength beyond FAR, gone within NEAR. Push these back up toward 18/50
-// if the foot reads messy up close (the faceted cone may not need hiding the way the old
-// round tube did -- that is the thing to eyeball).
-const TP_BEAM_FADE_NEAR = 3;
-const TP_BEAM_FADE_FAR = 14;
-// Proximity ramp: far away the beam is a dim, plain-blue beacon so it draws the eye
-// without dominating the horizon; it brightens to full cyan/blue intensity as the
-// player closes in (and the FADE_NEAR clip still takes over once you're on the pad).
-// Keep in sync with terrain.ts TP_GLOW_APPROACH_* so beam and pad ramp together.
-const TP_BEAM_APPROACH_NEAR = 70; // camera xz distance at which it reaches full intensity
-const TP_BEAM_APPROACH_FAR = 260; // beyond this it sits at the dim far level
-const TP_BEAM_FAR_LEVEL = 0.5; // intensity multiplier when far (0..1)
-// Daylight lift: the shaft is additive, so its alpha IS its brightness. The drifting
-// daylight field (daylight.ts) scales that alpha UP when the light crosses the plaza and
-// back to 1x (today's resting look) in shadow -- a one-sided boost, never a dim. The pad
-// glow beneath it is deliberately held steady against shadow too (terrain TP_GLOW, added
-// after the daylight multiply), so flooring the beam at its rest level keeps beam and pad
-// agreeing: neither ever drops below findable, the beam just gains in the sun.
-const TP_BEAM_DAY_BOOST = 7.5; // alpha multiplier in full daylight (1 = no lift). Eyeball.
-// The ground is transparent (distance fade) at the default renderOrder 0. A beam at
-// the same order could draw before the ground, which then paints its opaque-near sand
-// straight over it (the beam writes no depth, so it can't defend those pixels).
-// Drawing the beam after the ground fixes that; the depth TEST against the ground
-// (which does write depth) still occludes the beam behind nearer dunes, so physical
-// occlusion is preserved. Stays above the ground and the books (renderOrder 5).
-const TP_BEAM_RENDER_ORDER = 10;
-
-// Floating-crystal beacon: an alternative to the rising shard -- a faceted diamond hovering
-// just out of reach over the plaza, slowly turning and bobbing (the "subtle animation" idea
-// finds its home here: a turning jewel reads as alive, not as a gamey pulse). An octahedron
-// is faceted by nature, so it belongs in the lowpoly world without any coaxing. Flip
-// TP_FLOATING_CRYSTAL to A/B it against the shard; the spin/bob run off the shared drift
-// clock in the vertex shader, so no per-frame JS.
-const TP_FLOATING_CRYSTAL = true; // true: hovering crystal; false: the rising flared shard
-const TP_CRYSTAL_SIZE = 2.0; // octahedron radius before the vertical stretch
-const TP_CRYSTAL_STRETCH = 2.3; // taller than wide -> an elongated diamond shard
-const TP_CRYSTAL_HOVER = 9.0; // centre height above ground; floats well clear, out of reach
-const TP_CRYSTAL_OPACITY = 0.5; // additive base alpha
-const TP_CRYSTAL_SPIN = 0.3; // turn rate, rad/s against the drift clock
-const TP_CRYSTAL_BOB_AMP = 0.45; // gentle vertical float, world units
-const TP_CRYSTAL_BOB_SPEED = 0.5; // bob rate
-
-// Embedded-ball beacon (the current direction, 2026-06-06): the teleporter stops being a
-// floating prop and becomes an OBJECT in the field like a book -- a beach-ball-sized icosphere
-// half-sunk in the sand. The aim is one interaction grammar (look + E, same as a book) and to
-// let the anchor join the topology relaxation pass instead of carving a plaza. It keeps the
-// crystalline additive/faceted/daylight-reactive vocabulary of the crystal (so it still reads as
-// a teal NODE, not a geo-hued book), just planted and grounded: no hover, no spin/bob -- the
-// facet flare off the derivative normal already shimmers as the PLAYER walks past it. Sized and
-// glowing a notch hotter than a book so it still carries at a distance; if that proves too weak,
-// TP_BEAM_OVERHEAD flips the old vertical shaft back on above the ball. TP_BALL takes priority
-// over TP_FLOATING_CRYSTAL / the beam path below (both kept behind their flags for A/B).
-const TP_BALL = true; // true: embedded icosphere; false: fall through to crystal/beam
+// Teleporter monuments (26): the player walks into one to jump across the field.
+// Each is an embedded ball -- a beach-ball-sized icosphere half-sunk in the sand at
+// the anchor -- so the teleporter is an OBJECT in the field like a book, sharing one
+// interaction grammar (look + E) and joining the topology relaxation pass instead of
+// carving a plaza. It is a SOLID, opaque, flat-shaded icosphere lit by the scene
+// hemisphere + warm sun (MeshLambertMaterial, flatShading) so the facets carry a real
+// light/dark gradient -- that is what makes a sphere read as a sphere, the one thing a
+// flat book can do without and a ball cannot. It does NOT take the books' daylight chain,
+// which multiplies toward near-black NIGHT and would crush all that shading flat (fatal on
+// a curved surface). Instead daylight is a FLOORED darkening (beaconLit, the point-sample
+// reader): the ball sinks into the field's night mood but never below TP_BALL_NIGHT_FLOOR,
+// so its form always survives, and lifts to full in a sun pool. A teal self-glow + fresnel
+// rim ride on top as the node's own light, so it reads as a glowing NODE, sized and glowing
+// a notch hotter than a book so it still carries at a distance.
 const TP_BALL_RADIUS = 1.4; // world units; ~a couple of book-lengths -- a beach ball among books
 const TP_BALL_DETAIL = 1; // icosahedron subdivisions: 0 = 20 chunky faces, 1 = 80 (faceted sphere)
 const TP_BALL_BURY = 0.4; // fraction of the DIAMETER below the sand: 0.5 = a clean half-dome
@@ -1390,7 +1332,6 @@ const TP_BALL_NIGHT_FLOOR = 0.5; // how dark the ball goes in night shadow (1 = 
 const TP_BALL_RIM = 0.7; // rim glow strength
 const TP_BALL_RIM_POWER = 2.5; // falloff: higher = thinner, sharper rim
 const TP_BALL_RIM_COLOR = new THREE.Color(0x6fe6ff); // a hotter cyan than the albedo -> luminous edge
-const TP_BEAM_OVERHEAD = false; // also raise the vertical shaft above the ball (distance fallback)
 
 interface Teleporter {
   label: string;
@@ -1419,180 +1360,9 @@ async function loadHeightmap(
 }
 
 function buildTeleporters(list: Teleporter[], daylight: DaylightUniforms) {
-  // The floor marker is now a blue glow baked into the terrain shader at each plaza
-  // (terrain TP_GLOW_*), not a prop built here -- being the ground itself it can never
-  // read superimposed, and it carries the "stand here" cue up close exactly as the beam
-  // fades out to spare the camera. So this builds only the far beacon. Note the pad does
-  // NOT dim with the drifting daylight (its glow is added AFTER the ground's daylight
-  // multiply, terrain.ts): both pad and beam instead take a one-sided sun BOOST
-  // (TP_GLOW_DAY_BOOST / TP_BEAM_DAY_BOOST, kept matched) so the beacon swells when the
-  // light crosses the plaza but never drops below findable in shadow.
-  // The beam is an open-ended low-sided PRISM shaded as a crystalline light shard --
-  // angular to match the faceted lowpoly dunes, not a smooth CG tube (the smoothness
-  // was the one thing marking it as foreign in this world). Three terms shape it: a
-  // facet term (alpha ~ |view·faceNormal|, the face normal taken from screen-space
-  // derivatives the way the terrain does it) so each flat side flares as it turns to
-  // face the eye and the silhouette sides still fade out (no hard outline); a vertical
-  // fade that thins the shaft to transparent toward the top, as if the light dissipates
-  // as it rises; and the colour/proximity grading below. Additive with no depth write so
-  // the layers accumulate into a bright core, but depth TEST stays on: dunes occlude it,
-  // and the player crests a ridge to find the light waiting (the compass, not the beam,
-  // does the long-range wayfinding).
-  const beamGeom = new THREE.CylinderGeometry(
-    TP_BEAM_RADIUS, // top
-    TP_BEAM_RADIUS_BASE, // foot: flared
-    TP_BEAM_HEIGHT,
-    5, // few sides: an angular shard, not a round tube. Odd count breaks the dead-on symmetry
-    1,
-    true, // open-ended: no caps to flare as flat discs when seen from above
-  ); // radiusTop < radiusBottom: a faceted cone, narrow aloft, flaring at the foot
-  const beamMat = new THREE.ShaderMaterial({
-    uniforms: {
-      uColor: { value: TP_BEAM_COLOR },
-      uColorBase: { value: TP_BEAM_COLOR_BASE },
-      uOpacity: { value: 0.4 },
-      uHeight: { value: TP_BEAM_HEIGHT },
-      uFadeNear: { value: TP_BEAM_FADE_NEAR },
-      uFadeFar: { value: TP_BEAM_FADE_FAR },
-      uApproachNear: { value: TP_BEAM_APPROACH_NEAR },
-      uApproachFar: { value: TP_BEAM_APPROACH_FAR },
-      uFarLevel: { value: TP_BEAM_FAR_LEVEL },
-      // shared with the books and the ground: same field, same drift clock, same dev
-      // kill switch, so the beam lifts on the exact light that crosses its plaza.
-      uDayBoost: { value: TP_BEAM_DAY_BOOST },
-      uDaylight: daylight.uDaylight,
-      uDriftTime: daylight.uDriftTime,
-      uDaylightMix: daylight.uDaylightMix,
-    },
-    transparent: true,
-    blending: THREE.AdditiveBlending,
-    depthWrite: false,
-    side: THREE.DoubleSide,
-    vertexShader: /* glsl */ `
-      uniform float uHeight;
-      varying vec3 vWorldPos;
-      varying float vT;
-      void main() {
-        vec4 wp = modelMatrix * vec4(position, 1.0);
-        vWorldPos = wp.xyz;
-        vT = (position.y + uHeight * 0.5) / uHeight; // 0 at base, 1 at top
-        gl_Position = projectionMatrix * viewMatrix * wp;
-      }
-    `,
-    fragmentShader: /* glsl */ `
-      ${DAYLIGHT_FRAG_COMMON}
-      uniform vec3 uColor;
-      uniform vec3 uColorBase;
-      uniform float uOpacity;
-      uniform float uFadeNear;
-      uniform float uFadeFar;
-      uniform float uApproachNear;
-      uniform float uApproachFar;
-      uniform float uFarLevel;
-      uniform float uDayBoost;
-      varying vec3 vWorldPos;
-      varying float vT;
-      void main() {
-        vec3 viewDir = normalize(cameraPosition - vWorldPos);
-        // flat FACE normal from screen-space derivatives (the terrain's trick): the prism's
-        // few flat sides each shade as a panel, brightest when turned to face the eye and
-        // fading at the grazing silhouette sides -- a faceted shard, not a smooth tube.
-        vec3 faceN = normalize(cross(dFdx(vWorldPos), dFdy(vWorldPos)));
-        float edge = abs(dot(viewDir, faceN));   // 1 on a face turned to the eye, 0 at the silhouette
-        float vert = pow(1.0 - clamp(vT, 0.0, 1.0), 1.5); // dissipates toward the top
-        // horizontal camera distance (xz only, so looking up the tall shaft doesn't
-        // trigger it): fade the whole beam out as you approach, hiding the waterline.
-        float camDist = distance(cameraPosition.xz, vWorldPos.xz);
-        float camFade = smoothstep(uFadeNear, uFadeFar, camDist);
-        // the flared foot is the marker now, so keep it bright -- only the very bottom
-        // sliver softens, just to ease the contact line where the cone meets the ground.
-        float baseFade = smoothstep(0.0, 0.03, vT);
-        // proximity: dim, plain-blue when far; bright, cyan-footed when near.
-        float approach = smoothstep(uApproachFar, uApproachNear, camDist); // 0 far, 1 near
-        float prox = mix(uFarLevel, 1.0, approach);
-        vec3 footCol = mix(uColor, uColorBase, approach); // cyan foot only emerges on approach
-        vec3 col = mix(footCol, uColor, clamp(vT, 0.0, 1.0)); // foot grading to blue up the shaft
-        // one-sided daylight lift: 1x at rest (in shadow, matching the steady pad), up to
-        // uDayBoost when a daylight pool crosses the plaza, so the beacon breathes with the
-        // world instead of holding a constant blue. beaconLit is the point-sample, distance-
-        // independent field reader (not the ground's daylightAt, which coarsens with distance
-        // and would starve this FAR beacon). uDaylightMix folds in the dev flat-lit switch.
-        float lit = beaconLit(vWorldPos.xz);
-        float dayGain = mix(1.0, uDayBoost, lit * uDaylightMix);
-        gl_FragColor = vec4(col, uOpacity * edge * vert * camFade * baseFade * prox * dayGain);
-      }
-    `,
-  });
-  // Floating crystal: a faceted diamond hovering over the plaza. Same crystalline shading
-  // language as the shard (additive, faceted off the derivative face normal, daylight +
-  // proximity reactive) but it floats clear of the ground, so no waterline/camFade machinery
-  // is needed. The slow spin + bob live in the vertex shader off the shared drift clock.
-  const crystalGeom = new THREE.OctahedronGeometry(TP_CRYSTAL_SIZE, 0);
-  crystalGeom.scale(1, TP_CRYSTAL_STRETCH, 1); // stretch tall: a diamond, not a ball
-  const crystalMat = new THREE.ShaderMaterial({
-    uniforms: {
-      uColor: { value: TP_BEAM_COLOR },
-      uColorCore: { value: TP_BEAM_COLOR_BASE },
-      uOpacity: { value: TP_CRYSTAL_OPACITY },
-      uApproachNear: { value: TP_BEAM_APPROACH_NEAR },
-      uApproachFar: { value: TP_BEAM_APPROACH_FAR },
-      uFarLevel: { value: TP_BEAM_FAR_LEVEL },
-      uDayBoost: { value: TP_BEAM_DAY_BOOST },
-      uSpin: { value: TP_CRYSTAL_SPIN },
-      uBobAmp: { value: TP_CRYSTAL_BOB_AMP },
-      uBobSpeed: { value: TP_CRYSTAL_BOB_SPEED },
-      uDaylight: daylight.uDaylight,
-      uDriftTime: daylight.uDriftTime,
-      uDaylightMix: daylight.uDaylightMix,
-    },
-    transparent: true,
-    blending: THREE.AdditiveBlending,
-    depthWrite: false,
-    side: THREE.DoubleSide,
-    vertexShader: /* glsl */ `
-      uniform float uDriftTime;
-      uniform float uSpin;
-      uniform float uBobAmp;
-      uniform float uBobSpeed;
-      varying vec3 vWorldPos;
-      void main() {
-        float a = uDriftTime * uSpin;
-        float s = sin(a), c = cos(a);
-        vec3 p = position;
-        p.xz = mat2(c, -s, s, c) * p.xz;               // slow turn about the vertical
-        vec4 wp = modelMatrix * vec4(p, 1.0);
-        wp.y += sin(uDriftTime * uBobSpeed) * uBobAmp; // gentle float
-        vWorldPos = wp.xyz;
-        gl_Position = projectionMatrix * viewMatrix * wp;
-      }
-    `,
-    fragmentShader: /* glsl */ `
-      ${DAYLIGHT_FRAG_COMMON}
-      uniform vec3 uColor;
-      uniform vec3 uColorCore;
-      uniform float uOpacity;
-      uniform float uApproachNear;
-      uniform float uApproachFar;
-      uniform float uFarLevel;
-      uniform float uDayBoost;
-      varying vec3 vWorldPos;
-      void main() {
-        vec3 viewDir = normalize(cameraPosition - vWorldPos);
-        // flat FACE normal from derivatives: each facet flares as it turns to the eye, so the
-        // turning crystal sparkles facet by facet rather than glowing as a smooth ball.
-        vec3 faceN = normalize(cross(dFdx(vWorldPos), dFdy(vWorldPos)));
-        float edge = abs(dot(viewDir, faceN));
-        float camDist = distance(cameraPosition.xz, vWorldPos.xz);
-        float approach = smoothstep(uApproachFar, uApproachNear, camDist); // 0 far, 1 near
-        float prox = mix(uFarLevel, 1.0, approach);
-        vec3 col = mix(uColor, uColorCore, edge); // cyan on the facing facets, blue at grazing
-        // one-sided daylight lift, same as the shard: swells when a pool crosses the plaza.
-        float lit = beaconLit(vWorldPos.xz);
-        float dayGain = mix(1.0, uDayBoost, lit * uDaylightMix);
-        gl_FragColor = vec4(col, uOpacity * edge * prox * dayGain);
-      }
-    `,
-  });
+  // Builds the far beacon at each anchor: an embedded ball (see the TP_BALL_* notes
+  // above). The ball IS the marker -- there is no separate floor glow pad or light
+  // shaft anymore; both were retired for breaking the hard-faceted lowpoly look.
   // Embedded ball: a SOLID, opaque, flat-shaded icosphere lit by the scene hemisphere + warm sun
   // (MeshLambertMaterial, flatShading) so the facets carry a real light/dark gradient -- that is
   // what makes a sphere read as a sphere, and it is the one thing a flat book can do without and
@@ -1652,33 +1422,10 @@ function buildTeleporters(list: Teleporter[], daylight: DaylightUniforms) {
   const group = new THREE.Group();
   for (const tp of list) {
     const h = sampleHeight(tp.x, tp.y);
-    if (TP_BALL) {
-      // a beach-ball icosphere half-sunk in the sand at the anchor, a solid teal node.
-      const ball = new THREE.Mesh(ballGeom, ballMat);
-      ball.position.set(tp.x, h + ballCentreY, tp.y);
-      group.add(ball);
-      if (TP_BEAM_OVERHEAD) {
-        // optional vertical shaft rising above the ball as a distance beacon.
-        const beam = new THREE.Mesh(beamGeom, beamMat);
-        beam.position.set(tp.x, h + ballCentreY + TP_BEAM_HEIGHT / 2, tp.y);
-        beam.renderOrder = TP_BEAM_RENDER_ORDER;
-        group.add(beam);
-      }
-    } else if (TP_FLOATING_CRYSTAL) {
-      // a faceted diamond hovering just out of reach over the plaza, slowly turning.
-      const crystal = new THREE.Mesh(crystalGeom, crystalMat);
-      crystal.position.set(tp.x, h + TP_CRYSTAL_HOVER, tp.y);
-      crystal.renderOrder = TP_BEAM_RENDER_ORDER;
-      group.add(crystal);
-    } else {
-      // beam rising from the plaza centre, base at the ground. Drawn after the
-      // transparent ground levels (see TP_BEAM_RENDER_ORDER) so they can't overpaint
-      // it; it fades out by camera distance (shader) before the waterline shows.
-      const beam = new THREE.Mesh(beamGeom, beamMat);
-      beam.position.set(tp.x, h + TP_BEAM_HEIGHT / 2, tp.y);
-      beam.renderOrder = TP_BEAM_RENDER_ORDER;
-      group.add(beam);
-    }
+    // a beach-ball icosphere half-sunk in the sand at the anchor, a solid teal node.
+    const ball = new THREE.Mesh(ballGeom, ballMat);
+    ball.position.set(tp.x, h + ballCentreY, tp.y);
+    group.add(ball);
   }
   return group;
 }
