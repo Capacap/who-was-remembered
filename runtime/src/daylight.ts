@@ -311,14 +311,20 @@ export const DAYLIGHT_FRAG_COMMON = /* glsl */ `
 // free of the field's high-frequency flicker either way. Pass "0.0" where there is no
 // fade. camDistExpr is the fragment's view-space distance, feeding the explicit field
 // mip. Splice after <opaque_fragment>.
+// litExpr: a GLSL expression for an ALREADY-COMPUTED daylightAt() value to reuse, for
+// callers that also need the raw lit term elsewhere (e.g. a sun-reveal) and would
+// otherwise call the multi-octave/multi-tap daylightAt() twice. When omitted, the block
+// computes it internally as before (terrain, the book glow). When passed, xzExpr/
+// camDistExpr are unused for the lit term.
 export function applyDaylightGLSL(
   xzExpr: string,
   fadeExpr: string,
   camDistExpr: string,
+  litExpr?: string,
 ): string {
   return /* glsl */ `
     {
-      float _lit = daylightAt(${xzExpr}, ${camDistExpr});
+      float _lit = ${litExpr ?? `daylightAt(${xzExpr}, ${camDistExpr})`};
       vec3 _tint = mix(${NIGHT_GLSL}, ${DAY_GLSL}, _lit);
       _tint = mix(_tint, ${NIGHT_GLSL}, ${fadeExpr});
       _tint = mix(vec3(1.0), _tint, uDaylightMix); // diagnostic kill switch

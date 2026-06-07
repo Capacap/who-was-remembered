@@ -727,13 +727,19 @@ function applyFarPointsShading(
           `float _distLift = smoothstep(${HAZE_NEAR.toFixed(1)}, ${HAZE_FAR.toFixed(1)}, vViewDist);
            float _restFloor = mix(${GLOW_REST_DIM.toFixed(3)}, ${GLOW_REST_FAR.toFixed(3)}, max(vGroundFade, _distLift));
            gl_FragColor.rgb *= _restFloor;` +
+          // daylightAt() is the carpet's costliest per-fragment term (two 4-octave fbm warps +
+          // per-layer texture taps). The tint below and the sun-reveal further down used to call
+          // it SEPARATELY with identical args -- two evals per fragment for one value. Compute it
+          // ONCE here and feed both. Bit-identical output; halves the daylight cost. (The book
+          // glow at applyProximityGlow still double-calls -- same free dedup available there.)
+          `float _day = daylightAt(vGlowXZ, vViewDist);` +
           // the same drifting daylight the ground + books take, faded to night with distance
-          applyDaylightGLSL("vGlowXZ", "vGroundFade", "vViewDist") +
+          applyDaylightGLSL("vGlowXZ", "vGroundFade", "vViewDist", "_day") +
           // self-emission AFTER the tint (true self-light) so a speck survives the night as its
           // own dim hue, plus the sun-reveal -- both as on the books, minus the facet self-shade
           // (a point has no facet). These keep the mid->points handoff continuous.
           `gl_FragColor.rgb += diffuseColor.rgb * ${GLOW_EMISSIVE.toFixed(3)};
-           float _sun = daylightAt(vGlowXZ, vViewDist);
+           float _sun = _day; // reuse the single daylightAt above (dedup)
            gl_FragColor.rgb += diffuseColor.rgb * ${DAY_GLSL} * (_sun * ${GLOW_REVEAL.toFixed(3)});
            // distance dissolve into the dome (the box took this from applyDistanceFade's
            // dithering_fragment splice, which the points shader lacks), the sub-pixel coverage
