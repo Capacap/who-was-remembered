@@ -19,8 +19,6 @@ import {
 // and its transverse-dune shape no longer even matched the baked spiral dunes, so it
 // was stale dead weight. Edit terrain SHAPE in the stage9 bake, never here.
 
-let plazas: { x: number; z: number }[] = [];
-
 // smootherstep: zero first AND second derivative at both ends, so the grade
 // eases in and out without a curvature kink that would show up in the normals.
 function smootherstep(t: number): number {
@@ -186,9 +184,9 @@ export const FADE_END = 6500; // fully gone (dome shows through) beyond this
 // (cross of the position derivatives the flat shading already computes), so it tilts
 // with the dune faces rather than washing them flat -- the rake gradient IS the terrain
 // reveal. The centre (uPlayer) is shared with the book glow; this radius is its own.
-// Each mode is a two-colour RADIAL gradient (centre hue -> rim hue across the pool),
-// the same inner->outer trick the teleporter pads use: walking runs pale yellow at the
-// core into orange at the skirt; skating runs cyan into blue. uSkate (0..1, ramped in
+// Each mode is a two-colour RADIAL gradient (centre hue -> rim hue across the pool):
+// walking runs pale yellow at the core into orange at the skirt; skating runs cyan
+// into blue. uSkate (0..1, ramped in
 // the loop) cross-fades the two palettes -- the colour is the only "you're skating"
 // signal. The old wide-warm raking pool (str 0.55 / r 42) plus a separate blue skate
 // glow used to compound into a strong orange wash that also lit the books; collapsed to
@@ -210,56 +208,6 @@ const PLAYER_WALK_INNER_RGB = _glsl(PLAYER_WALK_INNER);
 const PLAYER_WALK_OUTER_RGB = _glsl(PLAYER_WALK_OUTER);
 const PLAYER_SKATE_INNER_RGB = _glsl(PLAYER_SKATE_INNER);
 const PLAYER_SKATE_OUTER_RGB = _glsl(PLAYER_SKATE_OUTER);
-
-// Teleporter floor glow: a blue emissive disc pooled on each plaza, the near-field
-// "stand here" marker. The beam fades out within TP_BEAM_FADE_NEAR so it never clips
-// the camera up close, which is exactly where it stops telling you where to stand;
-// this glow takes over there, so the column and the pad hand off as one beacon. Same
-// blue as the beam (main.ts TP_BEAM_COLOR). This one stays an additive emissive (unlike
-// the eye, now albedo): a "stand here" marker must read in the barely-lit centre instead
-// of crushing dark, and because it IS the ground it can never look superimposed (the
-// stone ring it replaced did, being a warm Lambert prop dropped onto the cool centre).
-// Evaluated per-fragment over the
-// teleporter positions, not per-vertex: the disc is smaller than a GROUND_CELL facet,
-// so a vertex attribute would light a single triangle. A slow pulse off uDriftTime
-// reads as powered. Eyeball knobs; tune against the vortex teal, which the innermost
-// teleporters sit inside (a blue pad there has to fight the near-white eye glow).
-const TP_GLOW_INNER = new THREE.Color(0x3df0ff); // cyan at the centre of the pad
-const TP_GLOW_OUTER = new THREE.Color(0x2f6cff); // blue at the rim, matches main.ts TP_BEAM_COLOR
-const TP_GLOW_RADIUS = 11; // soft pool footprint, world units; broader/softer than the old pad
-const TP_GLOW_FALLOFF = 1.4; // intensity exponent over the radius; gentle -> a soft skirt
-// The ground pool is back, but now it is light CAST by the floating crystal overhead (main.ts
-// TP_FLOATING_CRYSTAL), not a self-glowing pad. Because it has a source above it, a soft pool
-// beneath is motivated light, not a stamp on the sand -- which is exactly why the old pad
-// failed. To keep it in the lowpoly language it RAKES the dune facets from that overhead
-// source (the same trick the player lamp uses) instead of being a smooth additive disc, so
-// the faceted relief reads through it. Dim and soft on purpose. The old stamped-circle /
-// polygon-pad experiment is superseded by the floating beacon and gone.
-const TP_GLOW_STRENGTH = 0.0; // cast pool OFF. A static pool can't sell light cast by a
-// crystal that turns and bobs above it -- the eye reads two unrelated objects, a spinning
-// gem and a frozen stamp. Selling it would mean animating the pool itself (a caustic turning
-// with the spin), which is exactly the gamey UI-pool look the crystal was meant to escape.
-// The crystal reads as planted on its own, so it doesn't need grounding. Code kept dormant;
-// raise to ~0.3 to revive the raked cast wash if we ever want to chase the animated version.
-const TP_CAST_HEIGHT = 9.0; // height of the casting crystal; sets the rake angle. Mirror main.ts TP_CRYSTAL_HOVER
-const TP_CAST_RAKE_FLOOR = 0.45; // ambient floor of the facet rake (1 = flat, no relief); keeps the wash soft
-const TP_GLOW_PULSE = 0.18; // pulse depth as a fraction of strength (0 = steady)
-const TP_GLOW_PULSE_SPEED = 0.6; // pulse rate against the drifting uDriftTime
-// Proximity ramp off the player position: far away the pad is a dim, plain-blue
-// beacon; on approach it brightens and the cyan core emerges. Keep in sync with
-// main.ts TP_BEAM_APPROACH_* so beam and pad ramp together.
-const TP_GLOW_APPROACH_NEAR = 70; // player distance (world u) at which the pad reaches full intensity
-const TP_GLOW_APPROACH_FAR = 260; // beyond this the pad sits at the dim far level
-const TP_GLOW_FAR_LEVEL = 0.3; // intensity multiplier when far (0..1)
-// One-sided daylight lift, mirrors the beam (main.ts TP_BEAM_DAY_BOOST). The pad is
-// added AFTER the daylight multiply so a shadow never dims it; this only scales it UP
-// when the drifting light crosses the plaza, so pad and beam swell together. Keep the
-// value matched to TP_BEAM_DAY_BOOST so the whole beacon breathes as one.
-const TP_GLOW_DAY_BOOST = 7.5; // additive multiplier in full daylight (1 = no lift). Eyeball.
-const _tgi = TP_GLOW_INNER.clone().convertSRGBToLinear();
-const _tgo = TP_GLOW_OUTER.clone().convertSRGBToLinear();
-const TP_GLOW_INNER_RGB = `vec3(${_tgi.r.toFixed(4)}, ${_tgi.g.toFixed(4)}, ${_tgi.b.toFixed(4)})`;
-const TP_GLOW_OUTER_RGB = `vec3(${_tgo.r.toFixed(4)}, ${_tgo.g.toFixed(4)}, ${_tgo.b.toFixed(4)})`;
 
 // A live uniform carrying the player's world-xz position, shared between the
 // ground's raking light and the books' proximity glow so both pools share a centre.
@@ -294,13 +242,6 @@ const GROUND_CELL = 12; // uniform facet size underfoot, world units
 const GROUND_HALF = 9000; // half-extent: covers the world (R_MAX ~7100) + the fade tail
 const GROUND_JIT_FRAC = 0.33; // in-plane vertex jitter as a fraction of the cell:
 //   the Vane look, an organic faceted triangulation instead of a mechanical lattice
-
-// Record each teleporter's xz so the ground shader can pool a "stand here" glow at
-// every plaza (applyGroundMaterial reads these). The plazas are levelled in the
-// stage9 heightmap bake itself, so nothing here needs to recompute their height.
-export function initTerrain(teleporters: { x: number; y: number }[]): void {
-  plazas = teleporters.map((t) => ({ x: t.x, z: t.y }));
-}
 
 const NORMAL_EPS = 0.5; // default central-difference step for sampleNormal, world units
 
@@ -452,44 +393,6 @@ function applyGroundMaterial(
 ): void {
   mat.transparent = true;
   const fadeSpan = (FADE_END - FADE_START).toFixed(1);
-  // Teleporter floor glow, built from the plaza positions initTerrain stored (set
-  // before buildGround calls this). Evaluated per-fragment over the teleporter array;
-  // skipped entirely when there are none, since a zero-length GLSL array is invalid.
-  const tpPos = plazas.map((p) => new THREE.Vector2(p.x, p.z));
-  const tpDecl = tpPos.length ? `\nuniform vec2 uTpPos[${tpPos.length}];` : "";
-  const tpGlow = tpPos.length
-    ? `
-       {
-         float tpGlow = 0.0;
-         float tpT = 0.0; // radial fraction (0 centre, 1 rim) of the dominant pad
-         float tpApproach = 1.0; // 0 when the player is far from that pad, 1 when near
-         vec2 tpCenter = vec2(0.0); // xz of the dominant pad, for the overhead rake direction
-         for (int i = 0; i < ${tpPos.length}; i++) {
-           float t = clamp(distance(vWorldPos.xz, uTpPos[i]) / ${TP_GLOW_RADIUS.toFixed(2)}, 0.0, 1.0);
-           float g = pow(1.0 - t, ${TP_GLOW_FALLOFF.toFixed(2)}); // soft radial skirt
-           if (g > tpGlow) {
-             tpGlow = g; tpT = t; tpCenter = uTpPos[i];
-             tpApproach = smoothstep(${TP_GLOW_APPROACH_FAR.toFixed(1)}, ${TP_GLOW_APPROACH_NEAR.toFixed(1)}, distance(uPlayer, uTpPos[i]));
-           }
-         }
-         // far: dim, plain-blue. near: brighter, with the cyan core emerging.
-         float tpProx = mix(${TP_GLOW_FAR_LEVEL.toFixed(2)}, 1.0, tpApproach);
-         vec3 tpInner = mix(${TP_GLOW_OUTER_RGB}, ${TP_GLOW_INNER_RGB}, tpApproach);
-         vec3 tpCol = mix(tpInner, ${TP_GLOW_OUTER_RGB}, tpT);
-         // slow breathing pulse so the pool reads as powered, not painted.
-         float tpPulse = 1.0 - ${TP_GLOW_PULSE.toFixed(2)} * (0.5 - 0.5 * cos(uDriftTime * ${TP_GLOW_PULSE_SPEED.toFixed(3)}));
-         // one-sided daylight lift, in lockstep with the crystal: never dims, just swells when
-         // a daylight pool crosses the plaza. beaconLit is the point-sample reader.
-         float tpDayGain = mix(1.0, ${TP_GLOW_DAY_BOOST.toFixed(2)}, beaconLit(vWorldPos.xz) * uDaylightMix);
-         // rake the dune facets from the crystal overhead, so the faceted relief reads through
-         // the soft wash instead of a flat disc -- the lowpoly-honest form of a glow pad.
-         vec3 tpWN = normalize(cross(dFdx(vWorldPos), dFdy(vWorldPos)));
-         if (tpWN.y < 0.0) tpWN = -tpWN;
-         vec3 tpToL = normalize(vec3(tpCenter.x - vWorldPos.x, ${TP_CAST_HEIGHT.toFixed(1)}, tpCenter.y - vWorldPos.z));
-         float tpRake = ${TP_CAST_RAKE_FLOOR.toFixed(2)} + (1.0 - ${TP_CAST_RAKE_FLOOR.toFixed(2)}) * max(dot(tpWN, tpToL), 0.0);
-         gl_FragColor.rgb += tpGlow * tpCol * (${TP_GLOW_STRENGTH.toFixed(2)} * tpPulse * tpProx * tpDayGain * tpRake);
-       }`
-    : "";
   mat.onBeforeCompile = (shader) => {
     shader.uniforms.uPlayer = uPlayer;
     shader.uniforms.uPlayerLift = uPlayer.lift;
@@ -497,7 +400,6 @@ function applyGroundMaterial(
     shader.uniforms.uDaylight = daylight.uDaylight;
     shader.uniforms.uDriftTime = daylight.uDriftTime;
     shader.uniforms.uDaylightMix = daylight.uDaylightMix;
-    if (tpPos.length) shader.uniforms.uTpPos = { value: tpPos };
     shader.vertexShader = shader.vertexShader
       .replace(
         "#include <common>",
@@ -520,7 +422,6 @@ function applyGroundMaterial(
     let frag = shader.fragmentShader.replace(
       "#include <common>",
       "#include <common>\nvarying float vGroundFade;\nvarying float vViewDist;\nvarying vec3 vWorldPos;\nvarying vec2 vFieldXZ;\nuniform vec2 uPlayer;\nuniform float uPlayerLift;\nuniform float uSkate;" +
-        tpDecl +
         DAYLIGHT_FRAG_COMMON,
     );
     // Raking pool, additive after lighting (linear space, before the colorspace
@@ -554,18 +455,14 @@ function applyGroundMaterial(
          // mostly raked (so the dune relief reads) with a small floor so the flat ground
          // right underfoot still lights; the rake gradient is the terrain reveal.
          float rake = 0.3 + 0.7 * max(dot(wn, normalize(toP)), 0.0);
-         // radial fraction (0 core -> 1 rim) drives an inner->outer colour gradient like
-         // the teleporter pads; uSkate cross-fades the warm (yellow->orange) and the cool
-         // (cyan->blue) palettes.
+         // radial fraction (0 core -> 1 rim) drives an inner->outer colour gradient;
+         // uSkate cross-fades the warm (yellow->orange) and the cool (cyan->blue) palettes.
          float prad = clamp(pdist / ${PLAYER_LIGHT_RADIUS.toFixed(1)}, 0.0, 1.0);
          vec3 poolInner = mix(${PLAYER_WALK_INNER_RGB}, ${PLAYER_SKATE_INNER_RGB}, uSkate);
          vec3 poolOuter = mix(${PLAYER_WALK_OUTER_RGB}, ${PLAYER_SKATE_OUTER_RGB}, uSkate);
          vec3 poolCol = mix(poolInner, poolOuter, prad);
          gl_FragColor.rgb += poolCol * (${PLAYER_LIGHT_STRENGTH.toFixed(2)} * fall * rake);
-       }` +
-        // teleporter floor glow last, AFTER the daylight multiply, so the powered pad
-        // holds steady instead of dimming as a shadow drifts over the plaza.
-        tpGlow,
+       }`,
     );
     shader.fragmentShader = frag.replace(
       "#include <dithering_fragment>",

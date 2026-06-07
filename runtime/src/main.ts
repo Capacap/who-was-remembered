@@ -5,7 +5,6 @@ import { DRACOLoader } from "three/examples/jsm/loaders/DRACOLoader.js";
 import Stats from "three/examples/jsm/libs/stats.module.js";
 import bookUrl from "./assets/meshes/book.glb?url";
 import {
-  initTerrain,
   initHeightmap,
   sampleHeight,
   sampleNormal,
@@ -2204,11 +2203,6 @@ async function main() {
   // the heightmap is the ground-height source for the ground mesh and the player's
   // feet; init it before anything samples it.
   initHeightmap(heightmap.res, heightmap.worldSize, heightmap.data);
-  // the plazas flatten around the teleporters, so terrain needs them before the
-  // books or monuments are seated. Books, monuments, the picker and the ring all read
-  // sampleHeight/sampleNormal now, so they seat on the same baked surface the
-  // ground mesh draws (no float-off; the analytic field is only the heightmap fallback).
-  initTerrain(teleporters);
   // one player-position uniform shared by the ground's raking light and the books'
   // proximity glow, so both reactive pools track the same centre (the overlapping
   // light radii). Updated once per frame in the loop.
