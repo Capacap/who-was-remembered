@@ -36,7 +36,7 @@ import {
 const info = document.getElementById("info") as HTMLDivElement;
 
 // world scale: the pipeline derives R_MAX from ~1.4 world units to the metre
-// (see DESIGN.md / stage6). Eye height and speeds are in metres, converted once.
+// (see stage6_place.py). Eye height and speeds are in metres, converted once.
 const UNITS_PER_METRE = 1.4;
 const EYE_HEIGHT = 1.7 * UNITS_PER_METRE; // ~2.4u: stand a head above the sand
 // Grounded movement is velocity-based with acceleration: two modes that share one

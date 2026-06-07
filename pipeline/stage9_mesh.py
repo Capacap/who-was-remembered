@@ -65,7 +65,7 @@ CLIP_RADIUS = 8000.0
 # distinct while reading bold-faceted (15k starts merging crests, 60k softens to
 # near-smooth); chosen against the bench's deviation-vs-budget curve. Performance
 # is not the constraint (a static 30k-tri ground is trivial), so this is an
-# aesthetic dial the runtime gets the final say on. See TERRAIN_BAKE.md Step 2.
+# aesthetic dial the runtime gets the final say on.
 DEFAULT_BAKE_TRIS = 30000
 
 

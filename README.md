@@ -2,11 +2,11 @@
 
 A browser-based 3D art piece. The player walks through a low-poly desert scattered with books, one per Wikipedia article about a historical figure. Starting at year 2000 in the centre, walking outward moves back in time, with book density thinning as recorded history grows sparser. Wikipedia's recency bias is the explicit subject, not a flaw to be corrected.
 
-See [DESIGN.md](DESIGN.md) for the full design document and the rationale behind the major choices.
+The repository has two halves: a Python preprocessing **pipeline** that turns Wikidata and Wikipedia dumps into the world (book positions, teleporter network, baked terrain), and a Three.js **runtime** (`runtime/`) that loads those artifacts and renders the walkable scene. The pipeline is run offline by the author; players only ever touch the runtime's shipped output.
 
 ## Status
 
-Preprocessing pipeline in progress. Stages 1 through 7 run end-to-end on the 2026-05 dumps: Stage 1 emits about 914k figures, Stage 2 cuts to 638k on the recency and stub pre-filter, Stage 3 attaches a Wikipedia lead, an outgoing link graph, and whole-article length metrics to 99.1% of those, and Stage 4 keeps the 576k whose article body clears a 100-word floor. Density runs from a few hundred figures per century in deep antiquity to 376k in the 20th century, which is the temporal gradient the desert framing wants. Stages 5 and 6 then resolve birth/death coordinates and assign each figure a radial-time position (era as radius, raw geographic longitude as angle). Stage 7 places a hand-curated set of 26 teleporter monuments, each pinned to the figures that define a place-and-era rather than to coordinates. The runtime is an early Three.js walker: a first-person controller (WASD, mouse look, hold-to-run, and a fly toggle to cross the void) over the full field of instanced books, with the teleporters marked as tall blue pillars. Looking at a book surfaces its name, description, and lifespan as an ambient label, and pressing E opens an inspect overlay with a link to the Wikipedia article and a bookmark toggle. Bookmarked figures appear on a compass strip anchored on the origin (the present, inward) and its antipode (the past, outward) rather than cardinal directions, reading out eras rather than distances. Terrain, tile-based loading, teleporter fast-travel, and the longer-text reading tiers are not yet implemented.
+Playable end-to-end on desktop and mobile. The pipeline (Stages 1–9 below) runs on the 2026-05 dumps and bakes the full corpus — about 576k books — plus the 26-monument teleporter network and the terrain heightmap. The runtime is a complete first-person walker over that whole field: grounded movement (WASD / mouse look, hold Shift to skate across the empty rings), instanced books on baked low-poly terrain under a day–night atmosphere, teleporter fast-travel, look-to-inspect labels with a Wikipedia link and a bookmark toggle, and a bookmark compass anchored on the present (inward) and the deep past (outward). Touch controls cover mobile, with a far-field density setting for performance. This README still documents the build mechanics rather than the finished piece; a player-facing overhaul with screenshots comes before the repo goes public.
 
 ## Setup
 
@@ -85,7 +85,7 @@ uv run pipeline/stage4_quality_cut.py
 
 ### Stage 6: Placement
 
-`pipeline/stage6_place.py` reads the Stage 4 figures plus `places.parquet` and writes `placement.parquet`, adding polar coordinates (radius, angle), their Cartesian projection (x, y), and a `landmark_tier`. Radius is era only, and linear in it: `R_INNER + (R_MAX - R_INNER) * t` where `t = (2000 - death_year) / 2800`, so every century gets equal radial width. Density is ~100x higher in modern centuries than antiquity, so this deliberately leaves the ancient rings near-empty (the emptiness is the recorded-history gap the piece is about) and pays the price at the centre, where the modern crowd is too dense to spread. The scale is derived, not picked: `R_INNER = 200`, `R_MAX ~ 7100` units is the smallest world where the bulk modern band (~1850 on) clears a roughly one-second walk between books (~1.4 units to the metre). The player spawns at the pad rim inside an overlapping thicket of the recently-dead that thins as they walk back; deep time is an 80-plus-minute walk away, a void meant to be crossed by flight (unlocked around the ~1850 frontier) rather than strolled. Angle is the figure's raw geographic longitude, mapped straight onto the disc (`((lon + 180) / 360) * 2*pi`). Geography stays literally true and the corpus's Western skew shows up as honest density: the Anglo-American and European longitude bands become an over-full wedge of books while the rest of the world stays sparse even in the modern ring, which is the bias the piece is about rather than something to smooth away. An earlier population-CDF version was reversed because it only relocated that bias, allocating angular width by Wikipedia attention (the USA alone took ~110 degrees of the disc) and crushing the mostly non-Western ancient world into a thin sliver. Angular placement is deliberately loose: a heavy radius-aware jitter dissolves the per-city radial spokes into organic clumps, spreading the dense modern core wide while keeping antiquity's geography crisp. About 74% of figures are anchored by a real birth/death coordinate. The rest fall through a ladder that reads only recorded data: P27 citizenship, then a hand-curated gazetteer over the English description (`gazetteer.json`). A resolved country does not become a centroid; the figure borrows a longitude sampled from an anchored compatriot, so it spreads across that country's real arc, lifting coverage to about 96%. The remaining 4% are genuinely place-less in the record and keep the deterministic per-QID random angle, with `geo_source` left null so the runtime can render them adrift rather than confidently placed. Prominence never enters position.
+`pipeline/stage6_place.py` reads the Stage 4 figures plus `places.parquet` and writes `placement.parquet`, adding polar coordinates (radius, angle), their Cartesian projection (x, y), and a `landmark_tier`. Radius is era only, and linear in it: `R_INNER + (R_MAX - R_INNER) * t` where `t = (2000 - death_year) / 2800`, so every century gets equal radial width. Density is ~100x higher in modern centuries than antiquity, so this deliberately leaves the ancient rings near-empty (the emptiness is the recorded-history gap the piece is about) and pays the price at the centre, where the modern crowd is too dense to spread. The scale is derived, not picked: `R_INNER = 200`, `R_MAX ~ 7100` units is the smallest world where the bulk modern band (~1850 on) clears a roughly one-second walk between books (~1.4 units to the metre). The player spawns at the pad rim inside an overlapping thicket of the recently-dead that thins as they walk back; deep time is far out, a void meant to be skated across (hold Shift to coast the empty rings) rather than strolled. Angle is the figure's raw geographic longitude, mapped straight onto the disc (`((lon + 180) / 360) * 2*pi`). Geography stays literally true and the corpus's Western skew shows up as honest density: the Anglo-American and European longitude bands become an over-full wedge of books while the rest of the world stays sparse even in the modern ring, which is the bias the piece is about rather than something to smooth away. An earlier population-CDF version was reversed because it only relocated that bias, allocating angular width by Wikipedia attention (the USA alone took ~110 degrees of the disc) and crushing the mostly non-Western ancient world into a thin sliver. Angular placement is deliberately loose: a heavy radius-aware jitter dissolves the per-city radial spokes into organic clumps, spreading the dense modern core wide while keeping antiquity's geography crisp. About 74% of figures are anchored by a real birth/death coordinate. The rest fall through a ladder that reads only recorded data: P27 citizenship, then a hand-curated gazetteer over the English description (`gazetteer.json`). A resolved country does not become a centroid; the figure borrows a longitude sampled from an anchored compatriot, so it spreads across that country's real arc, lifting coverage to about 96%. The remaining 4% are genuinely place-less in the record and keep the deterministic per-QID random angle, with `geo_source` left null so the runtime can render them adrift rather than confidently placed. Prominence never enters position.
 
 `landmark_tier` (major / minor / ordinary) is the notability axis, kept separate from position and meant only as a player navigation aid: a landmark is a figure the player is likelier to recognize, so a taller book gives a reference point to steer by. It has two sources. The global source is an absolute `sitelink_count` floor (cross-lingual coverage), which makes a recognizable figure a major wherever it sits (about 1,600 figures). The local source fills directions and eras where nobody clears the floor: the most-covered geo-anchored figure in each region-and-era grid cell with no major becomes a minor reference point even when globally obscure (Moctezuma II, the early-dynasty pharaohs). `sitelink_count` carries the continuous magnitude for the renderer to modulate book height within a tier.
 
@@ -114,6 +114,39 @@ uv run pipeline/stage7_teleporters.py
 uv run pipeline/plot_layout.py
 ```
 
-### Later stages
+### Stage 8: Topology
 
-Embedding, terrain, and the runtime bundle are described in DESIGN.md but not yet implemented. The runtime will need spatial tile-based loading rather than a single bundle, because 576k books exceeds the ~30-50k DESIGN.md called the single-bundle limit.
+`pipeline/stage8_topology.py` reads `placement.parquet` and writes `layout.parquet`. Stages 6 and 7 produce truth (every book where its era and longitude put it); this stage massages that truth into something walkable without lying about it. A size-aware relaxation pushes apart only the pairs whose centres fall inside a larger book's footprint, so a small book is never wholly swallowed (edges may still overlap; the goal is an end to subsumption, not even spacing) and each book stays tethered to its placement so its era and longitude survive. The same pass clears a tight sphere around each teleporter monument. Where the field is genuinely too dense to separate within the tether (the Western modern apex) books pile to the tether and stay a crush, which is honest.
+
+Run (after Stage 7):
+
+```sh
+uv run pipeline/stage8_topology.py
+```
+
+### Stage 9: Terrain bake
+
+`pipeline/stage9_mesh.py` bakes the world's elevation field and writes `runtime/public/heightmap.bin`, the single source of ground height the runtime samples for both the surface it draws and the height every book and monument seats on, so nothing floats. The vertical axis carries no data (time and longitude are the horizontal axes); the relief is pure decoration — a central vantage hill to spawn on, spiral dune texture radiating outward, and broad spiral swells — run through a thermal-avalanche pass that rounds crests and fills toes, a neighbour operation a pointwise height function can't do, which is the reason terrain is baked rather than computed live.
+
+```sh
+uv run pipeline/stage9_mesh.py
+```
+
+### Runtime export
+
+`pipeline/export_runtime.py` reads `layout.parquet` and writes the compact binaries the runtime loads from `runtime/public/`: `positions.bin` (per-book position, landmark tier, geo-source confidence, home-region longitude, and quantized size, ~12 bytes each, ~7 MB for the full corpus) and `teleporters.json` (the 26 monuments). Regenerate after any change to Stages 6–8.
+
+```sh
+uv run pipeline/export_runtime.py
+```
+
+## Run the game
+
+The runtime is a Vite + Three.js app under `runtime/`. It reads the baked artifacts from `runtime/public/` (git-ignored; regenerate them with the pipeline above).
+
+```sh
+cd runtime
+npm install
+npm run dev      # local dev server
+npm run build    # production bundle in runtime/dist
+```
