@@ -1135,6 +1135,10 @@ function buildField(
   // rebuild can restore their speck before re-promoting.
   const hidden = new Int32Array(NEAR_CAP + MID_CAP);
   let nHidden = 0;
+  // near-tier draw order: book ids collected during the (near-first) ring walk, then sorted
+  // back-to-front before the GPU write so overlaps composite by painter's order. Reused each
+  // rebuild (cleared, not reallocated). See the sort below for the why.
+  const nearOrder: number[] = [];
   let lastX = Infinity;
   let lastZ = Infinity;
   // far-base master switch (dev toggle, for the perf baseline). The points cloud is cheap
@@ -1158,6 +1162,7 @@ function buildField(
     const cgz = Math.floor((camZ - minZ) / CELL);
     let kNear = 0;
     let kMid = 0;
+    nearOrder.length = 0;
     const addCell = (gx: number, gz: number): void => {
       if (gx < 0 || gz < 0 || gx >= gw || gz >= gh) return;
       const cI = gz * gw + gx;
@@ -1177,8 +1182,9 @@ function buildField(
         const rf = R_FULL + (h - 0.5) * BOUND_DITHER;
         const rm = R_MID + (h2 - 0.5) * MID_DITHER;
         if (d2 < rf * rf && kNear < NEAR_CAP) {
-          nearMesh.setMatrixAt(kNear, m.fromArray(fullMat, i * 16));
-          nearMesh.setColorAt(kNear, c.fromArray(fullCol, i * 3));
+          // defer the GPU write -- the draw order is decided by a back-to-front sort after the
+          // walk (see below). The near-first ring walk still decides MEMBERSHIP + the cap here.
+          nearOrder.push(i);
           kNear++;
           // hide the speck where the mesh book covers it: within FAR_HIDE_R (= FAR_MESH_FULL -
           // REBUILD_DIST), the staleness-safe radius inside which the live mesh stays full alpha
@@ -1223,6 +1229,30 @@ function buildField(
         addCell(cgx - rr, gz);
         addCell(cgx + rr, gz);
       }
+    }
+    // Book-on-book overlap fix. The field draws with depthWrite OFF (so books never punch holes
+    // in the dot floor -- see the farPointsMat note), which means overlapping books composite by
+    // DRAW ORDER, not depth. The ring walk above fills near-first = front-to-back, so a farther
+    // book paints OVER a nearer one (the "random overlap" bug). Sort the near set back-to-front
+    // (farthest first) before writing, so overlaps composite by painter's order -- exact for flat
+    // books strewn on the ground (no deep interpenetration to form cycles; stage 8 forbids
+    // subsumption). Also makes the [FAR_MESH_FULL, FAR_CROSS_OUT] alpha-fade band blend in the
+    // right order for free. Decoupled from the walk: membership / caps / aShow were already decided
+    // above (near-first); only the GPU write order changes, and kNear == nearOrder.length. Near-only
+    // -- mid books are small/distant box LODs whose overlaps are sub-pixel, not worth a 54k-instance
+    // sort every rebuild. Horizontal distance (the axis the tiers classify on): books hug the ground
+    // so it matches eye-distance ordering, and it's free of camera height. Runs only on a rebuild.
+    nearOrder.sort((a, b) => {
+      const ax = px[a] - camX;
+      const az = pz[a] - camZ;
+      const bx = px[b] - camX;
+      const bz = pz[b] - camZ;
+      return bx * bx + bz * bz - (ax * ax + az * az);
+    });
+    for (let k = 0; k < nearOrder.length; k++) {
+      const i = nearOrder[k];
+      nearMesh.setMatrixAt(k, m.fromArray(fullMat, i * 16));
+      nearMesh.setColorAt(k, c.fromArray(fullCol, i * 3));
     }
     nearMesh.count = kNear;
     nearMesh.instanceMatrix.needsUpdate = true;
