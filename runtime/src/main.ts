@@ -201,6 +201,10 @@ const FAR_LIT = new THREE.Vector3(0.151, 0.099, 0.097);
 // shows past the blue edge, the point is the visible layer; a red crescent inside the blue disc is
 // a hole; a blue ring with no red beyond it is a mesh that out-ran its point. Set false to ship.
 const DIAG_LOD_COLORS = false;
+// DEV_DEFAULT: open every dev affordance on load (perf HUD up, pause menu's dev section
+// pre-expanded) so a test build needs no menu poking. Scene-altering toggles (fly/flat) stay
+// OFF so the default view is still the real one. Flip false to ship the clean player view.
+const DEV_DEFAULT = true;
 // Near the camera the books are SOLID and sit OVER the dot floor, but a dot sprite peeks past its
 // flat book at grazing angle. So fade the dot floor IN over [DOT_NEAR_FADE_IN, FAR_MESH_FULL] of
 // live horizontal distance: gone across the solid-book core (no peeking), full by FAR_MESH_FULL
@@ -1081,6 +1085,10 @@ function buildField(
   // far-base master switch (dev toggle, for the perf baseline). The points cloud is cheap
   // enough that the old per-tile view-distance cull is gone; this is just on/off.
   let boxShown = true;
+  // book-mesh master switch (dev toggle). Pairs with boxShown: toggling the dot carpet and the
+  // book meshes independently is how we ATTRIBUTE the GPU cost between the two field layers --
+  // read the gpu line with each off in turn (e.g. at a horizon angle where overdraw peaks).
+  let booksShown = true;
   function update(camX: number, camZ: number): void {
     const mdx = camX - lastX;
     const mdz = camZ - lastZ;
@@ -1184,6 +1192,14 @@ function buildField(
     farPoints.visible = on;
   };
   const isBoxVisible = (): boolean => boxShown;
+  // the two detail tiers move together: they're the same conceptual layer (the legible book
+  // meshes), split only by LOD distance, so one switch hides both for the perf baseline.
+  const setBooksVisible = (on: boolean): void => {
+    booksShown = on;
+    nearMesh.visible = on;
+    midMesh.visible = on;
+  };
+  const isBooksVisible = (): boolean => booksShown;
   return {
     group,
     px,
@@ -1195,6 +1211,8 @@ function buildField(
     farPoints,
     setBoxVisible,
     isBoxVisible,
+    setBooksVisible,
+    isBooksVisible,
   };
 }
 
@@ -2610,6 +2628,7 @@ async function main() {
   const devFlatEl = document.getElementById("dev-flat") as HTMLInputElement;
   const devPerfEl = document.getElementById("dev-perf") as HTMLInputElement;
   const devBoxEl = document.getElementById("dev-box") as HTMLInputElement;
+  const devBooksEl = document.getElementById("dev-books") as HTMLInputElement;
   const spinnerEl = document.getElementById("pause-spinner") as HTMLSpanElement;
 
   // Resolution (render scale) — player-facing, NOT behind the dev gate. A segmented
@@ -2649,6 +2668,7 @@ async function main() {
     devFlatEl.checked = isFlatLit();
     devPerfEl.checked = isPerf();
     devBoxEl.checked = built.isBoxVisible();
+    devBooksEl.checked = built.isBooksVisible();
     syncQuality();
     syncDevOpts();
     pauseEl.style.display = "flex";
@@ -2714,6 +2734,51 @@ async function main() {
   devFlatEl.addEventListener("change", () => setFlatLit(devFlatEl.checked));
   devPerfEl.addEventListener("change", () => setPerf(devPerfEl.checked));
   devBoxEl.addEventListener("change", () => built.setBoxVisible(devBoxEl.checked));
+  devBooksEl.addEventListener("change", () => built.setBooksVisible(devBooksEl.checked));
+  // DEV_DEFAULT: surface the perf HUD and pre-expand the dev section so a test build is ready
+  // to read the instant it loads -- no Esc-into-menu-and-tick-Developer-mode each run.
+  if (DEV_DEFAULT) {
+    setPerf(true);
+    devModeEl.checked = true;
+    syncDevOpts();
+    // Pinned dev toolbar. On touch the B/M/L/F keys don't exist, and the pause-menu checkboxes
+    // can't drive the perf measurement: pausing covers the scene, so you can't watch the live
+    // gpu line while flipping a layer. These one-tap buttons drive the SAME setters with the
+    // scene visible -- the on-device way to run the dots-vs-books attribution. Bottom-left,
+    // clear of the perf readout (top-left) and the touch look-zone (right half). Ships out with
+    // DEV_DEFAULT. Each button repaints from the is* getter on tap; toggles made via the pause
+    // menu instead won't refresh a stale label until the next tap (acceptable for dev tooling).
+    const bar = document.createElement("div");
+    bar.style.cssText =
+      "position:fixed;left:4px;bottom:4px;z-index:101;display:flex;gap:4px;font:11px/1 monospace;";
+    const mkBtn = (
+      label: string,
+      isOn: () => boolean,
+      set: (on: boolean) => void,
+    ): void => {
+      const b = document.createElement("button");
+      const paint = (): void => {
+        const on = isOn();
+        b.textContent = `${label} ${on ? "·on" : "off"}`;
+        b.style.cssText =
+          "padding:7px 9px;border:1px solid #9fe;border-radius:3px;font:inherit;cursor:pointer;" +
+          (on
+            ? "background:rgba(0,0,0,.55);color:#9fe;"
+            : "background:rgba(0,0,0,.82);color:#566;");
+      };
+      b.addEventListener("click", () => {
+        set(!isOn());
+        paint();
+      });
+      paint();
+      bar.appendChild(b);
+    };
+    mkBtn("dots", () => built.isBoxVisible(), (on) => built.setBoxVisible(on));
+    mkBtn("books", () => built.isBooksVisible(), (on) => built.setBooksVisible(on));
+    mkBtn("flat", () => isFlatLit(), (on) => setFlatLit(on));
+    mkBtn("fly", () => getFlying(), (on) => setFlying(on));
+    document.body.appendChild(bar);
+  }
   (document.getElementById("pause-resume") as HTMLButtonElement).addEventListener(
     "click",
     resume,
@@ -2778,7 +2843,13 @@ async function main() {
       // it on vs off, looking outward at spawn, to see what 574k boxes actually cost
       // before we decide whether tiling can recover enough of it to be worth building.
       built.setBoxVisible(!built.isBoxVisible());
-      console.log(`[perf] box field ${built.isBoxVisible() ? "shown" : "HIDDEN"}`);
+      console.log(`[perf] dot carpet ${built.isBoxVisible() ? "shown" : "HIDDEN"}`);
+    } else if (e.code === "KeyM") {
+      // perf-attribution partner to B: hide the book MESHES (near+mid) so B(dots)+M(books)
+      // isolate each field layer's GPU cost. Watch the gpu line: all-on, then dots-only,
+      // then books-only, at a horizon angle where the overdraw stack is deepest.
+      built.setBooksVisible(!built.isBooksVisible());
+      console.log(`[perf] book meshes ${built.isBooksVisible() ? "shown" : "HIDDEN"}`);
     } else if (e.code === "KeyP") {
       // dev cycle for the render-scale (pixel-ratio) lever: 1.0 -> 0.75 -> 0.5, so the
       // gpu line can be read at each step. The auto-default (0.67 on touch) is off-cycle;
@@ -2935,7 +3006,7 @@ async function main() {
         `scale  ${renderScale.toFixed(2)}x (pr ${renderer.getPixelRatio().toFixed(2)})\n` +
         `calls  ${r.calls}\n` +
         `tris   ${(r.triangles / 1e6).toFixed(2)}M\n` +
-        `near   ${built.nearMesh.count.toLocaleString()} full + ${built.midMesh.count.toLocaleString()} mid\n` +
+        `near   ${built.nearMesh.count.toLocaleString()} full + ${built.midMesh.count.toLocaleString()} mid${built.isBooksVisible() ? "" : " (HIDDEN)"}\n` +
         `far    ${farBooks.toLocaleString()} / ${field.n.toLocaleString()} pts${built.isBoxVisible() ? "" : " (HIDDEN)"}\n` +
         `bookfl ${booksMs.toFixed(1)}ms (peak)`;
       booksMs = 0;

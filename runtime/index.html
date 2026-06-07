@@ -460,6 +460,14 @@
         font-family: var(--serif);
         font-size: 15px;
         line-height: 1.5;
+        /* cap to the viewport and scroll internally: with the dev section expanded the card
+           runs taller than a phone screen, and the centred flex parent clips the overflow off
+           both ends (the dev toggles fell off-screen with no way to reach them). dvh tracks the
+           mobile URL bar; vh is the fallback where dvh is unknown. */
+        max-height: calc(100vh - 32px);
+        max-height: calc(100dvh - 32px);
+        overflow-y: auto;
+        -webkit-overflow-scrolling: touch;
       }
       #pause-card .pause-title {
         font-size: 22px;
@@ -750,8 +758,12 @@
               <span class="key">`</span>
             </label>
             <label class="pause-toggle">
-              <input type="checkbox" id="dev-box" checked /> Box field
+              <input type="checkbox" id="dev-box" checked /> Far dots
               <span class="key">B</span>
+            </label>
+            <label class="pause-toggle">
+              <input type="checkbox" id="dev-books" checked /> Book meshes
+              <span class="key">M</span>
             </label>
           </div>
         </div>
