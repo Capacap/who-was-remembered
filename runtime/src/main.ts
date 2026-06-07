@@ -18,6 +18,7 @@ import {
 } from "./terrain";
 import { buildSky } from "./sky";
 import { createTouchControls } from "./touch";
+import { HARNESS_ON, setupHarness } from "./harness";
 import {
   buildDaylight,
   DAYLIGHT_FRAG_COMMON,
@@ -2317,7 +2318,13 @@ async function main() {
     40000,
   );
 
-  const renderer = new THREE.WebGLRenderer({ antialias: true });
+  // preserveDrawingBuffer only under the screenshot harness, so canvas.toDataURL()
+  // returns the last rendered frame rather than a cleared buffer. Off normally
+  // (it can cost a copy per frame); see harness.ts.
+  const renderer = new THREE.WebGLRenderer({
+    antialias: true,
+    preserveDrawingBuffer: HARNESS_ON,
+  });
   // Render scale — the biggest mobile lever. The scene is fill-bound (full-screen
   // sky/daylight/ground shaders) and the box field's vertex cost can't be culled (the
   // books are too concentrated for frustum/distance culling to bite), so the win has to
@@ -2990,6 +2997,19 @@ async function main() {
   mark("wiring");
   console.log(`[load] total ${(performance.now() - t0).toFixed(0)}ms to first frame`);
 
+  // Screenshot harness (dev-only, ?harness): when active it pins the camera to a
+  // fixed pose and freezes the drift clock so frames are reproducible. Inert
+  // otherwise. See harness.ts.
+  const harness = setupHarness({
+    camera,
+    daylight: daylight.uniforms,
+    teleporters,
+    sampleHeight,
+    eyeHeight: EYE_HEIGHT,
+    world,
+    renderer,
+  });
+
   const clock = new THREE.Clock();
   let mode: MoveMode = "walk";
   let sincePick = 0;
@@ -3006,7 +3026,8 @@ async function main() {
   const PICK_INTERVAL = 0.12; // ~8 Hz; the look-at label needn't be per-frame
   renderer.setAnimationLoop(() => {
     const dt = Math.min(clock.getDelta(), 0.1); // clamp after tab-out stalls
-    mode = update(dt);
+    // harness pins the camera in place of the controller; otherwise walk normally.
+    mode = harness.active ? harness.applyPose() : update(dt);
 
     // look-at picking: only while walking the scene (locked) and not inspecting.
     // Suppressed while skating so the glance prompt doesn't strobe as books blow past.
@@ -3060,6 +3081,8 @@ async function main() {
     // drift the daylight across the whole landscape (ground, books and
     // stones all sample the one shared mask + time).
     daylight.update(dt);
+    // harness: override the advance with a fixed clock so frames are reproducible.
+    if (harness.active) harness.freeze();
     // recentre the sky on the viewer (night dome wraps it, day layer rides overhead)
     // and deepen it with radial depth into the past. The day layer reads the field at
     // absolute world xz, so its openings stay world-locked as the player walks.
