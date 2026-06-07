@@ -1052,7 +1052,56 @@ function buildField(
   const farShowAttr = new THREE.BufferAttribute(farShow, 1);
   farShowAttr.setUsage(THREE.DynamicDrawUsage); // promotion flips a few thousand per rebuild
   farGeo.setAttribute("aShow", farShowAttr);
+  // Density-adaptive carpet thinning. The far base draws one point primitive per book, and
+  // the measured mobile bottleneck is primitive throughput (vertex+assembly+binning), worst
+  // when looking ACROSS the field where the deep dense clusters stack into a few horizon
+  // pixels -- thousands of primitives for a handful of resolvable specks. In a crowded cell
+  // the books overlap into the same pixels, so dropping a fraction is invisible while cutting
+  // primitives exactly where they pile up. Keyed on LOCAL CELL DENSITY (not distance), so it
+  // bakes ONCE: a book's crowding doesn't move with the player. Sparse cells (antiquity) are
+  // untouched -- the honest void keeps every dot. The near/mid detail tiers redraw full
+  // density within R_MID regardless, so walking up to a thinned cluster restores every book;
+  // this only thins the far base where the surplus is sub-pixel anyway.
+  // It thins by a constant FRACTION (drop every Nth), NOT a cap-to-count: a cap would flatten
+  // every dense cell to the same count and erase the present-vs-past density gradient that is
+  // the subject. A constant fraction keeps a present cell proportionally denser than a moderate
+  // one -- same gradient, half the primitives. KEEP_OF_N = keep 1 of every N in cells over MIN
+  // (2 = "every other"). MIN spares the sparse cells. Both tunable.
+  const CARPET_DENSE_MIN = 8; // books/32u-cell above which a cell is thinned
+  const CARPET_KEEP_OF_N = 6; // keep 1 in N of a dense cell's books when thinning is ON (mobile
+  //   default below). 6 is the on-device sweet spot: enough primitive cut to move the worst case
+  //   to ~25-30fps, with the R_MID density step acceptable at phone resolution. (2 = every other.)
+  const carpetKeep = new Uint8Array(n).fill(1);
+  for (let c = 0; c < gw * gh; c++) {
+    const s = cellStart[c];
+    const e = cellStart[c + 1];
+    if (e - s <= CARPET_DENSE_MIN) continue;
+    for (let k = s; k < e; k++) {
+      if ((k - s) % CARPET_KEEP_OF_N !== 0) carpetKeep[cellItems[k]] = 0;
+    }
+  }
+  let carpetKept = 0;
+  for (let i = 0; i < n; i++) if (carpetKeep[i]) carpetKept++;
+  const carpetIdxArr = new Uint32Array(carpetKept);
+  for (let i = 0, w = 0; i < n; i++) if (carpetKeep[i]) carpetIdxArr[w++] = i;
+  const carpetIdx = new THREE.BufferAttribute(carpetIdxArr, 1);
+  console.log(
+    `[perf] carpet thinning: ${carpetKept}/${n} kept (${((100 * carpetKept) / n).toFixed(1)}%, dropped ${n - carpetKept} in cells > ${CARPET_DENSE_MIN})`,
+  );
   const farPoints = new THREE.Points(farGeo, farPointsMat);
+  // Thinning is DEVICE-ADAPTIVE: on by default for coarse-pointer (mobile) devices, which
+  // need the primitive cut AND whose low resolution hides the R_MID density step; OFF on
+  // desktop, which has the GPU budget to draw the full cloud and where the step is plainly
+  // visible at full res. The thinned index always exists (built above), so the toggle below
+  // can A/B it on either device. carpetIdx applied = thinned; null = full non-indexed cloud.
+  const coarse = window.matchMedia("(pointer: coarse)").matches;
+  let carpetThin = coarse;
+  farGeo.setIndex(carpetThin ? carpetIdx : null);
+  const setCarpetThin = (on: boolean): void => {
+    carpetThin = on;
+    farGeo.setIndex(on ? carpetIdx : null);
+  };
+  const isCarpetThin = (): boolean => carpetThin;
   // whole-disc bounds always intersect the frustum and the cloud is cheap to run in full, so
   // don't pay computeBoundingSphere or per-frame cull tests — never culled, always drawn.
   farPoints.frustumCulled = false;
@@ -1219,6 +1268,8 @@ function buildField(
     isBoxVisible,
     setBooksVisible,
     isBooksVisible,
+    setCarpetThin,
+    isCarpetThin,
   };
 }
 
@@ -2656,6 +2707,26 @@ async function main() {
   }
   syncQuality();
 
+  // Far-book level of detail — player-facing, same segmented language as Resolution. "Low"
+  // thins the far point carpet in dense cells (the mobile primitive-throughput lever, see
+  // buildField); "Full" draws every far book. The field's setCarpetThin already defaults Low
+  // on coarse-pointer devices and Full on desktop, so syncLod just reflects that on open.
+  const lodOpts = Array.from(
+    document.querySelectorAll<HTMLButtonElement>("#lod-seg button"),
+  );
+  const syncLod = (): void => {
+    for (const b of lodOpts) {
+      b.classList.toggle("active", (b.dataset.lod === "low") === built.isCarpetThin());
+    }
+  };
+  for (const b of lodOpts) {
+    b.addEventListener("click", () => {
+      built.setCarpetThin(b.dataset.lod === "low");
+      syncLod();
+    });
+  }
+  syncLod();
+
   // The menu only ever opens on an Esc exit (overlay unlocks are suppressed above), so
   // the post-Esc re-lock cooldown is ALWAYS ticking when it appears — a documented fixed
   // 1250ms (Chromium kEffectiveUserEscapeDuration). Spin a little indicator for that
@@ -2676,6 +2747,7 @@ async function main() {
     devBoxEl.checked = built.isBoxVisible();
     devBooksEl.checked = built.isBooksVisible();
     syncQuality();
+    syncLod();
     syncDevOpts();
     pauseEl.style.display = "flex";
     // the readiness spinner is the post-Esc re-lock cooldown hint; touch has no pointer
@@ -2781,6 +2853,7 @@ async function main() {
     };
     mkBtn("dots", () => built.isBoxVisible(), (on) => built.setBoxVisible(on));
     mkBtn("books", () => built.isBooksVisible(), (on) => built.setBooksVisible(on));
+    mkBtn("thin", () => built.isCarpetThin(), (on) => built.setCarpetThin(on));
     mkBtn("flat", () => isFlatLit(), (on) => setFlatLit(on));
     mkBtn("fly", () => getFlying(), (on) => setFlying(on));
     document.body.appendChild(bar);
