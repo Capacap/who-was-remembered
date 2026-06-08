@@ -1437,8 +1437,30 @@ function buildTeleporters(list: Teleporter[], daylight: DaylightUniforms) {
 // at once. Layout documented in pipeline/export_runtime.py:export_meta.
 const YEAR_MISSING = -32768;
 
+// Fetch the gzipped sibling of a .bin and inflate it in-stream. Shipping it
+// pre-gzipped (rather than relying on the host to compress octet-stream, which
+// itch and others won't) gets the ~34MB string corpus to ~12MB on every host
+// and under Cloudflare Pages' 25 MiB per-file cap.
+//
+// The compressed file is named `foo.gz.bin`, NOT `foo.bin.gz`, on purpose: a
+// `.gz` extension makes many static servers (Vite dev, nginx, some CDNs) send
+// `Content-Encoding: gzip`, so the browser transparently inflates the body and
+// our DecompressionStream would then double-inflate and throw. Ending in `.bin`
+// keeps it an opaque octet-stream everywhere, so we always do the single inflate
+// ourselves — deterministic across hosts. Falls back to the plain `.bin` if the
+// compressed sibling is absent, so an old artifact + new code still loads.
+async function fetchMaybeGzip(url: string): Promise<ArrayBuffer> {
+  const gzUrl = url.replace(/\.bin$/, ".gz.bin");
+  const gz = await fetch(gzUrl);
+  if (gz.ok && gz.body) {
+    const stream = gz.body.pipeThrough(new DecompressionStream("gzip"));
+    return await new Response(stream).arrayBuffer();
+  }
+  return await (await fetch(url)).arrayBuffer();
+}
+
 async function loadMeta(url: string) {
-  const buf = await (await fetch(url)).arrayBuffer();
+  const buf = await fetchMaybeGzip(url);
   const dv = new DataView(buf);
   const n = dv.getUint32(0, true);
   const nameLen = dv.getUint32(4, true);

@@ -36,6 +36,8 @@ rather than packed into the binary, and the labels/era are wanted for UI later.
 
 from __future__ import annotations
 
+import gzip
+import io
 import json
 import struct
 from pathlib import Path
@@ -60,7 +62,7 @@ PLACEMENT_PATH = ROOT / "cache" / "layout.parquet"
 TELEPORTERS_PATH = ROOT / "cache" / "teleporters.parquet"
 OUT_PATH = ROOT.parent / "runtime" / "public" / "positions.bin"
 TELEPORTERS_OUT = ROOT.parent / "runtime" / "public" / "teleporters.json"
-META_OUT = ROOT.parent / "runtime" / "public" / "meta.bin"
+META_OUT = ROOT.parent / "runtime" / "public" / "meta.gz.bin"
 WORLD_OUT = ROOT.parent / "runtime" / "public" / "world.json"
 
 REF_YEAR = 2000  # the spawn year at radius R_INNER; matches stage6's (2000 - death)
@@ -95,7 +97,15 @@ def export_meta() -> int:
     """Per-figure label data for the look-at glance and inspect overlay, in the
     SAME row order as positions.bin so the renderer's instanceId indexes it
     directly. Packed binary, not JSON: the string blobs are decoded lazily (only
-    the book under the crosshair), so the ~30 MB never hits a JSON.parse. The
+    the book under the crosshair), so the payload never hits a JSON.parse. The
+    file is gzipped at rest (the name/desc blobs are ~3x compressible text):
+    ~34 MB raw -> ~12 MB on disk and over the wire, which both speeds the cold
+    load on every host and keeps the artifact under Cloudflare Pages' 25 MiB
+    per-file cap. The runtime inflates it with DecompressionStream. Named
+    `meta.gz.bin`, not `meta.bin.gz`: a `.gz` extension makes many hosts send
+    Content-Encoding: gzip (browser auto-inflates -> the runtime would then
+    double-inflate); ending in `.bin` keeps it an opaque octet-stream so the
+    single inflate always happens client-side, deterministically. The
     Wikipedia URL is derived client-side from the title. lead_text is omitted on
     purpose; it is large and belongs to per-tile delivery, not this prototype.
 
@@ -137,14 +147,18 @@ def export_meta() -> int:
     name_off, name_blob = pack(titles)
     desc_off, desc_blob = pack(descs)
 
-    with open(META_OUT, "wb") as f:
-        f.write(struct.pack("<III", n, len(name_blob), len(desc_blob)))
-        f.write(name_off.tobytes())
-        f.write(desc_off.tobytes())
-        f.write(birth.tobytes())
-        f.write(death.tobytes())
-        f.write(name_blob)
-        f.write(desc_blob)
+    buf = io.BytesIO()
+    buf.write(struct.pack("<III", n, len(name_blob), len(desc_blob)))
+    buf.write(name_off.tobytes())
+    buf.write(desc_off.tobytes())
+    buf.write(birth.tobytes())
+    buf.write(death.tobytes())
+    buf.write(name_blob)
+    buf.write(desc_blob)
+    # mtime=0 keeps the gzip header byte-stable across runs, so an unchanged
+    # corpus produces an identical artifact (clean diffs / cache hits).
+    with gzip.GzipFile(META_OUT, "wb", compresslevel=9, mtime=0) as f:
+        f.write(buf.getvalue())
     return n
 
 
