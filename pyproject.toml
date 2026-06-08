@@ -1,7 +1,7 @@
 [project]
-name = "wiki-exploration"
+name = "who-was-remembered"
 version = "0.1.0"
-description = "Preprocessing pipeline for the Wikipedia exploration art project"
+description = "Preprocessing pipeline for Who Was Remembered, an art piece built from Wikipedia data"
 requires-python = ">=3.11"
 dependencies = [
     "fast-simplification>=0.1.7",
