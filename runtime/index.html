@@ -657,6 +657,96 @@
         color: var(--ink-soft);
         font-size: 14px;
       }
+      /* dev book-search: a quiet ruled input + a scrolling result list in the same
+         ink-on-bone language as the teleport list (.tp-dest). Each row is a Jump
+         action (the name) plus a compass bookmark toggle (the star). */
+      #dev-find {
+        margin-top: 12px;
+      }
+      #dev-find-input {
+        width: 100%;
+        box-sizing: border-box;
+        background: rgba(44, 35, 23, 0.04);
+        border: none;
+        border-bottom: 1px solid var(--rule);
+        padding: 5px 2px;
+        font: inherit;
+        font-size: 14px;
+        color: var(--ink);
+      }
+      #dev-find-input::placeholder {
+        color: var(--ink-soft);
+        opacity: 0.75;
+      }
+      #dev-find-input:focus {
+        outline: none;
+        border-bottom-color: var(--ink-accent);
+      }
+      #dev-find-results {
+        margin-top: 4px;
+        max-height: 34vh;
+        overflow-y: auto;
+      }
+      .dev-find-row {
+        display: flex;
+        align-items: baseline;
+        gap: 6px;
+        border-bottom: 1px solid rgba(44, 35, 23, 0.1);
+      }
+      .dff-go {
+        flex: 1;
+        min-width: 0;
+        display: flex;
+        align-items: baseline;
+        gap: 8px;
+        padding: 5px 2px;
+        text-align: left;
+        background: none;
+        border: none;
+        border-left: 2px solid transparent;
+        color: var(--ink);
+        font: inherit;
+        font-size: 13px;
+        cursor: pointer;
+      }
+      .dff-go:hover {
+        background: rgba(44, 35, 23, 0.05);
+        border-left-color: var(--ink-accent);
+      }
+      .dff-go .dfn {
+        flex: 1;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        font-weight: 600;
+      }
+      .dff-go .dfy {
+        flex: none;
+        font-style: italic;
+        font-size: 12px;
+        color: var(--ink-soft);
+      }
+      .dff-mark {
+        flex: none;
+        background: none;
+        border: none;
+        padding: 2px 4px;
+        font: inherit;
+        font-size: 14px;
+        line-height: 1;
+        cursor: pointer;
+        color: var(--ink-soft);
+      }
+      .dff-mark.on {
+        color: var(--ink-accent);
+      }
+      .dev-find-empty {
+        padding: 6px 2px;
+        font-style: italic;
+        font-size: 13px;
+        color: var(--ink-soft);
+      }
       /* keycap chip ON the bone card: ink outline, not the bone-on-dark .key wears
          over the scene. Pushed to the row's right edge as a reference, not a button. */
       .pause-toggle .key {
@@ -853,6 +943,20 @@
               <input type="checkbox" id="dev-books" checked /> Book meshes
               <span class="key">M</span>
             </label>
+            <!-- find a book by name: jump to one (its row) or bookmark it on the
+                 compass (the ☆). Dev-only; the search index builds on first use. -->
+            <div id="dev-find">
+              <input
+                type="text"
+                id="dev-find-input"
+                placeholder="Find a book by name…"
+                autocomplete="off"
+                autocapitalize="off"
+                autocorrect="off"
+                spellcheck="false"
+              />
+              <div id="dev-find-results"></div>
+            </div>
           </div>
         </div>
       </div>

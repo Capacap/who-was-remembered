@@ -1829,6 +1829,10 @@ function createController(camera: THREE.PerspectiveCamera, dom: HTMLElement) {
   let lastAppliedY = camera.position.y;
 
   const onKeyDown = (e: KeyboardEvent) => {
+    // ignore game hotkeys while a text field is focused (the dev book-search box):
+    // otherwise typing a name toggles fly on the F and seeds the movement key set.
+    const tgt = e.target as HTMLElement | null;
+    if (tgt && (tgt.tagName === "INPUT" || tgt.tagName === "TEXTAREA")) return;
     if (e.code === "KeyF") {
       flying = !flying; // dev fly toggle; drop carried momentum so neither mode lurches
       vel.set(0, 0, 0);
@@ -2388,9 +2392,11 @@ async function main() {
   function showGlance(a: { kind: "book" | "tp"; i: number }) {
     if (a.kind === "tp") {
       const tp = teleporters[a.i];
+      // Name only the place and era, never a single figure: the gate sits on its
+      // members' centroid, not on any one of them, so calling out "Leo Tolstoy"
+      // promised a person who isn't here. The label is a region, which is honest.
       glance.innerHTML =
         `<div class="name">◎ ${escapeHtml(tp.label)}</div>` +
-        (tp.seat ? `<div class="desc">${escapeHtml(tp.seat)}</div>` : "") +
         (tp.era ? `<div class="years">${escapeHtml(tp.era)}</div>` : "") +
         actLine("travel");
       glance.style.display = "block";
@@ -2481,7 +2487,7 @@ async function main() {
       .sort((a, b) => a.d - b.d)
       .map((o) => {
         const tp = teleporters[o.i];
-        const line = `${escapeHtml(tp.era)} · ${escapeHtml(tp.seat)} · ${Math.round(o.d).toLocaleString()}u`;
+        const line = `${escapeHtml(tp.era)} · ${Math.round(o.d).toLocaleString()}u`;
         return (
           `<button class="tp-dest" data-i="${o.i}">` +
           `<span class="tp-label">${escapeHtml(tp.label)}</span>` +
@@ -2734,6 +2740,87 @@ async function main() {
   devPerfEl.addEventListener("change", () => setPerf(devPerfEl.checked));
   devCarpetEl.addEventListener("change", () => built.setCarpetVisible(devCarpetEl.checked));
   devBooksEl.addEventListener("change", () => built.setBooksVisible(devBooksEl.checked));
+
+  // --- dev: find a book by name ----------------------------------------------
+  // Type a name, get matching books; a row jumps you straight there, the ☆ drops a
+  // ◆ on the compass (the same bookmark the inspect card toggles) so you can walk to
+  // it. There's no title->index map and 576k titles, so the lowercased search index
+  // is built once on first use and the filter is debounced. Behind the dev gate.
+  const findInput = document.getElementById("dev-find-input") as HTMLInputElement;
+  const findResults = document.getElementById("dev-find-results") as HTMLDivElement;
+  const FIND_LIMIT = 40;
+  let findIndex: string[] | null = null;
+  let findTimer = 0;
+
+  // jump the player onto a book. Mirrors Return to start: re-lock on this click's
+  // gesture, then reposition under cover of the fade so the pop is never seen.
+  const teleportToBook = (i: number) => {
+    resume();
+    fade.style.opacity = "1";
+    window.setTimeout(() => {
+      const x = built.px[i];
+      const z = built.pz[i];
+      camera.position.set(x, sampleHeight(x, z) + EYE_HEIGHT, z);
+      stop();
+      fade.style.opacity = "0";
+    }, 300);
+  };
+
+  const renderFind = () => {
+    const q = findInput.value.trim().toLowerCase();
+    if (!q) {
+      findResults.innerHTML = "";
+      return;
+    }
+    if (!findIndex) {
+      findIndex = new Array<string>(meta.n);
+      for (let i = 0; i < meta.n; i++) findIndex[i] = meta.name(i).toLowerCase();
+    }
+    const hits: number[] = [];
+    for (let i = 0; i < findIndex.length && hits.length < FIND_LIMIT; i++) {
+      if (findIndex[i].includes(q)) hits.push(i);
+    }
+    if (!hits.length) {
+      findResults.innerHTML = `<div class="dev-find-empty">no match</div>`;
+      return;
+    }
+    findResults.innerHTML = hits
+      .map((i) => {
+        const years = fmtYears(meta.birth[i], meta.death[i]);
+        const on = compass.has(i);
+        return (
+          `<div class="dev-find-row">` +
+          `<button class="dff-go" data-i="${i}" title="Jump here">` +
+          `<span class="dfn">${escapeHtml(meta.name(i))}</span>` +
+          (years ? `<span class="dfy">${escapeHtml(years)}</span>` : "") +
+          `</button>` +
+          `<button class="dff-mark${on ? " on" : ""}" data-i="${i}" ` +
+          `title="Bookmark on compass">${on ? "★" : "☆"}</button>` +
+          `</div>`
+        );
+      })
+      .join("");
+  };
+
+  findResults.addEventListener("click", (e) => {
+    const t = e.target as HTMLElement;
+    const go = t.closest(".dff-go") as HTMLElement | null;
+    if (go) {
+      teleportToBook(Number(go.dataset.i));
+      return;
+    }
+    const mark = t.closest(".dff-mark") as HTMLElement | null;
+    if (mark) {
+      const on = compass.toggle(Number(mark.dataset.i));
+      mark.textContent = on ? "★" : "☆";
+      mark.classList.toggle("on", on);
+    }
+  });
+
+  findInput.addEventListener("input", () => {
+    if (findTimer) clearTimeout(findTimer);
+    findTimer = window.setTimeout(renderFind, 120);
+  });
   // DEV_DEFAULT: surface the perf HUD and pre-expand the dev section so a test build is ready
   // to read the instant it loads -- no Esc-into-menu-and-tick-Developer-mode each run.
   if (DEV_DEFAULT) {
