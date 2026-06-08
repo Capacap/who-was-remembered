@@ -585,6 +585,11 @@
         margin-top: 16px;
         color: var(--ink);
       }
+      /* display:flex above out-specifies the UA [hidden] rule, so a hidden setting
+         row would still show — restore the hide for the feature-gated fullscreen row. */
+      .pause-setting[hidden] {
+        display: none;
+      }
       .pause-seg {
         margin-left: auto;
         display: inline-flex;
@@ -721,8 +726,21 @@
         right: calc(env(safe-area-inset-right, 0px) + 14px);
         width: 42px;
         height: 42px;
-        font-size: 16px;
-        line-height: 1;
+        /* the glyph is DRAWN, not a ⏸ character: the Unicode pause symbol renders
+           as the phone's own colour emoji (an orange icon) inside our dark chip,
+           clashing with the bone-on-dark HUD. Two CSS bars keep it on-style. */
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 5px;
+      }
+      #touch-pause::before,
+      #touch-pause::after {
+        content: "";
+        width: 4px;
+        height: 15px;
+        border-radius: 1px;
+        background: var(--bone-text);
       }
 
       /* fade-to-black for the jump. Above everything (HUD included) while the
@@ -787,6 +805,15 @@
             <button type="button" data-legend="off">Hide</button>
           </span>
         </div>
+        <!-- hidden by JS where the Fullscreen API is absent (iPhone Safari); there the
+             chromeless path is Add-to-Home-Screen via the web manifest. -->
+        <div class="pause-setting" id="fullscreen-row" hidden>
+          <span>Fullscreen</span>
+          <span class="pause-seg" id="fullscreen-seg">
+            <button type="button" data-fs="on">On</button>
+            <button type="button" data-fs="off">Off</button>
+          </span>
+        </div>
         <div id="pause-dev">
           <label class="pause-toggle">
             <input type="checkbox" id="dev-mode" /> Developer mode
@@ -823,7 +850,7 @@
     <div id="touch">
       <div id="touch-stick"><div id="touch-thumb"></div></div>
       <button id="touch-skate" type="button">Skate</button>
-      <button id="touch-pause" type="button" aria-label="Pause">⏸</button>
+      <button id="touch-pause" type="button" aria-label="Pause"></button>
     </div>
     <script type="module" src="/src/main.ts"></script>
   </body>

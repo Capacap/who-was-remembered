@@ -2605,6 +2605,49 @@ async function main() {
   }
   syncLegend();
 
+  // Fullscreen toggle — the mobile answer to accidental nav-button/back taps (going
+  // fullscreen hides the system bars on Android). Feature-detected: iPhone Safari has
+  // no Fullscreen API, so the row stays hidden there (the iOS path is Add-to-Home-
+  // Screen via the manifest). The seg mirrors the live document.fullscreenElement, so
+  // an external exit (swipe/Esc) re-syncs the buttons.
+  const fsRow = document.getElementById("fullscreen-row") as HTMLDivElement;
+  const docEl = document.documentElement as HTMLElement & {
+    webkitRequestFullscreen?: () => Promise<void>;
+  };
+  const fsRequest = docEl.requestFullscreen || docEl.webkitRequestFullscreen;
+  const fsExit =
+    document.exitFullscreen ||
+    (document as Document & { webkitExitFullscreen?: () => Promise<void> })
+      .webkitExitFullscreen;
+  const fsElement = () =>
+    document.fullscreenElement ||
+    (document as Document & { webkitFullscreenElement?: Element })
+      .webkitFullscreenElement;
+  if (fsRequest && fsExit) {
+    fsRow.hidden = false;
+    const fsOpts = Array.from(
+      document.querySelectorAll<HTMLButtonElement>("#fullscreen-seg button"),
+    );
+    const syncFs = (): void => {
+      const on = !!fsElement();
+      for (const b of fsOpts) {
+        b.classList.toggle("active", (b.dataset.fs === "on") === on);
+      }
+    };
+    for (const b of fsOpts) {
+      b.addEventListener("click", () => {
+        const want = b.dataset.fs === "on";
+        // the click is the user gesture the API requires; swallow rejections (e.g.
+        // the request races a permission state) so the menu never throws.
+        if (want && !fsElement()) fsRequest.call(docEl).catch(() => {});
+        else if (!want && fsElement()) fsExit.call(document).catch(() => {});
+      });
+    }
+    document.addEventListener("fullscreenchange", syncFs);
+    document.addEventListener("webkitfullscreenchange", syncFs);
+    syncFs();
+  }
+
   // The menu only ever opens on an Esc exit (overlay unlocks are suppressed above), so
   // the post-Esc re-lock cooldown is ALWAYS ticking when it appears — a documented fixed
   // 1250ms (Chromium kEffectiveUserEscapeDuration). Spin a little indicator for that
@@ -2773,7 +2816,9 @@ async function main() {
       `<div class="ctl"><span class="key">Left ½</span><span class="act">Move</span></div>` +
       `<div class="ctl"><span class="key">Right ½</span><span class="act">Look</span></div>` +
       `<div class="ctl"><span class="key">Tap</span><span class="act">Inspect</span></div>` +
-      `<div class="ctl"><span class="key">⏸</span><span class="act">Pause</span></div>`;
+      // ‖ not ⏸: the pause character renders as the phone's orange colour emoji; the
+      // double-bar is plain text and mirrors the drawn corner button. See index.html.
+      `<div class="ctl"><span class="key">‖</span><span class="act">Pause</span></div>`;
     touch = createTouchControls({
       onMove: (x, y) => setMoveAxis(x, y),
       onLook: (dx, dy) => addLook(dx, dy),
