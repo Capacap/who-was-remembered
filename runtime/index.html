@@ -895,6 +895,23 @@
           <span id="pause-spinner" aria-hidden="true"></span>
         </div>
         <button id="pause-respawn">Return to start</button>
+        <!-- Ordered by reach, then by kind: the two most-touched controls (Volume,
+             Fullscreen) sit up top by the actions; the set-once performance levers and
+             the hint toggle drop below; Developer mode stays last behind its gate. -->
+        <div class="pause-setting">
+          <span>Volume</span>
+          <input type="range" id="wind-vol" class="pause-range"
+            min="0" max="100" value="60" aria-label="Volume" />
+        </div>
+        <!-- hidden by JS where the Fullscreen API is absent (iPhone Safari); there the
+             chromeless path is Add-to-Home-Screen via the web manifest. -->
+        <div class="pause-setting" id="fullscreen-row" hidden>
+          <span>Fullscreen</span>
+          <span class="pause-seg" id="fullscreen-seg">
+            <button type="button" data-fs="on">On</button>
+            <button type="button" data-fs="off">Off</button>
+          </span>
+        </div>
         <div class="pause-setting">
           <span>Resolution</span>
           <span class="pause-seg" id="quality-seg">
@@ -911,24 +928,10 @@
           </span>
         </div>
         <div class="pause-setting">
-          <span>Volume</span>
-          <input type="range" id="wind-vol" class="pause-range"
-            min="0" max="100" value="60" aria-label="Volume" />
-        </div>
-        <div class="pause-setting">
           <span>Controls hint</span>
           <span class="pause-seg" id="legend-seg">
             <button type="button" data-legend="on">Show</button>
             <button type="button" data-legend="off">Hide</button>
-          </span>
-        </div>
-        <!-- hidden by JS where the Fullscreen API is absent (iPhone Safari); there the
-             chromeless path is Add-to-Home-Screen via the web manifest. -->
-        <div class="pause-setting" id="fullscreen-row" hidden>
-          <span>Fullscreen</span>
-          <span class="pause-seg" id="fullscreen-seg">
-            <button type="button" data-fs="on">On</button>
-            <button type="button" data-fs="off">Off</button>
           </span>
         </div>
         <div id="pause-dev">
