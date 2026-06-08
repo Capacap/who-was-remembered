@@ -1,23 +1,42 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
-  <!-- Placeholder app icon for "Who Was Remembered": a single bone book standing in
-       the dark storm field. Maskable-safe (dark bleeds to the edges, the book sits
-       inside the centre safe zone). Replace with final art when ready. -->
+  <!-- App icon for "Who Was Remembered": the orange landmark book — the one
+       remembered life, lit warm — standing in the dark storm field. The orange
+       book is a real game object (the notability beacon); this mirrors it.
+       Maskable-safe: dark bleeds to the edges, the book sits centred inside the
+       safe circle. Flat faceted facets + one soft gradient on the lit cover;
+       both radial fields centred so nothing clips at the frame edge. -->
   <defs>
-    <radialGradient id="field" cx="50%" cy="42%" r="72%">
-      <stop offset="0%" stop-color="#1c1610"/>
+    <radialGradient id="field" cx="50%" cy="50%" r="78%">
+      <stop offset="0%" stop-color="#1b150f"/>
       <stop offset="100%" stop-color="#0a0703"/>
     </radialGradient>
+    <!-- the proximity warm-light pool the field has near the player -->
+    <radialGradient id="glow" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#c5621f" stop-opacity="0.40"/>
+      <stop offset="55%" stop-color="#a8501a" stop-opacity="0.13"/>
+      <stop offset="100%" stop-color="#a8501a" stop-opacity="0"/>
+    </radialGradient>
+    <!-- soft, almost-flat rake across the lit cover (sun from upper-left) -->
+    <linearGradient id="cover" x1="18%" y1="6%" x2="86%" y2="98%">
+      <stop offset="0%" stop-color="#ef8b33"/>
+      <stop offset="100%" stop-color="#d66f22"/>
+    </linearGradient>
   </defs>
+
   <rect width="512" height="512" fill="url(#field)"/>
-  <!-- faint ground line under the book -->
-  <rect x="150" y="372" width="212" height="2" fill="#e9dfc8" opacity="0.18"/>
-  <!-- pages (right depth strip) -->
-  <rect x="298" y="150" width="12" height="220" rx="2" fill="#cabfa0"/>
-  <!-- spine / cover -->
-  <rect x="214" y="144" width="86" height="228" rx="6" fill="#e9dfc8"/>
-  <!-- two title bands, ink on bone -->
-  <rect x="230" y="180" width="54" height="7" rx="3" fill="#2c2317" opacity="0.85"/>
-  <rect x="230" y="198" width="38" height="7" rx="3" fill="#2c2317" opacity="0.85"/>
-  <!-- a single warm-accent thread near the foot (the field's one accent) -->
-  <rect x="230" y="344" width="54" height="5" rx="2" fill="#9e4a2a"/>
+  <rect width="512" height="512" fill="url(#glow)"/>
+
+  <!-- bottom cover board (darkest facet, the cover edge below the pages) -->
+  <path d="M 102 330 L 410 330 L 402 355 L 110 355 Z" fill="#8f4216"/>
+
+  <!-- page block (cream stack), inset so the covers overhang it -->
+  <path d="M 108 302 L 404 302 L 396 330 L 116 330 Z" fill="#e7dcc4"/>
+  <path d="M 119 312 L 393 312" stroke="#c8bc99" stroke-width="3" opacity="0.55"/>
+  <path d="M 117 320 L 395 320" stroke="#c8bc99" stroke-width="3" opacity="0.4"/>
+
+  <!-- top cover front edge (the cover board's thickness — mid warm facet) -->
+  <path d="M 94 282 L 418 282 L 410 302 L 102 302 Z" fill="#b85d1e"/>
+
+  <!-- top cover face (lit, soft-gradient orange) -->
+  <path d="M 136 159 L 376 159 L 418 282 L 94 282 Z" fill="url(#cover)"/>
 </svg>
