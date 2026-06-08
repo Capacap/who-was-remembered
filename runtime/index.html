@@ -609,6 +609,14 @@
         display: inline-flex;
         gap: 12px;
       }
+      /* wind volume: a slim native range, accent-tinted to match the dev checkboxes
+         and the active segmented value. Native control, same accent-color convention. */
+      .pause-range {
+        margin-left: auto;
+        width: 120px;
+        accent-color: var(--ink-accent);
+        cursor: pointer;
+      }
       .pause-seg button {
         background: none;
         border: none;
@@ -901,6 +909,11 @@
             <button type="button" data-lod="full">Full</button>
             <button type="button" data-lod="low">Low</button>
           </span>
+        </div>
+        <div class="pause-setting">
+          <span>Volume</span>
+          <input type="range" id="wind-vol" class="pause-range"
+            min="0" max="100" value="60" aria-label="Volume" />
         </div>
         <div class="pause-setting">
           <span>Controls hint</span>

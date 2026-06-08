@@ -17,6 +17,7 @@ import {
 } from "./terrain";
 import { buildSky } from "./sky";
 import { createTouchControls } from "./touch";
+import { createWind } from "./wind";
 import { HARNESS_ON, setupHarness } from "./harness";
 import {
   buildDaylight,
@@ -1827,6 +1828,10 @@ function createController(camera: THREE.PerspectiveCamera, dom: HTMLElement) {
   let vSurf = 0;
   let liftCur = 0;
   let lastAppliedY = camera.position.y;
+  // smoothed magnitude of the eye's vertical velocity (dune rises/falls + hops), so the
+  // wind's speed signal swells as you skate over terrain, not just along the flat.
+  let prevEyeY = camera.position.y;
+  let vVert = 0;
 
   const onKeyDown = (e: KeyboardEvent) => {
     // ignore game hotkeys while a text field is focused (the dev book-search box):
@@ -1977,6 +1982,7 @@ function createController(camera: THREE.PerspectiveCamera, dom: HTMLElement) {
       grounded = true;
       vSurf = 0;
       prevBodyTop = bodyTop;
+      prevEyeY = eyeY; // adopt the new height; a teleport isn't a dune to whoosh over
     }
 
     // smoothed rate the ground rises under the body: the climb speed a crest inherits.
@@ -2008,6 +2014,11 @@ function createController(camera: THREE.PerspectiveCamera, dom: HTMLElement) {
       }
     }
 
+    // vertical eye speed (physics height, lift-free), lightly smoothed: this is what
+    // makes the wind gust as you crest and drop dunes at speed.
+    vVert += (Math.abs((eyeY - prevEyeY) / dt) - vVert) * (1 - Math.exp(-8 * dt));
+    prevEyeY = eyeY;
+
     // cosmetic skate lift, eased in/out, applied on top of the physics eye height.
     const liftTarget = skating ? MOVE.hoverLift : 0;
     liftCur += (liftTarget - liftCur) * (1 - Math.exp(-MOVE.followK * dt));
@@ -2019,6 +2030,10 @@ function createController(camera: THREE.PerspectiveCamera, dom: HTMLElement) {
 
   // zero the carried velocity (teleport/spawn shouldn't arrive mid-glide).
   const stop = () => vel.set(0, 0, 0);
+
+  // speed the wind couples to (units/sec): horizontal glide plus the eye's vertical
+  // rate, so cresting dunes at a skate adds its own gust on top of the flat-out rush.
+  const getSpeed = () => Math.hypot(vel.x, vel.z, vVert);
 
   // flight is a dev affordance; the pause menu drives it through the same path as
   // the F key (drop carried momentum so neither mode lurches), and reads it back to
@@ -2055,6 +2070,7 @@ function createController(camera: THREE.PerspectiveCamera, dom: HTMLElement) {
     controls,
     update,
     stop,
+    getSpeed,
     getFlying,
     setFlying,
     setTouchActive,
@@ -2150,6 +2166,7 @@ async function main() {
     controls,
     update,
     stop,
+    getSpeed,
     getFlying,
     setFlying,
     setTouchActive,
@@ -2161,6 +2178,17 @@ async function main() {
   // dev hook, same convention as window.MOVE: lets the camera be posed/inspected from the
   // devtools console (or a headless screenshot) without pointer lock or a rebuild.
   (window as unknown as { CAM: THREE.PerspectiveCamera }).CAM = camera;
+
+  // Procedural desert wind (see wind.ts): zero-payload Web Audio, volume on the pause
+  // slider, rush coupled to skate speed in the render loop. The AudioContext can only
+  // start inside a user gesture, so unlock it on the first interaction — the same tap/
+  // click/key that the player must make to enter the scene anyway. Idempotent and
+  // one-shot per event type.
+  const wind = createWind();
+  const unlockAudio = () => wind.resume();
+  for (const ev of ["pointerdown", "keydown", "touchstart"] as const) {
+    window.addEventListener(ev, unlockAudio, { once: true });
+  }
 
   // perf monitor: stats.js panel (click to cycle FPS / ms / MB) plus a text
   // readout of the numbers that actually tell us if the book LOD is working,
@@ -2611,6 +2639,20 @@ async function main() {
   }
   syncLegend();
 
+  // Wind volume — player-facing range, 0 disables. The slider IS the off switch (the
+  // wind is part of the piece, so it ships audible with a low default); the choice
+  // persists. The render loop drives the actual sound; this only sets the target.
+  const windSlider = document.getElementById("wind-vol") as HTMLInputElement;
+  const savedWind = localStorage.getItem("windVolume");
+  const initWindVol = savedWind !== null ? Number(savedWind) : 0.6;
+  windSlider.value = String(Math.round(initWindVol * 100));
+  wind.setVolume(initWindVol);
+  windSlider.addEventListener("input", () => {
+    const v = Number(windSlider.value) / 100;
+    wind.setVolume(v);
+    localStorage.setItem("windVolume", String(v));
+  });
+
   // Fullscreen toggle — the mobile answer to accidental nav-button/back taps (going
   // fullscreen hides the system bars on Android). Feature-detected: iPhone Safari has
   // no Fullscreen API, so the row stays hidden there (the iOS path is Add-to-Home-
@@ -3009,6 +3051,11 @@ async function main() {
     const dt = Math.min(clock.getDelta(), 0.1); // clamp after tab-out stalls
     // harness pins the camera in place of the controller; otherwise walk normally.
     mode = harness.active ? harness.applyPose() : update(dt);
+
+    // wind: the rush layer tracks ground speed (normalised by the skate top speed, so a
+    // walk sits near silent and only a fast skate brings it up); then ease everything.
+    wind.setSpeed(getSpeed() / MOVE.skate.max);
+    wind.update(dt);
 
     // look-at picking: only while walking the scene (locked) and not inspecting.
     // Suppressed while skating so the glance prompt doesn't strobe as books blow past.
