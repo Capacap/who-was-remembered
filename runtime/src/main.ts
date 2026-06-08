@@ -2892,11 +2892,14 @@ async function main() {
 
     // controls legend: a dim persistent line (.show) while in play, brightened
     // (.intro) for the first INTRO_MS until the intro timer flips introElapsed.
-    // Both suppressed while an overlay/menu is up or the hint is toggled off.
+    // Suppressed while an inspect overlay is up or the hint is toggled off — but
+    // the pause menu KEEPS it (bright), so the reference is there when you stop to
+    // look, and the pause "Controls hint" toggle demonstrates itself live.
     {
-      const live = legendOn && inScene() && !overlayOpen;
+      const paused = pauseEl.style.display !== "none";
+      const live = legendOn && !overlayOpen && (inScene() || paused);
       controlsHud.classList.toggle("show", live);
-      controlsHud.classList.toggle("intro", live && !introElapsed);
+      controlsHud.classList.toggle("intro", live && (paused || !introElapsed));
     }
 
     // the ground is static (built once); only the books refill by LOD as the camera

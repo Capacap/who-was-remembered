@@ -43,6 +43,14 @@
         --accent-bright: #63d2c6; /* teal on the dark scene (reticle, marks) */
         --ink-accent: #9e4a2a; /* warm accent on the bone card (link, bookmarked) */
         --serif: "Spectral", Georgia, "Times New Roman", serif;
+        /* --ui-base is the single viewport-responsive HUD type knob. It tracks
+           window width (vw) between a phone floor and a large-display ceiling, so
+           the floating labels stay proportional to the viewport instead of fixed
+           px (which read tiny on a 1440p desktop and oversized on a phone). The
+           glance and controls legend derive their sizes from it by ratio, so the
+           whole museum-label family scales as one. Tuned: ~10.5px @ 390 (phone),
+           ~14.5px @ 1280 (half-width desktop), capped 17px on wide screens. */
+        --ui-base: clamp(10px, 8.75px + 0.45vw, 17px);
         /* --engrave is the throughline for ALL floating HUD text: a fine dark
            casing (a ring of 1px shadows forming a continuous outline) plus a soft
            glow. Every chromeless element — compass, glance, status line, travel
@@ -149,6 +157,10 @@
         position: fixed;
         left: 14px;
         bottom: 36px;
+        /* above the pause scrim (#pause has no z-index, paints later): the legend
+           stays bright while paused instead of sitting under the ~0.5 dimmer. It's
+           bottom-left, clear of the centred pause card, so no overlap. */
+        z-index: 210;
         font-family: var(--serif);
         color: var(--bone-text);
         text-shadow: var(--engrave);
@@ -164,11 +176,22 @@
         opacity: 0.95;
       }
       .ctl {
-        font-size: 12px;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        font-size: var(--ui-base);
         letter-spacing: 1px;
         text-transform: uppercase;
-        line-height: 2;
+        line-height: 1;
+        padding: 4px 0;
         opacity: 0.92;
+      }
+      .ctl .key {
+        min-width: 3.6em;
+        margin: 0;
+      }
+      .ctl .act {
+        opacity: 0.85;
       }
 
       /* ── glance (chromeless wall text) ───────────────────────────────────
@@ -182,7 +205,7 @@
         left: 50%;
         top: calc(50% + 28px);
         transform: translateX(-50%);
-        max-width: 460px;
+        max-width: min(90vw, 520px);
         text-align: center;
         color: var(--bone-text);
         font-family: var(--serif);
@@ -192,20 +215,20 @@
         display: none;
       }
       #glance .name {
-        font-size: 23px;
+        font-size: calc(var(--ui-base) * 1.95);
         font-weight: 600;
         letter-spacing: 0.2px;
       }
       #glance .desc {
-        font-size: 15.5px;
+        font-size: calc(var(--ui-base) * 1.27);
         font-style: italic;
         opacity: 0.92;
-        margin-top: 2px;
+        margin-top: 3px;
       }
       #glance .years {
-        font-size: 14px;
+        font-size: calc(var(--ui-base) * 1.12);
         opacity: 0.78;
-        margin-top: 2px;
+        margin-top: 3px;
         font-variant-numeric: tabular-nums;
       }
 
@@ -313,7 +336,10 @@
         left: 50%;
         top: 16px;
         transform: translateX(-50%);
-        width: 520px;
+        /* responsive width: 520px overflows a phone (wider than the viewport, so the
+           edge marks fall off-screen). Marks are positioned by JS in %, so the strip
+           can shrink freely. min() keeps it phone-safe and caps it on wide screens. */
+        width: min(92vw, 560px);
         height: 34px;
         pointer-events: none;
         user-select: none;
@@ -343,7 +369,7 @@
         left: 50%;
         top: 0;
         transform: translateX(-50%);
-        font-size: 12px;
+        font-size: calc(var(--ui-base) * 0.85);
         letter-spacing: 1px;
         text-transform: uppercase;
         opacity: 0.85;
@@ -354,7 +380,7 @@
         position: absolute;
         top: 13px;
         transform: translateX(-50%);
-        font-size: 16px;
+        font-size: calc(var(--ui-base) * 1.05);
         line-height: 1;
       }
       /* the time axis reads as warm light; your own bookmarks take the cool accent
@@ -371,7 +397,7 @@
         left: 50%;
         top: 36px;
         transform: translateX(-50%);
-        font-size: 13px;
+        font-size: calc(var(--ui-base) * 0.92);
         white-space: nowrap;
         text-align: center;
         color: var(--bone-text);
@@ -716,12 +742,10 @@
       <div id="compass-label"></div>
     </div>
     <div id="controls">
-      <div class="ctl">
-        <span class="key">WASD</span> move · <span class="key">Shift</span> skate
-      </div>
-      <div class="ctl">
-        click to look · <span class="key">Esc</span> pause
-      </div>
+      <div class="ctl"><span class="key">WASD</span><span class="act">Move</span></div>
+      <div class="ctl"><span class="key">Shift</span><span class="act">Skate</span></div>
+      <div class="ctl"><span class="key">Click</span><span class="act">Look</span></div>
+      <div class="ctl"><span class="key">Esc</span><span class="act">Pause</span></div>
     </div>
     <div id="overlay">
       <div id="card"></div>
