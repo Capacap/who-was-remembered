@@ -32,6 +32,12 @@ stage 6 change:
 Also writes runtime/public/teleporters.json: the 26 fast-travel monuments as a
 small array of {label, x, y, era, seat, n}. Tiny enough to ship as plain JSON
 rather than packed into the binary, and the labels/era are wanted for UI later.
+
+And runtime/public/spawn_anchors.json: a curated set of recent landmark figures
+the opening vista is anchored to. The runtime spawns the player at the inner rim
+on one anchor's bearing, facing outward, so the first thing seen is a recognisable
+name a few steps ahead rather than the empty plaza. Anchored to QIDs (not raw
+coordinates) so the set survives any re-layout, exactly like the teleporters.
 """
 
 from __future__ import annotations
@@ -62,8 +68,52 @@ PLACEMENT_PATH = ROOT / "cache" / "layout.parquet"
 TELEPORTERS_PATH = ROOT / "cache" / "teleporters.parquet"
 OUT_PATH = ROOT.parent / "runtime" / "public" / "positions.bin"
 TELEPORTERS_OUT = ROOT.parent / "runtime" / "public" / "teleporters.json"
+SPAWN_ANCHORS_OUT = ROOT.parent / "runtime" / "public" / "spawn_anchors.json"
 META_OUT = ROOT.parent / "runtime" / "public" / "meta.gz.bin"
 WORLD_OUT = ROOT.parent / "runtime" / "public" / "world.json"
+
+# Curated opening-vista anchors: globally recognisable figures who died before
+# 2000 (so they sit near the rim), spread across the angular sectors so the
+# opening varies by session. The list is intentionally Western-heavy -- that
+# mirrors both the corpus bias the piece is about and the likely audience -- with
+# the rarer non-Western names kept in as the quieter draw. No dictators: the
+# tier's top-by-sitelink slots are full of them, so this is hand-picked for tone,
+# favouring artists, writers, scientists and humane icons. Anchored by QID; the
+# runtime resolves each to its current layout position.
+SPAWN_ANCHOR_QIDS = [
+    # Americas (sectors 2-4)
+    "Q4616",   # Marilyn Monroe
+    "Q8704",   # Walt Disney
+    "Q7245",   # Mark Twain
+    "Q1779",   # Louis Armstrong
+    "Q5588",   # Frida Kahlo
+    "Q23434",  # Ernest Hemingway
+    "Q303",    # Elvis Presley
+    "Q409",    # Bob Marley
+    "Q5603",   # Andy Warhol
+    "Q8027",   # Martin Luther King Jr.
+    "Q160534", # Jack Kerouac
+    "Q909",    # Jorge Luis Borges
+    # Europe (sectors 5-6)
+    "Q882",    # Charlie Chaplin
+    "Q937",    # Albert Einstein
+    "Q5577",   # Salvador Dalí
+    "Q35064",  # Agatha Christie
+    "Q9036",   # Nikola Tesla
+    "Q30875",  # Oscar Wilde
+    "Q7251",   # Alan Turing
+    "Q5593",   # Pablo Picasso
+    "Q905",    # Franz Kafka
+    "Q7186",   # Marie Curie
+    # East of there (sectors 7-10)
+    "Q892",    # J. R. R. Tolkien
+    "Q5685",   # Anton Chekhov
+    "Q1001",   # Mahatma Gandhi
+    "Q8873",   # Satyajit Ray
+    "Q3335",   # George Orwell
+    "Q7241",   # Rabindranath Tagore
+    "Q8006",   # Akira Kurosawa
+]
 
 REF_YEAR = 2000  # the spawn year at radius R_INNER; matches stage6's (2000 - death)
 
@@ -90,6 +140,33 @@ def export_teleporters() -> int:
     ]
     TELEPORTERS_OUT.parent.mkdir(parents=True, exist_ok=True)
     TELEPORTERS_OUT.write_text(json.dumps(rows, ensure_ascii=False, indent=0))
+    return len(rows)
+
+
+def export_spawn_anchors() -> int:
+    """Resolve the curated QID list to its current layout positions and write
+    spawn_anchors.json. Order follows SPAWN_ANCHOR_QIDS; a QID that no longer
+    survives the filter is dropped with a warning rather than failing the export
+    (the corpus can shift under a re-run). The runtime derives bearing and spawn
+    radius from x/y, so only position + title (for the dev cycle HUD) ship.
+    """
+    t = pq.read_table(PLACEMENT_PATH, columns=["qid", "title", "x", "y"])
+    by_qid = {r["qid"]: r for r in t.to_pylist()}
+    rows = []
+    for qid in SPAWN_ANCHOR_QIDS:
+        r = by_qid.get(qid)
+        if r is None:
+            print(f"  WARNING: spawn anchor {qid} not in layout -- dropped")
+            continue
+        rows.append(
+            {
+                "qid": qid,
+                "title": r["title"],
+                "x": round(r["x"], 1),
+                "y": round(r["y"], 1),
+            }
+        )
+    SPAWN_ANCHORS_OUT.write_text(json.dumps(rows, ensure_ascii=False, indent=0))
     return len(rows)
 
 
@@ -227,6 +304,9 @@ def main() -> None:
 
     n_tp = export_teleporters()
     print(f"wrote {n_tp} teleporters -> {TELEPORTERS_OUT}")
+
+    n_sa = export_spawn_anchors()
+    print(f"wrote {n_sa} spawn anchors -> {SPAWN_ANCHORS_OUT}")
 
     export_meta()
     meta_mb = META_OUT.stat().st_size / 1e6

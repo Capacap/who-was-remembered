@@ -1,0 +1,176 @@
+[
+{
+"qid": "Q4616",
+"title": "Marilyn Monroe",
+"x": 330.6,
+"y": 608.4
+},
+{
+"qid": "Q8704",
+"title": "Walt Disney",
+"x": 71.7,
+"y": 677.2
+},
+{
+"qid": "Q7245",
+"title": "Mark Twain",
+"x": 60.6,
+"y": 807.1
+},
+{
+"qid": "Q1779",
+"title": "Louis Armstrong",
+"x": 38.6,
+"y": 662.3
+},
+{
+"qid": "Q5588",
+"title": "Frida Kahlo",
+"x": 27.2,
+"y": 707.3
+},
+{
+"qid": "Q23434",
+"title": "Ernest Hemingway",
+"x": -47.2,
+"y": 687.4
+},
+{
+"qid": "Q303",
+"title": "Elvis Presley",
+"x": -53.1,
+"y": 649.2
+},
+{
+"qid": "Q409",
+"title": "Bob Marley",
+"x": -122.9,
+"y": 629.3
+},
+{
+"qid": "Q5603",
+"title": "Andy Warhol",
+"x": -189.9,
+"y": 600.3
+},
+{
+"qid": "Q8027",
+"title": "Martin Luther King Jr.",
+"x": -264.4,
+"y": 619.1
+},
+{
+"qid": "Q160534",
+"title": "Jack Kerouac",
+"x": -395.8,
+"y": 543.0
+},
+{
+"qid": "Q909",
+"title": "Jorge Luis Borges",
+"x": -479.8,
+"y": 406.1
+},
+{
+"qid": "Q882",
+"title": "Charlie Chaplin",
+"x": -621.5,
+"y": 207.2
+},
+{
+"qid": "Q937",
+"title": "Albert Einstein",
+"x": -681.9,
+"y": 172.4
+},
+{
+"qid": "Q5577",
+"title": "Salvador Dalí",
+"x": -619.0,
+"y": 85.9
+},
+{
+"qid": "Q35064",
+"title": "Agatha Christie",
+"x": -655.6,
+"y": 64.4
+},
+{
+"qid": "Q9036",
+"title": "Nikola Tesla",
+"x": -734.7,
+"y": 47.9
+},
+{
+"qid": "Q30875",
+"title": "Oscar Wilde",
+"x": -834.7,
+"y": 10.1
+},
+{
+"qid": "Q7251",
+"title": "Alan Turing",
+"x": -706.3,
+"y": -77.5
+},
+{
+"qid": "Q5593",
+"title": "Pablo Picasso",
+"x": -654.0,
+"y": -89.9
+},
+{
+"qid": "Q905",
+"title": "Franz Kafka",
+"x": -757.5,
+"y": -183.9
+},
+{
+"qid": "Q7186",
+"title": "Marie Curie",
+"x": -693.6,
+"y": -286.2
+},
+{
+"qid": "Q892",
+"title": "J. R. R. Tolkien",
+"x": -571.2,
+"y": -340.8
+},
+{
+"qid": "Q5685",
+"title": "Anton Chekhov",
+"x": -497.7,
+"y": -653.4
+},
+{
+"qid": "Q1001",
+"title": "Mahatma Gandhi",
+"x": -360.5,
+"y": -624.0
+},
+{
+"qid": "Q8873",
+"title": "Satyajit Ray",
+"x": -173.9,
+"y": -598.1
+},
+{
+"qid": "Q3335",
+"title": "George Orwell",
+"x": -186.1,
+"y": -687.4
+},
+{
+"qid": "Q7241",
+"title": "Rabindranath Tagore",
+"x": 132.3,
+"y": -724.5
+},
+{
+"qid": "Q8006",
+"title": "Akira Kurosawa",
+"x": 405.9,
+"y": -449.4
+}
+]

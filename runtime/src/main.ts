@@ -1347,6 +1347,22 @@ async function loadTeleporters(url: string): Promise<Teleporter[]> {
   return (await fetch(url)).json();
 }
 
+// Curated opening-vista anchors (export_runtime.export_spawn_anchors): recognisable
+// recent landmark figures. The player spawns at the inner rim on one anchor's bearing
+// facing outward, so the first thing in view is a name they know a few steps ahead --
+// then the walk outward runs back in time into less-familiar, sparser ground. x/y are
+// the figure's layout position; bearing and spawn radius are derived in applySpawn.
+interface SpawnAnchor {
+  qid: string;
+  title: string;
+  x: number;
+  y: number;
+}
+
+async function loadSpawnAnchors(url: string): Promise<SpawnAnchor[]> {
+  return (await fetch(url)).json();
+}
+
 // Baked heightmap (stage9 heightmap.bin): uint32 resolution, float32 world_size,
 // then float32 height[res*res] row-major. See stage9_mesh.py:write_heightmap_bin.
 async function loadHeightmap(
@@ -2174,11 +2190,8 @@ async function main() {
   let gpuQueryInFlight: WebGLQuery | null = null;
   let gpuMs = -1; // -1 = no sample yet / unsupported
 
-  // spawn dead centre (0,0), on the summit of the present, facing outward across
-  // the empty plaza. The first view is the whole uneven ring at once: a dense
-  // wall of books toward the Western longitudes, near-empty ground toward the
-  // gaps. The gaze runs down the slope to the distant desert floor, so the land
-  // visibly falls away into the past. Survey, then travel.
+  // Placeholder pose until the anchors load (applySpawn below moves the player to
+  // the rim). Centre + outward keeps the controller's first frames sane.
   camera.position.set(0, sampleHeight(0, 0) + EYE_HEIGHT, 0);
   camera.lookAt(0, 0, 8000);
 
@@ -2212,10 +2225,11 @@ async function main() {
   };
 
   info.innerHTML = "loading positions…";
-  const [field, teleporters, meta, world, heightmap, bookLods] =
+  const [field, teleporters, spawnAnchors, meta, world, heightmap, bookLods] =
     await Promise.all([
       loadPositions("positions.bin"),
       loadTeleporters("teleporters.json"),
+      loadSpawnAnchors("spawn_anchors.json"),
       loadMeta("meta.bin"),
       loadWorld("world.json"),
       loadHeightmap("heightmap.bin"),
@@ -2239,9 +2253,38 @@ async function main() {
   // and daylight ride on shared uniforms updated in the loop.
   const ground = buildGround(uPlayer, uSkate, daylight.uniforms);
   scene.add(ground);
-  // settle the eye onto the baked surface now the heightmap is loaded (spawn was
-  // placed on the analytic fallback before the fetch resolved).
-  camera.position.y = sampleHeight(camera.position.x, camera.position.z) + EYE_HEIGHT;
+  // Spawn at a FIXED distance from centre on a curated landmark's bearing, facing
+  // outward. The anchor supplies direction ONLY, not distance: tying spawn radius to
+  // each anchor's own radius (they span ~606-835) propagated that spread into the
+  // framing -- low-radius anchors shoved the player back into the empty plaza, high
+  // ones dropped them mid-field. A constant radius just inside the rim puts every
+  // opening at the threshold of the present: books begin a step ahead, the empty
+  // plaza is behind for the turn-around, and the recognisable anchor (always beyond
+  // the rim, r>=606) sits somewhere ahead in view. Walking outward runs back in time
+  // into less-familiar, sparser ground -- the thesis as a gradient under the feet.
+  // Now the heightmap is loaded so sampleHeight is real (placeholder pose used the
+  // analytic fallback).
+  const SPAWN_RADIUS = world.R_INNER - 20; // threshold of the present, just inside the rim
+  let spawnIdx = 0;
+  function applySpawn(a: SpawnAnchor) {
+    const r = Math.hypot(a.x, a.y) || 1;
+    const dx = a.x / r; // outward unit bearing (data x -> world x, data y -> world z)
+    const dz = a.y / r;
+    const px = dx * SPAWN_RADIUS;
+    const pz = dz * SPAWN_RADIUS;
+    camera.position.set(px, sampleHeight(px, pz) + EYE_HEIGHT, pz);
+    camera.lookAt(px + dx * 8000, 0, pz + dz * 8000);
+    stop(); // arrive at rest (matters for the dev cycle key mid-walk)
+  }
+  // Random anchor per session, except under the screenshot harness where the poses
+  // must stay deterministic (it overrides the camera each frame anyway).
+  if (spawnAnchors.length) {
+    spawnIdx = HARNESS_ON ? 0 : Math.floor(Math.random() * spawnAnchors.length);
+    applySpawn(spawnAnchors[spawnIdx]);
+  } else {
+    // no anchors: keep the centre placeholder, just settle its eye onto the baked surface.
+    camera.position.y = sampleHeight(camera.position.x, camera.position.z) + EYE_HEIGHT;
+  }
   mark("terrain");
   const built = buildField(field, bookLods[0], bookLods[1], uPlayer, daylight.uniforms, world, uFarMinPx);
   mark("seat books");
@@ -2279,6 +2322,13 @@ async function main() {
 
   let aim: Aim = null; // what the reticle is over (book or teleporter), or null
   let overlayOpen = false;
+  // Controls legend: prominent (.intro) for the first INTRO_MS of play, then a quiet
+  // persistent corner line (.show); toggled off is remembered in localStorage. The
+  // intro timer is armed once on the first scene enter and never replays.
+  const INTRO_MS = 7000;
+  let legendOn = localStorage.getItem("showControls") !== "0";
+  let introElapsed = false;
+  let introTimer = 0;
   // touch has no pointer lock, so a coarse-pointer device tracks "in the scene" with
   // its own flag; inScene() unifies the two so the picker/inspect gate reads the same
   // on both. The flag is driven by sceneEnter/sceneLeave alongside the controller's.
@@ -2306,6 +2356,13 @@ async function main() {
     }
   };
   const sceneEnter = () => {
+    // first entry into play arms the one-shot intro timer: the legend rides bright for
+    // INTRO_MS then settles to its subdued persistent state (guarded so it never replays).
+    if (!introTimer) {
+      introTimer = window.setTimeout(() => {
+        introElapsed = true;
+      }, INTRO_MS);
+    }
     if (isTouch) {
       touchActive = true;
       setTouchActive(true);
@@ -2529,6 +2586,25 @@ async function main() {
   }
   syncLod();
 
+  // Controls hint — player-facing show/hide, same segmented language. The render
+  // loop reads legendOn; the choice persists to localStorage across reloads.
+  const legendOpts = Array.from(
+    document.querySelectorAll<HTMLButtonElement>("#legend-seg button"),
+  );
+  const syncLegend = (): void => {
+    for (const b of legendOpts) {
+      b.classList.toggle("active", (b.dataset.legend === "on") === legendOn);
+    }
+  };
+  for (const b of legendOpts) {
+    b.addEventListener("click", () => {
+      legendOn = b.dataset.legend === "on";
+      localStorage.setItem("showControls", legendOn ? "1" : "0");
+      syncLegend();
+    });
+  }
+  syncLegend();
+
   // The menu only ever opens on an Esc exit (overlay unlocks are suppressed above), so
   // the post-Esc re-lock cooldown is ALWAYS ticking when it appears — a documented fixed
   // 1250ms (Chromium kEffectiveUserEscapeDuration). Spin a little indicator for that
@@ -2602,10 +2678,10 @@ async function main() {
     resume(); // re-lock back to walking, on this click's user gesture
     fade.style.opacity = "1"; // fade to black (CSS transition: 0.3s)
     window.setTimeout(() => {
-      camera.position.set(0, sampleHeight(0, 0) + EYE_HEIGHT, 0);
-      camera.lookAt(0, 0, 8000);
-      stop(); // arrive at rest, not mid-glide
-      fade.style.opacity = "0"; // fade back in at the centre
+      // back to this session's opening vista (the rim anchor), not the empty centre.
+      if (spawnAnchors.length) applySpawn(spawnAnchors[spawnIdx]);
+      else camera.position.set(0, sampleHeight(0, 0) + EYE_HEIGHT, 0);
+      fade.style.opacity = "0"; // fade back in at the spawn
     }, 300);
   };
 
@@ -2742,6 +2818,15 @@ async function main() {
       console.log(
         `[perf] render scale ${renderScale} -> pixel ratio ${renderer.getPixelRatio().toFixed(2)}`,
       );
+    } else if (e.code === "KeyN") {
+      // dev cycle for the opening-vista anchors: step through each (applySpawn + log
+      // the figure) to eyeball every spawn and cut the duds. Shift steps backward.
+      if (spawnAnchors.length) {
+        const n = spawnAnchors.length;
+        spawnIdx = (spawnIdx + (e.shiftKey ? n - 1 : 1)) % n;
+        applySpawn(spawnAnchors[spawnIdx]);
+        console.log(`[spawn] ${spawnIdx + 1}/${n}  ${spawnAnchors[spawnIdx].title}`);
+      }
     } else if (e.code === "Escape" && overlayOpen) {
       closeOverlay();
     }
@@ -2779,12 +2864,6 @@ async function main() {
   let mode: MoveMode = "walk";
   let sincePick = 0;
   let sinceStat = 0;
-  // intro controls: shown within CTL_R_SHOW of the spawn centre, hidden past
-  // CTL_R_HIDE (the gap is hysteresis so walking the boundary can't flicker the
-  // timed CSS fade). Both inside R_INNER (~600) so they're gone before the books.
-  const CTL_R_SHOW = 360;
-  const CTL_R_HIDE = 460;
-  let ctlShown = false;
   // worst-case ms for the two camera-driven rebuilds, reset each readout window,
   // so a bursty re-tessellation spike shows up instead of being averaged away.
   let booksMs = 0;
@@ -2811,13 +2890,16 @@ async function main() {
       aim = null;
     }
 
-    // intro controls: toggle .show at the centre radius (hysteresis below); the
-    // CSS transition does the timed fade. Hidden while an overlay is open.
+    // controls legend: a dim persistent line (.show) while in play, brightened
+    // (.intro) for the first INTRO_MS until the intro timer flips introElapsed.
+    // Suppressed while an inspect overlay is up or the hint is toggled off — but
+    // the pause menu KEEPS it (bright), so the reference is there when you stop to
+    // look, and the pause "Controls hint" toggle demonstrates itself live.
     {
-      const rCentre = Math.hypot(camera.position.x, camera.position.z);
-      if (ctlShown && (rCentre > CTL_R_HIDE || overlayOpen)) ctlShown = false;
-      else if (!ctlShown && rCentre < CTL_R_SHOW && !overlayOpen) ctlShown = true;
-      controlsHud.classList.toggle("show", ctlShown);
+      const paused = pauseEl.style.display !== "none";
+      const live = legendOn && !overlayOpen && (inScene() || paused);
+      controlsHud.classList.toggle("show", live);
+      controlsHud.classList.toggle("intro", live && (paused || !introElapsed));
     }
 
     // the ground is static (built once); only the books refill by LOD as the camera
