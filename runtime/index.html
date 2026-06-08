@@ -10,6 +10,20 @@
       content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover"
     />
     <title>Who Was Remembered</title>
+    <!-- Installable / chromeless support. The manifest (display:fullscreen) drives
+         Android's installed launch; the apple-* meta tags are the iOS path (Safari
+         ignores the manifest's display mode, so Add-to-Home-Screen relies on these
+         to launch standalone without browser chrome — the iPhone answer to the
+         missing Fullscreen API). theme-color tints the system bars to the storm
+         field. Icons are placeholders (public/icon.svg) — replace with final art. -->
+    <link rel="manifest" href="manifest.webmanifest" />
+    <meta name="theme-color" content="#0a0703" />
+    <link rel="icon" href="icon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="apple-touch-icon.png" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="Who Was Remembered" />
     <!-- Spectral: a screen-tuned old-style serif. The piece is a desert of books;
          the type should read like print, not OS chrome. One face throughout (the
          dev perf readout stays monospace); weight + italic carry the hierarchy. -->

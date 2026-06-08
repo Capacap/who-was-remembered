@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <!-- Placeholder app icon for "Who Was Remembered": a single bone book standing in
+       the dark storm field. Maskable-safe (dark bleeds to the edges, the book sits
+       inside the centre safe zone). Replace with final art when ready. -->
+  <defs>
+    <radialGradient id="field" cx="50%" cy="42%" r="72%">
+      <stop offset="0%" stop-color="#1c1610"/>
+      <stop offset="100%" stop-color="#0a0703"/>
+    </radialGradient>
+  </defs>
+  <rect width="512" height="512" fill="url(#field)"/>
+  <!-- faint ground line under the book -->
+  <rect x="150" y="372" width="212" height="2" fill="#e9dfc8" opacity="0.18"/>
+  <!-- pages (right depth strip) -->
+  <rect x="298" y="150" width="12" height="220" rx="2" fill="#cabfa0"/>
+  <!-- spine / cover -->
+  <rect x="214" y="144" width="86" height="228" rx="6" fill="#e9dfc8"/>
+  <!-- two title bands, ink on bone -->
+  <rect x="230" y="180" width="54" height="7" rx="3" fill="#2c2317" opacity="0.85"/>
+  <rect x="230" y="198" width="38" height="7" rx="3" fill="#2c2317" opacity="0.85"/>
+  <!-- a single warm-accent thread near the foot (the field's one accent) -->
+  <rect x="230" y="344" width="54" height="5" rx="2" fill="#9e4a2a"/>
+</svg>
