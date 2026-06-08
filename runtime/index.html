@@ -137,19 +137,18 @@
         text-shadow: 0 1px 1px rgba(0, 0, 0, 0.6);
       }
 
-      /* ── intro controls (near the spawn centre only) ─────────────────────
+      /* ── controls legend (bottom-left) ───────────────────────────────────
          The basic movement controls — the things the contextual prompts don't
-         cover. A self-explanatory intro, no tutorial: they fade in (timed) while
-         the player is within a radius of the spawn centre (the empty plaza they
-         survey) and fade out once they leave it to explore. JS just toggles the
-         .show class at the threshold; the CSS transition does the fade. Sits just
-         below screen centre so it reads as an intro, not a status bar. */
+         cover. Bright (.show.intro) for the first few seconds of play, then it
+         settles to a quiet persistent line (.show); off when neither class is set
+         (toggled off in the pause menu). JS owns the class; CSS does the fade.
+         Bottom-left, NOT screen centre: the opening vista is the whole point of
+         the first 30 seconds, so the hint stays clear of it. Sits above #info,
+         which is empty during play. */
       #controls {
         position: fixed;
-        left: 50%;
-        top: calc(50% + 52px);
-        transform: translateX(-50%);
-        text-align: center;
+        left: 14px;
+        bottom: 36px;
         font-family: var(--serif);
         color: var(--bone-text);
         text-shadow: var(--engrave);
@@ -159,7 +158,10 @@
         transition: opacity 0.8s ease;
       }
       #controls.show {
-        opacity: 1;
+        opacity: 0.4;
+      }
+      #controls.show.intro {
+        opacity: 0.95;
       }
       .ctl {
         font-size: 12px;
@@ -745,6 +747,13 @@
           <span class="pause-seg" id="lod-seg">
             <button type="button" data-lod="full">Full</button>
             <button type="button" data-lod="low">Low</button>
+          </span>
+        </div>
+        <div class="pause-setting">
+          <span>Controls hint</span>
+          <span class="pause-seg" id="legend-seg">
+            <button type="button" data-legend="on">Show</button>
+            <button type="button" data-legend="off">Hide</button>
           </span>
         </div>
         <div id="pause-dev">
