@@ -125,8 +125,18 @@ RADIUS_JITTER = 2.5    # world units: ~one year of radial width, softens the yea
 # flat floor in radians, plus a radius-scaled term targeting a roughly constant
 # arc-length, so the dense modern core (small radius) gets a wide angular spread
 # while the sparse antiquity rim (large radius) keeps its geography crisp.
-ANGLE_JITTER = 0.07         # radians: flat organic fuzz everywhere (~4 deg)
-ANGLE_ARC_JITTER = 80.0     # world units: extra angular sigma ~ this/radius
+ANGLE_JITTER = 0.0          # was 0.07: a flat bearing sigma is arc-amplified by
+                            # radius, so it dumped the heaviest world-unit smear
+                            # on the antiquity rim (up to ~900u p90) where cohorts
+                            # are tiny and there are no spokes to break, flinging
+                            # co-located figures (Caesar vs Titus, both Rome) far
+                            # apart. Dropped; spoke-breaking is the arc term's job.
+ANGLE_ARC_JITTER = 140.0    # world units: angular sigma ~ this/radius, so the
+                            # arc-length spread is a constant ~this everywhere.
+                            # 140 reproduces the dense modern core's current band
+                            # width (London/Paris read as regions, not spokes)
+                            # while the rim settles to the same constant instead
+                            # of a radius-amplified blow-up. See [[project-data-observations]].
 
 # Date-uncertainty radial scatter. Deep-past death years are mostly estimates:
 # round-number guesses (a death snapped to -500) and birth==death placeholders.
