@@ -2766,9 +2766,14 @@ async function main() {
   // "tap" (isTouch); here we also swap the intro hint and start in the scene, since
   // there's no click-to-lock gesture to wait for on touch.
   if (isTouch) {
+    // mirror the desktop legend's keycap+action rows, with touch gestures as the
+    // "keys" (the #controls grid aligns the action column regardless of key width).
+    // Skate + pause have their own on-screen chips; pause is echoed here for the cue.
     controlsHud.innerHTML =
-      `<div class="ctl">Left half to move · right half to look</div>` +
-      `<div class="ctl">Tap a book to inspect · ⏸ to pause</div>`;
+      `<div class="ctl"><span class="key">Left ½</span><span class="act">Move</span></div>` +
+      `<div class="ctl"><span class="key">Right ½</span><span class="act">Look</span></div>` +
+      `<div class="ctl"><span class="key">Tap</span><span class="act">Inspect</span></div>` +
+      `<div class="ctl"><span class="key">⏸</span><span class="act">Pause</span></div>`;
     touch = createTouchControls({
       onMove: (x, y) => setMoveAxis(x, y),
       onLook: (dx, dy) => addLook(dx, dy),

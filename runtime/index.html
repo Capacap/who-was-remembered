@@ -161,7 +161,21 @@
            stays bright while paused instead of sitting under the ~0.5 dimmer. It's
            bottom-left, clear of the centred pause card, so no overlap. */
         z-index: 210;
+        /* a 2-column grid (key | action) so the action labels left-align no matter
+           how wide the keycaps are — desktop keys (WASD/Esc) and the touch gestures
+           (Left ½ / Right ½) differ in width, and a per-row flex would ragged them.
+           .ctl is display:contents so each row's key+act drop straight into the grid.
+           Type props live here and inherit down (contents passes inherited props). */
+        display: grid;
+        grid-template-columns: max-content max-content;
+        column-gap: 10px;
+        row-gap: 8px;
+        align-items: center;
         font-family: var(--serif);
+        font-size: var(--ui-base);
+        letter-spacing: 1px;
+        text-transform: uppercase;
+        line-height: 1;
         color: var(--bone-text);
         text-shadow: var(--engrave);
         pointer-events: none;
@@ -176,17 +190,10 @@
         opacity: 0.95;
       }
       .ctl {
-        display: flex;
-        align-items: center;
-        gap: 10px;
-        font-size: var(--ui-base);
-        letter-spacing: 1px;
-        text-transform: uppercase;
-        line-height: 1;
-        padding: 4px 0;
-        opacity: 0.92;
+        display: contents;
       }
       .ctl .key {
+        justify-self: start;
         min-width: 3.6em;
         margin: 0;
       }
