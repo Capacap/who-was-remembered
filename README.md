@@ -134,7 +134,7 @@ uv run pipeline/stage9_mesh.py
 
 ### Runtime export
 
-`pipeline/export_runtime.py` reads `layout.parquet` and writes the compact binaries the runtime loads from `runtime/public/`: `positions.bin` (per-book position, landmark tier, geo-source confidence, home-region longitude, and quantized size, ~12 bytes each, ~7 MB for the full corpus) and `teleporters.json` (the 26 monuments). Regenerate after any change to Stages 6–8.
+`pipeline/export_runtime.py` reads `layout.parquet` and writes the compact artifacts the runtime loads from `runtime/public/`: `positions.bin` (per-book position, landmark tier, geo-source confidence, home-region longitude, and quantized size, ~12 bytes each, ~7 MB for the full corpus); `meta.gz.bin` (per-figure label data — title, description, birth/death years — row-aligned with `positions.bin`, gzipped at rest from ~34 MB to ~13 MB and inflated client-side via `DecompressionStream`); `world.json` (world dimensions and book-scale bounds); and `teleporters.json` (the 26 monuments). Regenerate after any change to Stages 6–8.
 
 ```sh
 uv run pipeline/export_runtime.py
