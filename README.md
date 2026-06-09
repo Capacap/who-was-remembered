@@ -4,14 +4,14 @@ A browser-based 3D art piece. The player walks through a low-poly desert scatter
 
 **▶ [Play it in your browser](https://wwr.simonsorkin.com/)**
 
-![Looking outward across the desert — teal books scatter and thin toward the dark horizon, with a single orange landmark beacon at left.](docs/screenshots/vista.webp)
+![Looking outward across the desert: teal books scatter and thin toward the dark horizon, with a single orange landmark beacon at left.](docs/screenshots/vista.webp)
 
 *Walking outward from the dense recent past, the books thin as recorded history grows sparser.*
 
 <table>
 <tr>
-<td width="50%"><img src="docs/screenshots/inspect-jules-verne.webp" alt="The inspect card naming Jules Verne, hovering over his orange landmark book."><br><em>Look at any book to read who it remembers — here, Jules Verne.</em></td>
-<td width="50%"><img src="docs/screenshots/teleporter-mesoamerica.webp" alt="A blue crystalline teleporter sphere labelled Mesoamerica."><br><em>Teleporters fast-travel between 26 hand-curated anchors — here, Mesoamerica.</em></td>
+<td width="50%"><img src="docs/screenshots/inspect-jules-verne.webp" alt="The inspect card naming Jules Verne, hovering over his orange landmark book."><br><em>Look at any book to read who it remembers. Here, Jules Verne.</em></td>
+<td width="50%"><img src="docs/screenshots/teleporter-mesoamerica.webp" alt="A blue crystalline teleporter sphere labelled Mesoamerica."><br><em>Teleporters fast-travel between 26 hand-curated anchors. Here, Mesoamerica.</em></td>
 </tr>
 </table>
 
@@ -19,7 +19,7 @@ The repository has two halves: a Python preprocessing **pipeline** that turns Wi
 
 ## Status
 
-Playable end-to-end on desktop and mobile. The pipeline (Stages 1–9 below) runs on the 2026-05 dumps and bakes the full corpus — about 576k books — plus the 26-monument teleporter network and the terrain heightmap. The runtime is a complete first-person walker over that whole field: grounded movement (WASD / mouse look, hold Shift to skate across the empty rings), instanced books on baked low-poly terrain under a day–night atmosphere, teleporter fast-travel, look-to-inspect labels with a Wikipedia link and a bookmark toggle, and a bookmark compass anchored on the present (inward) and the deep past (outward). Touch controls cover mobile, with a far-field density setting for performance. The screenshots above are the finished piece; the rest of this README documents the pipeline and runtime that produce it.
+Playable end-to-end on desktop and mobile. The pipeline (Stages 1–9 below) runs on the 2026-05 dumps and bakes the full corpus (about 576k books) plus the 26-monument teleporter network and the terrain heightmap. The runtime is a complete first-person walker over that whole field: grounded movement (WASD / mouse look, hold Shift to skate across the empty rings), instanced books on baked low-poly terrain under a day–night atmosphere, teleporter fast-travel, look-to-inspect labels with a Wikipedia link and a bookmark toggle, and a bookmark compass anchored on the present (inward) and the deep past (outward). Touch controls cover mobile, with a far-field density setting for performance. The screenshots above are the finished piece; the rest of this README documents the pipeline and runtime that produce it.
 
 ## Setup
 
@@ -84,7 +84,7 @@ uv run pipeline/stage3_extract_articles.py
 
 ### Stage 4: Article quality cut
 
-`pipeline/stage4_quality_cut.py` reads `wikidata_figures_with_articles.parquet` and writes `wikidata_figures_quality.parquet` (about 576k rows). The criterion is article substance, not fame and not the lead's prose style: a row survives when its Wikipedia article body has at least 100 words (`article_word_count` from Stage 3). The floor is deliberately low, a stub gate rather than a notability bar, since the corpus's 25th percentile sits near 200 article words. This replaces an earlier rule that gated on lead shape (two sentences, 30 words); lead shape measured the opener's style, not whether an article exists, and so cut substantive figures whose lead happens to be a single dense sentence. The lead is still cleaned of leftover `__NOTOC__`-style magic words and kept as a display column. No download needed.
+`pipeline/stage4_quality_cut.py` reads `wikidata_figures_with_articles.parquet` and writes `wikidata_figures_quality.parquet` (about 576k rows). The criterion is article substance rather than fame or the lead's prose style: a row survives when its Wikipedia article body has at least 100 words (`article_word_count` from Stage 3). The floor is deliberately low, a stub gate rather than a notability bar, since the corpus's 25th percentile sits near 200 article words. This replaces an earlier rule that gated on lead shape (two sentences, 30 words); lead shape measured the opener's style, not whether an article exists, and so cut substantive figures whose lead happens to be a single dense sentence. The lead is still cleaned of leftover `__NOTOC__`-style magic words and kept as a display column. No download needed.
 
 Run (under a minute):
 
@@ -129,7 +129,7 @@ uv run pipeline/plot_layout.py
 
 ### Stage 8: Topology
 
-`pipeline/stage8_topology.py` reads `placement.parquet` and writes `layout.parquet`. Stages 6 and 7 produce truth (every book where its era and longitude put it); this stage massages that truth into something walkable without lying about it. A size-aware relaxation pushes apart only the pairs whose centres fall inside a larger book's footprint, so a small book is never wholly swallowed (edges may still overlap; the goal is an end to subsumption, not even spacing) and each book stays tethered to its placement so its era and longitude survive. The same pass clears a tight sphere around each teleporter monument. Where the field is genuinely too dense to separate within the tether (the Western modern apex) books pile to the tether and stay a crush, which is honest.
+`pipeline/stage8_topology.py` reads `placement.parquet` and writes `layout.parquet`. Stages 6 and 7 place every book where its era and longitude put it; this stage makes that arrangement walkable without distorting it. A size-aware relaxation pushes apart only the pairs whose centres fall inside a larger book's footprint, so a small book is never wholly swallowed (edges may still overlap; the goal is an end to subsumption, not even spacing) and each book stays tethered to its placement so its era and longitude survive. The same pass clears a tight sphere around each teleporter monument. Where the field is genuinely too dense to separate within the tether (the Western modern apex) books pile to the tether and stay a crush, which is honest.
 
 Run (after Stage 7):
 
@@ -139,7 +139,7 @@ uv run pipeline/stage8_topology.py
 
 ### Stage 9: Terrain bake
 
-`pipeline/stage9_mesh.py` bakes the world's elevation field and writes `runtime/public/heightmap.bin`, the single source of ground height the runtime samples for both the surface it draws and the height every book and monument seats on, so nothing floats. The vertical axis carries no data (time and longitude are the horizontal axes); the relief is pure decoration — a central vantage hill to spawn on, spiral dune texture radiating outward, and broad spiral swells — run through a thermal-avalanche pass that rounds crests and fills toes, a neighbour operation a pointwise height function can't do, which is the reason terrain is baked rather than computed live.
+`pipeline/stage9_mesh.py` bakes the world's elevation field and writes `runtime/public/heightmap.bin`, the single source of ground height the runtime samples for both the surface it draws and the height every book and monument seats on, so nothing floats. The vertical axis carries no data (time and longitude are the horizontal axes); the relief is pure decoration: a central vantage hill to spawn on, spiral dune texture radiating outward, and broad spiral swells, all run through a thermal-avalanche pass that rounds crests and fills toes. That avalanche step is a neighbour operation a pointwise height function can't do, and the reason terrain is baked rather than computed live.
 
 ```sh
 uv run pipeline/stage9_mesh.py
@@ -147,7 +147,7 @@ uv run pipeline/stage9_mesh.py
 
 ### Runtime export
 
-`pipeline/export_runtime.py` reads `layout.parquet` and writes the compact artifacts the runtime loads from `runtime/public/`: `positions.bin` (per-book position, landmark tier, geo-source confidence, home-region longitude, and quantized size, ~12 bytes each, ~7 MB for the full corpus); `meta.gz.bin` (per-figure label data — title, description, birth/death years — row-aligned with `positions.bin`, gzipped at rest from ~34 MB to ~13 MB and inflated client-side via `DecompressionStream`); `world.json` (world dimensions and book-scale bounds); and `teleporters.json` (the 26 monuments). Regenerate after any change to Stages 6–8.
+`pipeline/export_runtime.py` reads `layout.parquet` and writes the compact artifacts the runtime loads from `runtime/public/`: `positions.bin` (per-book position, landmark tier, geo-source confidence, home-region longitude, and quantized size, ~12 bytes each, ~7 MB for the full corpus); `meta.gz.bin` (per-figure label data, namely title, description, and birth/death years, row-aligned with `positions.bin`, gzipped at rest from ~34 MB to ~13 MB and inflated client-side via `DecompressionStream`); `world.json` (world dimensions and book-scale bounds); and `teleporters.json` (the 26 monuments). Regenerate after any change to Stages 6–8.
 
 ```sh
 uv run pipeline/export_runtime.py
