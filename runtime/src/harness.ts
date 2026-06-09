@@ -45,6 +45,9 @@ interface HarnessCtx {
   eyeHeight: number; // EYE_HEIGHT: camera sits this far above the ground
   world: { R_MAX: number };
   renderer: THREE.WebGLRenderer;
+  // Supersampled grab: render one frame at an absolute pixel ratio and read it back
+  // (see captureAt in main.ts). Used by shot(scale) for crisp promo stills.
+  capture: (scale: number) => string;
 }
 
 interface Pose {
@@ -199,7 +202,13 @@ export function setupHarness(ctx: HarnessCtx): Harness {
       frame = 0; // reset so callers can wait for the LOD refill to settle
     },
     frame: () => frame,
-    shot: () => renderer.domElement.toDataURL("image/png"),
+    // scale=1: read the live buffer as-is. scale>1: supersample via the host's
+    // captureAt (e.g. shot(2) -> 2x the CSS window, display-independent) for crisp
+    // promo stills; restores the live scale before returning.
+    shot: (scale = 1) =>
+      scale === 1
+        ? renderer.domElement.toDataURL("image/png")
+        : ctx.capture(scale),
   };
 
   // eslint-disable-next-line no-console

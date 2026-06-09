@@ -2982,6 +2982,18 @@ async function main() {
     sceneEnter(); // begin active: show the stick + arm the controller's touch path
   }
 
+  // V toggles a clean promo recording: captureStream grabs the CANVAS only, so the
+  // DOM HUD / reticle / glance are excluded by construction (the clean "art piece"
+  // look). Live play, not the harness -- you pilot a skate run and hit V to stop,
+  // which downloads a webm. Dev-only, console-announced, no HUD hint (see the dev
+  // affordances convention). captureStream doesn't need preserveDrawingBuffer.
+  let recorder: MediaRecorder | null = null;
+  // G grabs a clean high-res still (canvas only, so no DOM HUD -- for the vista/scale
+  // shots). The grab itself happens in the render loop so toDataURL reads a live buffer
+  // without forcing preserveDrawingBuffer in normal play. UI-visible shots (a glance
+  // card, a teleporter prompt) need the DOM, so those are an OS screenshot, not this.
+  let grabRequested = false;
+
   document.addEventListener("keydown", (e) => {
     if (e.code === "KeyE" && !overlayOpen && controls.isLocked && aim) {
       if (aim.kind === "tp") openTravel(aim.i);
@@ -3020,6 +3032,37 @@ async function main() {
         applySpawn(spawnAnchors[spawnIdx]);
         console.log(`[spawn] ${spawnIdx + 1}/${n}  ${spawnAnchors[spawnIdx].title}`);
       }
+    } else if (e.code === "KeyG") {
+      grabRequested = true; // serviced post-render in the loop (see captureAt)
+      console.log("[capture] grabbing a 2x still…");
+    } else if (e.code === "KeyV") {
+      if (!recorder) {
+        const stream = renderer.domElement.captureStream(60);
+        const mime = MediaRecorder.isTypeSupported("video/webm;codecs=vp9")
+          ? "video/webm;codecs=vp9"
+          : "video/webm";
+        const chunks: Blob[] = [];
+        recorder = new MediaRecorder(stream, {
+          mimeType: mime,
+          videoBitsPerSecond: 24_000_000, // visually lossless for this flat-shaded look
+        });
+        recorder.ondataavailable = (ev) => {
+          if (ev.data.size) chunks.push(ev.data);
+        };
+        recorder.onstop = () => {
+          const a = document.createElement("a");
+          a.href = URL.createObjectURL(new Blob(chunks, { type: mime }));
+          a.download = "wwr-capture.webm";
+          a.click();
+          URL.revokeObjectURL(a.href);
+          recorder = null;
+          console.log("[capture] saved wwr-capture.webm");
+        };
+        recorder.start();
+        console.log("[capture] recording (canvas only) — press V to stop");
+      } else {
+        recorder.stop();
+      }
     } else if (e.code === "Escape" && overlayOpen) {
       closeOverlay();
     }
@@ -3043,6 +3086,22 @@ async function main() {
   // Screenshot harness (dev-only, ?harness): when active it pins the camera to a
   // fixed pose and freezes the drift clock so frames are reproducible. Inert
   // otherwise. See harness.ts.
+  // Promo screenshots want more pixels than the live buffer. captureAt renders one
+  // frame at an ABSOLUTE pixel ratio (display-independent: scale=2 -> 2x the CSS
+  // window regardless of devicePixelRatio) and reads it back, then restores the live
+  // scale via applyRenderScale. The far-point floor rides the ratio (exactly as on a
+  // normal resize) so the dot carpet keeps its physical size at any supersample.
+  // Read-back needs the harness's preserveDrawingBuffer; exposed via __HARNESS.shot(scale).
+  const captureAt = (scale: number): string => {
+    renderer.setPixelRatio(scale);
+    uFarMinPx.value = FAR_POINT_MIN_CSS * scale;
+    renderer.render(scene, camera);
+    const url = renderer.domElement.toDataURL("image/png");
+    applyRenderScale(); // restore live pixel ratio + far floor + size
+    renderer.render(scene, camera); // repaint at the live scale so the visible frame isn't left cleared
+    return url;
+  };
+
   const harness = setupHarness({
     camera,
     daylight: daylight.uniforms,
@@ -3051,6 +3110,7 @@ async function main() {
     eyeHeight: EYE_HEIGHT,
     world,
     renderer,
+    capture: captureAt,
   });
 
   const clock = new THREE.Clock();
@@ -3163,6 +3223,18 @@ async function main() {
       }
     } else {
       renderer.render(scene, camera);
+    }
+
+    // clean still grab (G): captureAt re-renders at 2x in this same tick and reads it
+    // back, so it works in live play without preserveDrawingBuffer. Canvas only -- the
+    // DOM HUD is excluded by construction.
+    if (grabRequested) {
+      grabRequested = false;
+      const a = document.createElement("a");
+      a.href = captureAt(2);
+      a.download = "wwr-shot.png";
+      a.click();
+      console.log("[capture] saved wwr-shot.png (2x)");
     }
 
     // read renderer.info AFTER render (it resets per frame), throttled to ~4 Hz so
