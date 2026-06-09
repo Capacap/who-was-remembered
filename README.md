@@ -163,3 +163,7 @@ npm install
 npm run dev      # local dev server
 npm run build    # production bundle in runtime/dist
 ```
+
+## Licensing
+
+The code is released under the [MIT License](LICENSE). The underlying data comes from [Wikidata](https://www.wikidata.org/) (CC0); article word counts and sitelink counts are drawn from English Wikipedia as plain facts, and no Wikipedia article text ships with the game. The Spectral typeface is used under the [SIL Open Font License](runtime/public/fonts/OFL.txt). The work itself — the title, the visual identity, the hand-authored meshes — is not covered by the MIT grant.
