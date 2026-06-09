@@ -1525,7 +1525,12 @@ function fmtYear(v: number): string {
 function fmtYears(b: number, d: number): string {
   const bb = b === YEAR_MISSING ? null : b;
   const dd = d === YEAR_MISSING ? null : d;
-  if (bb !== null && dd !== null) return `${fmtYear(bb)} – ${fmtYear(dd)}`;
+  // Equal years collapse to one: mostly coarse Wikidata precision in deep
+  // antiquity (both dates quantized to the same century), occasionally a
+  // genuine same-year infant death. "400 BCE – 400 BCE" reads as a bug; a
+  // bare year is the museum-label "dated to" and is honest in both cases.
+  if (bb !== null && dd !== null)
+    return bb === dd ? fmtYear(bb) : `${fmtYear(bb)} – ${fmtYear(dd)}`;
   if (dd !== null) return `d. ${fmtYear(dd)}`;
   if (bb !== null) return `b. ${fmtYear(bb)}`;
   return "";
