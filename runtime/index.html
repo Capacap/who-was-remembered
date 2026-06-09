@@ -1046,7 +1046,10 @@
     <div id="overlay">
       <div id="card"></div>
     </div>
-    <div id="pause">
+    <!-- inline display so JS reads of pauseEl.style.display are truthful from t=0;
+         the stylesheet's #pause display:none alone leaves the inline style "" and
+         "are we paused" checks would spuriously read true until the first lock. -->
+    <div id="pause" style="display: none">
       <div id="pause-card">
         <div class="pause-title">Paused</div>
         <div class="pause-resume-row">

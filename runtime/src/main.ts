@@ -1466,16 +1466,23 @@ const YEAR_MISSING = -32768;
 // The compressed file is named `foo.gz.bin`, NOT `foo.bin.gz`, on purpose: a
 // `.gz` extension makes many static servers (Vite dev, nginx, some CDNs) send
 // `Content-Encoding: gzip`, so the browser transparently inflates the body and
-// our DecompressionStream would then double-inflate and throw. Ending in `.bin`
-// keeps it an opaque octet-stream everywhere, so we always do the single inflate
-// ourselves — deterministic across hosts. Falls back to the plain `.bin` if the
+// our DecompressionStream would then double-inflate and throw. The extension
+// dodge isn't sufficient on its own, though: itch.io's CDN sniffs gzip by file
+// CONTENT, so the bytes can arrive pre-inflated regardless of the name. The only
+// host-proof signal is the payload itself — inflate only when the buffered bytes
+// still carry the gzip magic (1f 8b). Falls back to the plain `.bin` if the
 // compressed sibling is absent, so an old artifact + new code still loads.
 async function fetchMaybeGzip(url: string): Promise<ArrayBuffer> {
   const gzUrl = url.replace(/\.bin$/, ".gz.bin");
   const gz = await fetch(gzUrl);
-  if (gz.ok && gz.body) {
-    const stream = gz.body.pipeThrough(new DecompressionStream("gzip"));
-    return await new Response(stream).arrayBuffer();
+  if (gz.ok) {
+    const buf = await gz.arrayBuffer();
+    const head = new Uint8Array(buf, 0, Math.min(2, buf.byteLength));
+    if (head.length === 2 && head[0] === 0x1f && head[1] === 0x8b) {
+      const stream = new Blob([buf]).stream().pipeThrough(new DecompressionStream("gzip"));
+      return await new Response(stream).arrayBuffer();
+    }
+    return buf;
   }
   return await (await fetch(url)).arrayBuffer();
 }
@@ -2155,8 +2162,11 @@ async function main() {
   // A saved choice wins over the device default — a player who dropped resolution to keep
   // a smooth framerate shouldn't have to redo it each visit; validated against the offered
   // steps so a corrupted value can't render the scene at a junk scale.
+  // localStorage keys are "wwr:"-prefixed throughout: itch.io serves every HTML game
+  // from one shared origin (html-classic.itch.zone), so bare names like "windVolume"
+  // can collide with whatever game the player ran before this one.
   const STEPS = [1, 0.75, 0.5];
-  const savedScale = Number(localStorage.getItem("renderScale"));
+  const savedScale = Number(localStorage.getItem("wwr:renderScale"));
   let renderScale = STEPS.includes(savedScale) ? savedScale : isTouch ? 0.75 : 1.0;
   // Far-speck size floor, carried in FRAMEBUFFER px (what gl_PointSize wants) but authored in CSS
   // px (FAR_POINT_MIN_CSS) and re-derived from the live pixel ratio on every resize/dpr/renderScale
@@ -2171,7 +2181,7 @@ async function main() {
   const setRenderScale = (s: number): void => {
     renderScale = s;
     applyRenderScale();
-    localStorage.setItem("renderScale", String(s));
+    localStorage.setItem("wwr:renderScale", String(s));
   };
   applyRenderScale();
   document.body.appendChild(renderer.domElement);
@@ -2377,7 +2387,7 @@ async function main() {
   // persistent corner line (.show); toggled off is remembered in localStorage. The
   // intro timer is armed once on the first scene enter and never replays.
   const INTRO_MS = 7000;
-  let legendOn = localStorage.getItem("showControls") !== "0";
+  let legendOn = localStorage.getItem("wwr:showControls") !== "0";
   let introElapsed = false;
   let introTimer = 0;
   // touch has no pointer lock, so a coarse-pointer device tracks "in the scene" with
@@ -2385,6 +2395,12 @@ async function main() {
   // on both. The flag is driven by sceneEnter/sceneLeave alongside the controller's.
   let touchActive = false;
   const inScene = () => controls.isLocked || touchActive;
+  // Whether the player has ever actually entered the scene (a real 'lock' event on
+  // desktop, touch activation on coarse pointers). Before that, the idle unlocked
+  // state is the attract screen: the legend stays up so "Click — Look" is on screen
+  // when the loader fades — and stays up if the first lock attempt is denied (the
+  // hosted-iframe case), instead of a vista that ignores the mouse with no hint why.
+  let everEntered = false;
   // contextual wording: no Esc / no keycaps on touch, so prompts say "tap".
   const closeHint = isTouch
     ? "Tap outside to close"
@@ -2406,16 +2422,23 @@ async function main() {
       controls.unlock();
     }
   };
-  const sceneEnter = () => {
-    // first entry into play arms the one-shot intro timer: the legend rides bright for
-    // INTRO_MS then settles to its subdued persistent state (guarded so it never replays).
+  // first entry into play arms the one-shot intro timer: the legend rides bright for
+  // INTRO_MS then settles to its subdued persistent state (guarded so it never replays).
+  // Called from sceneEnter AND the pointer-lock listener: the plain desktop entry
+  // (canvas click → controls.lock()) never goes through sceneEnter, and without this
+  // the timer never armed on a normal session — the legend just stayed bright.
+  const armIntro = () => {
     if (!introTimer) {
       introTimer = window.setTimeout(() => {
         introElapsed = true;
       }, INTRO_MS);
     }
+  };
+  const sceneEnter = () => {
+    armIntro();
     if (isTouch) {
       touchActive = true;
+      everEntered = true; // touch entry is synchronous; no lock event to hang it on
       setTouchActive(true);
       touch?.setEnabled(true);
       pauseEl.style.display = "none"; // no 'lock' event on touch to hide it for us
@@ -2652,12 +2675,12 @@ async function main() {
   // throughput lever, see buildField). buildField defaults Low on coarse-pointer devices
   // and Full on desktop; a saved choice overrides that (a returner who thinned the field
   // to hold a framerate keeps it), so we apply it before wiring the switch's open state.
-  const savedLod = localStorage.getItem("farBooks");
+  const savedLod = localStorage.getItem("wwr:farBooks");
   if (savedLod === "full") built.setCarpetThin(false);
   else if (savedLod === "low") built.setCarpetThin(true);
   const lodSwitch = makeSwitch("lod-switch", "lod-val", "Full", "Low", (full) => {
     built.setCarpetThin(!full);
-    localStorage.setItem("farBooks", full ? "full" : "low");
+    localStorage.setItem("wwr:farBooks", full ? "full" : "low");
   });
   const syncLod = (): void => lodSwitch.sync(!built.isCarpetThin());
   syncLod();
@@ -2666,7 +2689,7 @@ async function main() {
   // choice persists to localStorage across reloads.
   const legendSwitch = makeSwitch("legend-switch", "legend-val", "Shown", "Hidden", (on) => {
     legendOn = on;
-    localStorage.setItem("showControls", legendOn ? "1" : "0");
+    localStorage.setItem("wwr:showControls", legendOn ? "1" : "0");
   });
   legendSwitch.sync(legendOn);
 
@@ -2674,14 +2697,14 @@ async function main() {
   // wind is part of the piece, so it ships audible with a low default); the choice
   // persists. The render loop drives the actual sound; this only sets the target.
   const windSlider = document.getElementById("wind-vol") as HTMLInputElement;
-  const savedWind = localStorage.getItem("windVolume");
+  const savedWind = localStorage.getItem("wwr:windVolume");
   const initWindVol = savedWind !== null ? Number(savedWind) : 0.6;
   windSlider.value = String(Math.round(initWindVol * 100));
   wind.setVolume(initWindVol);
   windSlider.addEventListener("input", () => {
     const v = Number(windSlider.value) / 100;
     wind.setVolume(v);
-    localStorage.setItem("windVolume", String(v));
+    localStorage.setItem("wwr:windVolume", String(v));
   });
 
   // Fullscreen toggle — the mobile answer to accidental nav-button/back taps (going
@@ -2954,6 +2977,8 @@ async function main() {
     if (!overlayOpen) showPause();
   });
   controls.addEventListener("lock", () => {
+    everEntered = true; // not on the click that REQUESTS it — a denied lock stays pre-entry
+    armIntro(); // the plain canvas-click entry bypasses sceneEnter (see armIntro)
     pauseEl.style.display = "none";
     spinnerEl.classList.remove("show");
     if (cooldownTimer) {
@@ -3174,10 +3199,12 @@ async function main() {
     // (.intro) for the first INTRO_MS until the intro timer flips introElapsed.
     // Suppressed while an inspect overlay is up or the hint is toggled off — but
     // the pause menu KEEPS it (bright), so the reference is there when you stop to
-    // look, and the pause "Controls hint" toggle demonstrates itself live.
+    // look, and the pause "Controls hint" toggle demonstrates itself live. Before
+    // the first real entry (!everEntered) it also shows, bright: that's the only
+    // pre-lock teaching of "Click — Look" the player gets.
     {
       const paused = pauseEl.style.display !== "none";
-      const live = legendOn && !overlayOpen && (inScene() || paused);
+      const live = legendOn && !overlayOpen && (inScene() || paused || !everEntered);
       controlsHud.classList.toggle("show", live);
       controlsHud.classList.toggle("intro", live && (paused || !introElapsed));
     }
