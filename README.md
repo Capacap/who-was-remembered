@@ -2,7 +2,7 @@
 
 A browser-based 3D art piece. The player walks through a low-poly desert scattered with books, one per Wikipedia article about a historical figure. Starting at year 2000 in the centre, walking outward moves back in time, with book density thinning as recorded history grows sparser. Wikipedia's recency bias is the explicit subject, not a flaw to be corrected.
 
-**▶ [Play it in your browser](https://wwr.simonsorkin.com/)**
+**▶ [Play it in your browser](https://wwr.simonsorkin.com/)** · also on [itch.io](https://capacap.itch.io/who-was-remembered)
 
 ![Looking outward across the desert: teal books scatter and thin toward the dark horizon, with a single orange landmark beacon at left.](docs/screenshots/vista.webp)
 
