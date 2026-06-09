@@ -1789,7 +1789,11 @@ function createCompass(
 // per-mode accel/decel and pins the eye to the baked ground through a smoothing filter;
 // dev flight (F) keeps the old instant free-Y model untouched.
 type MoveMode = "walk" | "skate" | "fly";
-function createController(camera: THREE.PerspectiveCamera, dom: HTMLElement) {
+function createController(
+  camera: THREE.PerspectiveCamera,
+  dom: HTMLElement,
+  isDev: () => boolean = () => true,
+) {
   const controls = new PointerLockControls(camera, dom);
   // Inset the pitch limits one degree off true vertical: at the poles the look
   // direction's horizontal component collapses and the compass bearing degenerates.
@@ -1838,8 +1842,8 @@ function createController(camera: THREE.PerspectiveCamera, dom: HTMLElement) {
     // otherwise typing a name toggles fly on the F and seeds the movement key set.
     const tgt = e.target as HTMLElement | null;
     if (tgt && (tgt.tagName === "INPUT" || tgt.tagName === "TEXTAREA")) return;
-    if (e.code === "KeyF") {
-      flying = !flying; // dev fly toggle; drop carried momentum so neither mode lurches
+    if (isDev() && e.code === "KeyF") {
+      flying = !flying; // dev fly toggle (Developer mode only); drop momentum so neither mode lurches
       vel.set(0, 0, 0);
     }
     keys.add(e.code);
@@ -2168,6 +2172,11 @@ async function main() {
   applyRenderScale();
   document.body.appendChild(renderer.domElement);
 
+  // Developer mode (the pause-menu toggle) gates every dev hotkey -- F/L/`/B/M/P/N do
+  // nothing until it's on, so a player who fat-fingers one isn't dropped into flight or
+  // a hidden field with no idea why. syncDevOpts keeps this in lockstep with the toggle;
+  // seeded from DEV_DEFAULT. The controller reads it via the getter for its own F key.
+  let devEnabled = DEV_DEFAULT;
   const {
     controls,
     update,
@@ -2179,7 +2188,7 @@ async function main() {
     setMoveAxis,
     addLook,
     setTouchSkate,
-  } = createController(camera, renderer.domElement);
+  } = createController(camera, renderer.domElement, () => devEnabled);
   scene.add(controls.object);
   // dev hook, same convention as window.MOVE: lets the camera be posed/inspected from the
   // devtools console (or a headless screenshot) without pointer lock or a rebuild.
@@ -2724,6 +2733,7 @@ async function main() {
   const COOLDOWN_HINT_MS = 1250;
   let cooldownTimer = 0;
   const syncDevOpts = () => {
+    devEnabled = devModeEl.checked; // gate the dev hotkeys (see createController + the keydown handler)
     devOptsEl.style.display = devModeEl.checked ? "block" : "none";
   };
   const showPause = () => {
@@ -3000,24 +3010,24 @@ async function main() {
     if (e.code === "KeyE" && !overlayOpen && controls.isLocked && aim) {
       if (aim.kind === "tp") openTravel(aim.i);
       else openOverlay(aim.i);
-    } else if (e.code === "KeyL") {
+    } else if (devEnabled && e.code === "KeyL") {
       setFlatLit(!isFlatLit());
-    } else if (e.code === "Backquote") {
+    } else if (devEnabled && e.code === "Backquote") {
       setPerf(!isPerf());
-    } else if (e.code === "KeyB") {
+    } else if (devEnabled && e.code === "KeyB") {
       // baseline instrument (dev-only, throwaway): hide the entire far dot carpet.
       // carpet-off is the ceiling of perfect frustum culling — watch the gpu line with
       // it on vs off, looking outward at spawn, to see what 574k points actually cost
       // before we decide whether tiling can recover enough of it to be worth building.
       built.setCarpetVisible(!built.isCarpetVisible());
       console.log(`[perf] dot carpet ${built.isCarpetVisible() ? "shown" : "HIDDEN"}`);
-    } else if (e.code === "KeyM") {
+    } else if (devEnabled && e.code === "KeyM") {
       // perf-attribution partner to B: hide the book MESHES (near+mid) so B(dots)+M(books)
       // isolate each field layer's GPU cost. Watch the gpu line: all-on, then dots-only,
       // then books-only, at a horizon angle where the overdraw stack is deepest.
       built.setBooksVisible(!built.isBooksVisible());
       console.log(`[perf] book meshes ${built.isBooksVisible() ? "shown" : "HIDDEN"}`);
-    } else if (e.code === "KeyP") {
+    } else if (devEnabled && e.code === "KeyP") {
       // dev cycle for the render-scale (pixel-ratio) lever, over the same steps the
       // pause menu's Resolution control offers, so the gpu line can be read at each.
       const idx = STEPS.indexOf(renderScale);
@@ -3025,7 +3035,7 @@ async function main() {
       console.log(
         `[perf] render scale ${renderScale} -> pixel ratio ${renderer.getPixelRatio().toFixed(2)}`,
       );
-    } else if (e.code === "KeyN") {
+    } else if (devEnabled && e.code === "KeyN") {
       // dev cycle for the opening-vista anchors: step through each (applySpawn + log
       // the figure) to eyeball every spawn and cut the duds. Shift steps backward.
       if (spawnAnchors.length) {
