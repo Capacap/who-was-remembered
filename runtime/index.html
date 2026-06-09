@@ -617,21 +617,76 @@
         accent-color: var(--ink-accent);
         cursor: pointer;
       }
+      /* padded pills, not bare text: a real >=44px touch target on phones. The active
+         one fills with the accent (bone text) so the choice reads at a glance. */
       .pause-seg button {
-        background: none;
-        border: none;
-        padding: 0 0 1px;
+        min-width: 44px;
+        padding: 7px 12px;
         font: inherit;
         cursor: pointer;
         color: var(--ink-soft);
-        border-bottom: 1px solid transparent;
+        background: none;
+        border: 1px solid var(--rule);
+        border-radius: 6px;
       }
       .pause-seg button:hover {
         color: var(--ink);
       }
       .pause-seg button.active {
-        color: var(--ink-accent);
-        border-bottom-color: var(--ink-accent);
+        color: var(--bone);
+        background: var(--ink-accent);
+        border-color: var(--ink-accent);
+      }
+      /* binary settings: a switch + a value word, the whole wrap tappable. align-items
+         baseline (the .pause-setting default) reads wrong against a switch, so toggle
+         rows centre instead. */
+      .pause-setting.toggle-row {
+        align-items: center;
+      }
+      .switch-wrap {
+        margin-left: auto;
+        display: inline-flex;
+        align-items: center;
+        gap: 10px;
+        cursor: pointer;
+        padding: 4px 0; /* taller hit area without growing the switch visually */
+      }
+      .switch-val {
+        color: var(--ink-soft);
+        min-width: 3em;
+        text-align: right;
+      }
+      .switch {
+        position: relative;
+        width: 46px;
+        height: 26px;
+        flex: none;
+        padding: 0;
+        border-radius: 13px;
+        border: 1px solid var(--ink-soft);
+        background: none;
+        cursor: pointer;
+        transition: background-color 0.15s, border-color 0.15s;
+      }
+      .switch::after {
+        content: "";
+        position: absolute;
+        top: 50%;
+        left: 3px;
+        width: 18px;
+        height: 18px;
+        border-radius: 50%;
+        background: var(--ink-soft);
+        transform: translateY(-50%);
+        transition: transform 0.15s, background-color 0.15s;
+      }
+      .switch[aria-checked="true"] {
+        background: var(--ink-accent);
+        border-color: var(--ink-accent);
+      }
+      .switch[aria-checked="true"]::after {
+        transform: translateY(-50%) translateX(20px);
+        background: var(--bone);
       }
       /* developer section: a hairline-topped block — the gate, then the gated opts. */
       #pause-dev {
@@ -904,12 +959,14 @@
             min="0" max="100" value="60" aria-label="Volume" />
         </div>
         <!-- hidden by JS where the Fullscreen API is absent (iPhone Safari); there the
-             chromeless path is Add-to-Home-Screen via the web manifest. -->
-        <div class="pause-setting" id="fullscreen-row" hidden>
+             chromeless path is Add-to-Home-Screen via the web manifest. The whole
+             .switch-wrap is the tap target (value word + switch), big for touch. -->
+        <div class="pause-setting toggle-row" id="fullscreen-row" hidden>
           <span>Fullscreen</span>
-          <span class="pause-seg" id="fullscreen-seg">
-            <button type="button" data-fs="on">On</button>
-            <button type="button" data-fs="off">Off</button>
+          <span class="switch-wrap">
+            <span class="switch-val" id="fullscreen-val">Off</span>
+            <button type="button" class="switch" id="fullscreen-switch"
+              role="switch" aria-checked="false" aria-label="Fullscreen"></button>
           </span>
         </div>
         <div class="pause-setting">
@@ -920,18 +977,20 @@
             <button type="button" data-scale="0.5">½</button>
           </span>
         </div>
-        <div class="pause-setting">
+        <div class="pause-setting toggle-row">
           <span>Far books</span>
-          <span class="pause-seg" id="lod-seg">
-            <button type="button" data-lod="full">Full</button>
-            <button type="button" data-lod="low">Low</button>
+          <span class="switch-wrap">
+            <span class="switch-val" id="lod-val">Full</span>
+            <button type="button" class="switch" id="lod-switch"
+              role="switch" aria-checked="true" aria-label="Far-book detail"></button>
           </span>
         </div>
-        <div class="pause-setting">
+        <div class="pause-setting toggle-row">
           <span>Controls hint</span>
-          <span class="pause-seg" id="legend-seg">
-            <button type="button" data-legend="on">Show</button>
-            <button type="button" data-legend="off">Hide</button>
+          <span class="switch-wrap">
+            <span class="switch-val" id="legend-val">Shown</span>
+            <button type="button" class="switch" id="legend-switch"
+              role="switch" aria-checked="true" aria-label="Controls hint"></button>
           </span>
         </div>
         <div id="pause-dev">

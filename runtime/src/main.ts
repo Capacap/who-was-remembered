@@ -2600,44 +2600,51 @@ async function main() {
   }
   syncQuality();
 
-  // Far-book level of detail — player-facing, same segmented language as Resolution. "Low"
-  // thins the far point carpet in dense cells (the mobile primitive-throughput lever, see
-  // buildField); "Full" draws every far book. The field's setCarpetThin already defaults Low
-  // on coarse-pointer devices and Full on desktop, so syncLod just reflects that on open.
-  const lodOpts = Array.from(
-    document.querySelectorAll<HTMLButtonElement>("#lod-seg button"),
-  );
-  const syncLod = (): void => {
-    for (const b of lodOpts) {
-      b.classList.toggle("active", (b.dataset.lod === "low") === built.isCarpetThin());
-    }
-  };
-  for (const b of lodOpts) {
-    b.addEventListener("click", () => {
-      built.setCarpetThin(b.dataset.lod === "low");
-      syncLod();
+  // Binary settings render as a switch + a value word (see .switch in index.html). The
+  // whole .switch-wrap is the tap target so a phone gets a generous hit area. onChange
+  // fires with the requested state; sync() repaints aria-checked + the word. optimistic
+  // (default) repaints immediately on tap; pass false when the real state is confirmed
+  // asynchronously (fullscreen) so a rejected/raced request can't leave the switch lying.
+  const makeSwitch = (
+    switchId: string,
+    valId: string,
+    onWord: string,
+    offWord: string,
+    onChange: (on: boolean) => void,
+    optimistic = true,
+  ): { sync: (on: boolean) => void } => {
+    const btn = document.getElementById(switchId) as HTMLButtonElement;
+    const val = document.getElementById(valId) as HTMLSpanElement;
+    const wrap = btn.closest(".switch-wrap") as HTMLElement;
+    const sync = (on: boolean): void => {
+      btn.setAttribute("aria-checked", on ? "true" : "false");
+      val.textContent = on ? onWord : offWord;
+    };
+    wrap.addEventListener("click", () => {
+      const next = btn.getAttribute("aria-checked") !== "true";
+      onChange(next);
+      if (optimistic) sync(next);
     });
-  }
+    return { sync };
+  };
+
+  // Far-book level of detail — player-facing toggle. ON = Full (draw every far book);
+  // OFF = Low, which thins the far point carpet in dense cells (the mobile primitive-
+  // throughput lever, see buildField). setCarpetThin already defaults Low on coarse-
+  // pointer devices and Full on desktop, so syncLod just reflects that on open.
+  const lodSwitch = makeSwitch("lod-switch", "lod-val", "Full", "Low", (full) =>
+    built.setCarpetThin(!full),
+  );
+  const syncLod = (): void => lodSwitch.sync(!built.isCarpetThin());
   syncLod();
 
-  // Controls hint — player-facing show/hide, same segmented language. The render
-  // loop reads legendOn; the choice persists to localStorage across reloads.
-  const legendOpts = Array.from(
-    document.querySelectorAll<HTMLButtonElement>("#legend-seg button"),
-  );
-  const syncLegend = (): void => {
-    for (const b of legendOpts) {
-      b.classList.toggle("active", (b.dataset.legend === "on") === legendOn);
-    }
-  };
-  for (const b of legendOpts) {
-    b.addEventListener("click", () => {
-      legendOn = b.dataset.legend === "on";
-      localStorage.setItem("showControls", legendOn ? "1" : "0");
-      syncLegend();
-    });
-  }
-  syncLegend();
+  // Controls hint — player-facing show/hide toggle. The render loop reads legendOn; the
+  // choice persists to localStorage across reloads.
+  const legendSwitch = makeSwitch("legend-switch", "legend-val", "Shown", "Hidden", (on) => {
+    legendOn = on;
+    localStorage.setItem("showControls", legendOn ? "1" : "0");
+  });
+  legendSwitch.sync(legendOn);
 
   // Wind volume — player-facing range, 0 disables. The slider IS the off switch (the
   // wind is part of the piece, so it ships audible with a low default); the choice
@@ -2673,24 +2680,23 @@ async function main() {
       .webkitFullscreenElement;
   if (fsRequest && fsExit) {
     fsRow.hidden = false;
-    const fsOpts = Array.from(
-      document.querySelectorAll<HTMLButtonElement>("#fullscreen-seg button"),
-    );
-    const syncFs = (): void => {
-      const on = !!fsElement();
-      for (const b of fsOpts) {
-        b.classList.toggle("active", (b.dataset.fs === "on") === on);
-      }
-    };
-    for (const b of fsOpts) {
-      b.addEventListener("click", () => {
-        const want = b.dataset.fs === "on";
-        // the click is the user gesture the API requires; swallow rejections (e.g.
-        // the request races a permission state) so the menu never throws.
+    // optimistic=false: the switch follows the REAL fullscreenchange event, not the tap,
+    // so a rejected or raced request (permission state, external Esc/swipe exit) always
+    // leaves the switch showing the truth rather than an optimistic lie.
+    const fsSwitch = makeSwitch(
+      "fullscreen-switch",
+      "fullscreen-val",
+      "On",
+      "Off",
+      (want) => {
+        // the tap is the user gesture the API requires; swallow rejections so the menu
+        // never throws.
         if (want && !fsElement()) fsRequest.call(docEl).catch(() => {});
         else if (!want && fsElement()) fsExit.call(document).catch(() => {});
-      });
-    }
+      },
+      false,
+    );
+    const syncFs = (): void => fsSwitch.sync(!!fsElement());
     document.addEventListener("fullscreenchange", syncFs);
     document.addEventListener("webkitfullscreenchange", syncFs);
     syncFs();
