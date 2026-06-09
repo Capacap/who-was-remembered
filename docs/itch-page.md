@@ -14,11 +14,11 @@ The centre holds the most recent lives. Walking outward carries you back through
 
 That thinning is the whole idea. History keeps the recent past in great detail and the distant past in fragments. The desert lays that shape out under your feet. Where the sand runs empty, the record ran empty first.
 
-Look at a book to see whose life it marks, and follow the link to read more. A compass keeps the present at your back and the deep past ahead.
+Look at a book to see whose life it marks, and follow the link to read more. A compass keeps the present at your back and the deep past ahead. Hold Shift to skate, and the long gaps between names become ground you can cross at speed.
 
-Nothing here asks to be finished. Wander as long as you like, and notice how far back the names still reach.
+Nothing here asks to be finished. A visit can be ten minutes or an evening. Wander as long as you like, and notice how far back the names still reach.
 
-The world is built from public Wikidata and English Wikipedia data. Free, runs in the browser, plays on desktop and mobile.
+The world is built from public Wikidata and English Wikipedia data. Free, runs in the browser, plays on desktop and mobile. Also playable at [wwr.simonsorkin.com](https://wwr.simonsorkin.com).
 
 ### Controls
 
@@ -30,10 +30,12 @@ The world is built from public Wikidata and English Wikipedia data. Free, runs i
 
 ## Suggested tags (itch allows up to ten)
 
-`walking-simulator` · `exploration` · `atmospheric` · `experimental` · `art` · `history` · `data` · `low-poly` · `browser` · `free`
+`walking-simulator` · `exploration` · `atmospheric` · `meditative` · `relaxing` · `experimental` · `art` · `history` · `wikipedia` · `low-poly`
 
 ## Notes
 
-- The "around 576,000" figure is the shipped corpus. To avoid committing to a number, swap in "hundreds of thousands of them".
+- Keep the "around 576,000" figure: the specific number is the hook, and softening it to "hundreds of thousands" reads as evasion.
 - The centre is technically the year 2000 (the death-date cut), so "the most recent lives" stays honest without explaining the cutoff on a store page.
-- Embed setting: "Click to launch in fullscreen" mitigates the pointer-lock-in-iframe risk.
+- Tags: `browser` and `free` were dropped because itch's platform and price filters already cover them; `meditative` and `relaxing` are where this audience actually browses; `wikipedia` replaced `data` because concrete beats abstract in tag search.
+- Embed settings: "Click to launch in fullscreen" (mitigates the pointer-lock-in-iframe risk), Mobile-friendly ON, SharedArrayBuffer support OFF.
+- Gallery: lead with one sparse outer-field shot (a lone book on open sand is the thesis; every dense-ring shot reads as "pretty book desert" without it), and recapture the inspect moment close enough that the name card is legible at gallery size. The near-black scale shot dies under compression; leave it out.
