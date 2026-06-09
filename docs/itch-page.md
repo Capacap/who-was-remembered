@@ -18,7 +18,7 @@ Look at a book to see whose life it marks, and follow the link to read more. A c
 
 Nothing here asks to be finished. A visit can be ten minutes or an evening. Wander as long as you like, and notice how far back the names still reach.
 
-The world is built from public Wikidata and English Wikipedia data. Free, runs in the browser, plays on desktop and mobile. Also playable at [wwr.simonsorkin.com](https://wwr.simonsorkin.com).
+The world is built from public Wikidata and English Wikipedia data. Free, runs in the browser, plays on desktop and mobile.
 
 ### Controls
 
@@ -27,6 +27,8 @@ The world is built from public Wikidata and English Wikipedia data. Free, runs i
 - Read a book or use a teleporter: look at it, press E
 - Pause and settings: Esc
 - On a phone: drag to move and look, tap to inspect
+
+Also playable at [wwr.simonsorkin.com](https://wwr.simonsorkin.com).
 
 ## Suggested tags (itch allows up to ten)
 
