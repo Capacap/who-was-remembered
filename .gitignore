@@ -24,6 +24,5 @@ pipeline/cache/
 # OS
 .DS_Store
 
-# Promo capture artifacts (G still / V video downloads land in cwd)
-wwr-shot*.png
-wwr-capture*.webm
+# Promo / capture media (G stills, V videos, and their re-encodes)
+/media/
