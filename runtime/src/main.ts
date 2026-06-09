@@ -3004,13 +3004,10 @@ async function main() {
       built.setBooksVisible(!built.isBooksVisible());
       console.log(`[perf] book meshes ${built.isBooksVisible() ? "shown" : "HIDDEN"}`);
     } else if (e.code === "KeyP") {
-      // dev cycle for the render-scale (pixel-ratio) lever: 1.0 -> 0.75 -> 0.5, so the
-      // gpu line can be read at each step. The auto-default (0.67 on touch) is off-cycle;
-      // pressing P enters the measurement steps. The player-facing control lands in the
-      // pause menu's quality section once the win is confirmed.
-      const steps = [1.0, 0.75, 0.5];
-      const idx = steps.indexOf(renderScale);
-      setRenderScale(steps[(idx + 1) % steps.length]);
+      // dev cycle for the render-scale (pixel-ratio) lever, over the same steps the
+      // pause menu's Resolution control offers, so the gpu line can be read at each.
+      const idx = STEPS.indexOf(renderScale);
+      setRenderScale(STEPS[(idx + 1) % STEPS.length]);
       console.log(
         `[perf] render scale ${renderScale} -> pixel ratio ${renderer.getPixelRatio().toFixed(2)}`,
       );
