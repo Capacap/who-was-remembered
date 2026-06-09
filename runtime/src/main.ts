@@ -2144,7 +2144,12 @@ async function main() {
   const isTouch = window.matchMedia("(pointer: coarse)").matches;
   // default to one of the menu's offered steps (1 / 0.75 / 0.5) so the control reflects
   // a highlighted value out of the box; touch starts at 0.75 (reads decent, real saving).
-  let renderScale = isTouch ? 0.75 : 1.0;
+  // A saved choice wins over the device default — a player who dropped resolution to keep
+  // a smooth framerate shouldn't have to redo it each visit; validated against the offered
+  // steps so a corrupted value can't render the scene at a junk scale.
+  const STEPS = [1, 0.75, 0.5];
+  const savedScale = Number(localStorage.getItem("renderScale"));
+  let renderScale = STEPS.includes(savedScale) ? savedScale : isTouch ? 0.75 : 1.0;
   // Far-speck size floor, carried in FRAMEBUFFER px (what gl_PointSize wants) but authored in CSS
   // px (FAR_POINT_MIN_CSS) and re-derived from the live pixel ratio on every resize/dpr/renderScale
   // change -- so a far book stays the same PHYSICAL size on any screen. buildField wires it into the
@@ -2158,6 +2163,7 @@ async function main() {
   const setRenderScale = (s: number): void => {
     renderScale = s;
     applyRenderScale();
+    localStorage.setItem("renderScale", String(s));
   };
   applyRenderScale();
   document.body.appendChild(renderer.domElement);
@@ -2630,11 +2636,16 @@ async function main() {
 
   // Far-book level of detail — player-facing toggle. ON = Full (draw every far book);
   // OFF = Low, which thins the far point carpet in dense cells (the mobile primitive-
-  // throughput lever, see buildField). setCarpetThin already defaults Low on coarse-
-  // pointer devices and Full on desktop, so syncLod just reflects that on open.
-  const lodSwitch = makeSwitch("lod-switch", "lod-val", "Full", "Low", (full) =>
-    built.setCarpetThin(!full),
-  );
+  // throughput lever, see buildField). buildField defaults Low on coarse-pointer devices
+  // and Full on desktop; a saved choice overrides that (a returner who thinned the field
+  // to hold a framerate keeps it), so we apply it before wiring the switch's open state.
+  const savedLod = localStorage.getItem("farBooks");
+  if (savedLod === "full") built.setCarpetThin(false);
+  else if (savedLod === "low") built.setCarpetThin(true);
+  const lodSwitch = makeSwitch("lod-switch", "lod-val", "Full", "Low", (full) => {
+    built.setCarpetThin(!full);
+    localStorage.setItem("farBooks", full ? "full" : "low");
+  });
   const syncLod = (): void => lodSwitch.sync(!built.isCarpetThin());
   syncLod();
 
