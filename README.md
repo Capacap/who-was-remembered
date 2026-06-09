@@ -2,11 +2,22 @@
 
 A browser-based 3D art piece. The player walks through a low-poly desert scattered with books, one per Wikipedia article about a historical figure. Starting at year 2000 in the centre, walking outward moves back in time, with book density thinning as recorded history grows sparser. Wikipedia's recency bias is the explicit subject, not a flaw to be corrected.
 
+![Looking outward across the desert — teal books scatter and thin toward the dark horizon, with a single orange landmark beacon at left.](docs/screenshots/vista.webp)
+
+*Walking outward from the dense recent past, the books thin as recorded history grows sparser.*
+
+<table>
+<tr>
+<td width="50%"><img src="docs/screenshots/inspect-jules-verne.webp" alt="The inspect card naming Jules Verne, hovering over his orange landmark book."><br><em>Look at any book to read who it remembers — here, Jules Verne.</em></td>
+<td width="50%"><img src="docs/screenshots/teleporter-mesoamerica.webp" alt="A blue crystalline teleporter sphere labelled Mesoamerica."><br><em>Teleporters fast-travel between 26 hand-curated anchors — here, Mesoamerica.</em></td>
+</tr>
+</table>
+
 The repository has two halves: a Python preprocessing **pipeline** that turns Wikidata and Wikipedia dumps into the world (book positions, teleporter network, baked terrain), and a Three.js **runtime** (`runtime/`) that loads those artifacts and renders the walkable scene. The pipeline is run offline by the author; players only ever touch the runtime's shipped output.
 
 ## Status
 
-Playable end-to-end on desktop and mobile. The pipeline (Stages 1–9 below) runs on the 2026-05 dumps and bakes the full corpus — about 576k books — plus the 26-monument teleporter network and the terrain heightmap. The runtime is a complete first-person walker over that whole field: grounded movement (WASD / mouse look, hold Shift to skate across the empty rings), instanced books on baked low-poly terrain under a day–night atmosphere, teleporter fast-travel, look-to-inspect labels with a Wikipedia link and a bookmark toggle, and a bookmark compass anchored on the present (inward) and the deep past (outward). Touch controls cover mobile, with a far-field density setting for performance. This README still documents the build mechanics rather than the finished piece; a player-facing overhaul with screenshots comes before the repo goes public.
+Playable end-to-end on desktop and mobile. The pipeline (Stages 1–9 below) runs on the 2026-05 dumps and bakes the full corpus — about 576k books — plus the 26-monument teleporter network and the terrain heightmap. The runtime is a complete first-person walker over that whole field: grounded movement (WASD / mouse look, hold Shift to skate across the empty rings), instanced books on baked low-poly terrain under a day–night atmosphere, teleporter fast-travel, look-to-inspect labels with a Wikipedia link and a bookmark toggle, and a bookmark compass anchored on the present (inward) and the deep past (outward). Touch controls cover mobile, with a far-field density setting for performance. The screenshots above are the finished piece; the rest of this README documents the pipeline and runtime that produce it.
 
 ## Setup
 
