@@ -26,14 +26,57 @@
     <meta name="apple-mobile-web-app-title" content="Who Was Remembered" />
     <!-- Spectral: a screen-tuned old-style serif. The piece is a desert of books;
          the type should read like print, not OS chrome. One face throughout (the
-         dev perf readout stays monospace); weight + italic carry the hierarchy. -->
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+         dev perf readout stays monospace); weight + italic carry the hierarchy.
+         Self-hosted (no Google CDN) so the piece is a self-contained static bundle
+         with no third-party runtime dependency — see public/fonts/. Five faces:
+         400/500/600 upright + 400/500 italic, the exact set the design uses. Paths
+         are document-relative (no leading slash) to survive base:"./" on any host.
+         The 500 face is preloaded so the loading-screen title is sharp from the first
+         frame (woff2 preload needs crossorigin even same-origin: font fetches are
+         CORS-mode); the other faces load on demand as the HUD comes up. -->
     <link
-      href="https://fonts.googleapis.com/css2?family=Spectral:ital,wght@0,400;0,500;0,600;1,400;1,500&display=swap"
-      rel="stylesheet"
+      rel="preload"
+      as="font"
+      type="font/woff2"
+      href="fonts/spectral-500.woff2"
+      crossorigin
     />
     <style>
+      @font-face {
+        font-family: "Spectral";
+        font-style: normal;
+        font-weight: 400;
+        font-display: swap;
+        src: url("fonts/spectral-400.woff2") format("woff2");
+      }
+      @font-face {
+        font-family: "Spectral";
+        font-style: normal;
+        font-weight: 500;
+        font-display: swap;
+        src: url("fonts/spectral-500.woff2") format("woff2");
+      }
+      @font-face {
+        font-family: "Spectral";
+        font-style: normal;
+        font-weight: 600;
+        font-display: swap;
+        src: url("fonts/spectral-600.woff2") format("woff2");
+      }
+      @font-face {
+        font-family: "Spectral";
+        font-style: italic;
+        font-weight: 400;
+        font-display: swap;
+        src: url("fonts/spectral-400-italic.woff2") format("woff2");
+      }
+      @font-face {
+        font-family: "Spectral";
+        font-style: italic;
+        font-weight: 500;
+        font-display: swap;
+        src: url("fonts/spectral-500-italic.woff2") format("woff2");
+      }
       /* ── palette ─────────────────────────────────────────────────────────
          The UI is a museum label laid over a Kuindzhi painting: ink on bone for
          the deliberate panels, bone light for text that floats over the dark
@@ -82,7 +125,63 @@
         margin: 0;
         height: 100%;
         overflow: hidden;
-        background: #d9c9a8;
+        /* black, not the old sand colour: the loading screen and any pre-canvas
+           frame should match the dark storm scene, not flash a bright field. */
+        background: #000;
+      }
+
+      /* ── loading screen ──────────────────────────────────────────────────
+         Present from first paint (it ships in the initial HTML), it holds a black
+         field with the title and a spinner while the world's assets load, then
+         main.ts fades it out once the scene is up. On a load failure the spinner is
+         dropped and the error message takes its place, so a stuck load reads as a
+         reason on screen rather than a frozen title. Above #fade and all HUD. */
+      #loader {
+        position: fixed;
+        inset: 0;
+        z-index: 300;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 24px;
+        background: #000;
+        font-family: var(--serif);
+        color: var(--bone-text);
+        transition: opacity 0.6s ease;
+      }
+      #loader.hide {
+        opacity: 0;
+        pointer-events: none;
+      }
+      #loader .loader-title {
+        font-size: clamp(22px, 5vw, 40px);
+        font-weight: 500;
+        letter-spacing: 0.5px;
+        text-align: center;
+        padding: 0 24px;
+        opacity: 0.92;
+      }
+      /* reuses the pause menu's @keyframes pause-spin (defined below). */
+      #loader-spinner {
+        width: 26px;
+        height: 26px;
+        border: 2px solid rgba(233, 223, 200, 0.18);
+        border-top-color: var(--bone-text);
+        border-radius: 50%;
+        animation: pause-spin 0.8s linear infinite;
+      }
+      #loader.error #loader-spinner {
+        display: none;
+      }
+      #loader-msg {
+        max-width: min(80vw, 460px);
+        padding: 0 24px;
+        text-align: center;
+        font-size: 13px;
+        font-style: italic;
+        line-height: 1.5;
+        color: rgba(233, 223, 200, 0.72);
       }
 
       /* ── load / error slot (bottom-left) ─────────────────────────────────
@@ -924,6 +1023,11 @@
     </style>
   </head>
   <body>
+    <div id="loader">
+      <div class="loader-title">Who Was Remembered</div>
+      <div id="loader-spinner"></div>
+      <div id="loader-msg"></div>
+    </div>
     <div id="info">loading…</div>
     <div id="reticle"></div>
     <div id="glance"></div>

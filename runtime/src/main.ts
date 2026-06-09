@@ -37,6 +37,10 @@ import {
 // player's walk height samples the same surface so nothing floats.
 
 const info = document.getElementById("info") as HTMLDivElement;
+// the black title/spinner loading screen; faded out once the world is up, or
+// repurposed to show a load failure in place of the spinner (see main().catch).
+const loader = document.getElementById("loader") as HTMLDivElement;
+const loaderMsg = document.getElementById("loader-msg") as HTMLDivElement;
 
 // world scale: the pipeline derives R_MAX from ~1.4 world units to the metre
 // (see stage6_place.py). Eye height and speeds are in metres, converted once.
@@ -3086,6 +3090,12 @@ async function main() {
   // prompts; a full reference belongs in the options menu, not a persistent line.
   info.innerHTML = "";
 
+  // fade the loading screen out to reveal the scene (the animation loop starts
+  // just below, so the first frame paints within the fade), then drop it from the
+  // DOM so it never intercepts pointer events.
+  loader.classList.add("hide");
+  setTimeout(() => loader.remove(), 700);
+
   window.addEventListener("resize", () => {
     camera.aspect = window.innerWidth / window.innerHeight;
     camera.updateProjectionMatrix();
@@ -3279,6 +3289,11 @@ async function main() {
 // every asset is awaited in one Promise.all, so any rejection (a missing file, a
 // glb the loader can't decode) leaves the page stuck with no visible reason.
 main().catch((e) => {
-  info.innerHTML = `load failed: ${escapeHtml(String(e?.message ?? e))}`;
+  const msg = `load failed: ${escapeHtml(String(e?.message ?? e))}`;
+  info.innerHTML = msg;
+  // the loading screen covers #info, so surface the failure there too: swap the
+  // spinner for the message and leave the black field up rather than a dead title.
+  loader.classList.add("error");
+  loaderMsg.innerHTML = msg;
   console.error(e);
 });
