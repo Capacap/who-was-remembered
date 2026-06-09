@@ -207,7 +207,7 @@ const DIAG_LOD_COLORS = false;
 // DEV_DEFAULT: open every dev affordance on load (perf HUD up, pause menu's dev section
 // pre-expanded) so a test build needs no menu poking. Scene-altering toggles (fly/flat) stay
 // OFF so the default view is still the real one. Flip false to ship the clean player view.
-const DEV_DEFAULT = true;
+const DEV_DEFAULT = false;
 // Near the camera the books are SOLID and sit OVER the dot floor, but a dot sprite peeks past its
 // flat book at grazing angle. So fade the dot floor IN over [DOT_NEAR_FADE_IN, FAR_MESH_FULL] of
 // live horizontal distance: gone across the solid-book core (no peeking), full by FAR_MESH_FULL
