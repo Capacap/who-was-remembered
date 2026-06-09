@@ -2982,16 +2982,18 @@ async function main() {
     sceneEnter(); // begin active: show the stick + arm the controller's touch path
   }
 
-  // V toggles a clean promo recording: captureStream grabs the CANVAS only, so the
-  // DOM HUD / reticle / glance are excluded by construction (the clean "art piece"
-  // look). Live play, not the harness -- you pilot a skate run and hit V to stop,
-  // which downloads a webm. Dev-only, console-announced, no HUD hint (see the dev
-  // affordances convention). captureStream doesn't need preserveDrawingBuffer.
+  // Promo capture (G still / V video) is a DEV-SERVER-ONLY authoring tool: every use
+  // below is gated on import.meta.env.DEV, which Vite replaces with literal false in a
+  // production build, so the whole path tree-shakes out of dist -- no stray downloads
+  // for a player who presses the keys, no MediaRecorder reference shipped. We capture
+  // on the dev server, never the deployed build, so nothing is lost by stripping it.
+  //
+  // V toggles a clean recording: captureStream grabs the CANVAS only, so the DOM HUD /
+  // reticle / glance are excluded by construction (the clean "art piece" look). G grabs
+  // a high-res still the same way; the grab runs in the render loop so toDataURL reads a
+  // live buffer without forcing preserveDrawingBuffer. UI-visible shots (a glance card,
+  // a teleporter prompt) need the DOM, so those are an OS screenshot, not this.
   let recorder: MediaRecorder | null = null;
-  // G grabs a clean high-res still (canvas only, so no DOM HUD -- for the vista/scale
-  // shots). The grab itself happens in the render loop so toDataURL reads a live buffer
-  // without forcing preserveDrawingBuffer in normal play. UI-visible shots (a glance
-  // card, a teleporter prompt) need the DOM, so those are an OS screenshot, not this.
   let grabRequested = false;
 
   document.addEventListener("keydown", (e) => {
@@ -3032,10 +3034,10 @@ async function main() {
         applySpawn(spawnAnchors[spawnIdx]);
         console.log(`[spawn] ${spawnIdx + 1}/${n}  ${spawnAnchors[spawnIdx].title}`);
       }
-    } else if (e.code === "KeyG") {
+    } else if (import.meta.env.DEV && e.code === "KeyG") {
       grabRequested = true; // serviced post-render in the loop (see captureAt)
       console.log("[capture] grabbing a 2x still…");
-    } else if (e.code === "KeyV") {
+    } else if (import.meta.env.DEV && e.code === "KeyV") {
       if (!recorder) {
         const stream = renderer.domElement.captureStream(60);
         const mime = MediaRecorder.isTypeSupported("video/webm;codecs=vp9")
@@ -3227,8 +3229,8 @@ async function main() {
 
     // clean still grab (G): captureAt re-renders at 2x in this same tick and reads it
     // back, so it works in live play without preserveDrawingBuffer. Canvas only -- the
-    // DOM HUD is excluded by construction.
-    if (grabRequested) {
+    // DOM HUD is excluded by construction. DEV-gated so it strips from production.
+    if (import.meta.env.DEV && grabRequested) {
       grabRequested = false;
       const a = document.createElement("a");
       a.href = captureAt(2);
