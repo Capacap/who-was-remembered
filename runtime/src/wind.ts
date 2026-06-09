@@ -149,12 +149,16 @@ export function createWind(): Wind {
     if (ctx.state === "suspended") void ctx.resume();
   }
 
+  // Both setters coerce non-finite input to 0, not just clamp: Math.max/min pass NaN
+  // straight through, a non-finite write to an AudioParam THROWS, and a throw inside
+  // the render loop kills setAnimationLoop (Three only schedules the next frame after
+  // a clean return). The audio layer must never be able to take down the render.
   function setVolume(v: number): void {
-    volTarget = Math.max(0, Math.min(1, v));
+    volTarget = Number.isFinite(v) ? Math.max(0, Math.min(1, v)) : 0;
   }
 
   function setSpeed(s: number): void {
-    speedTarget = Math.max(0, Math.min(1, s));
+    speedTarget = Number.isFinite(s) ? Math.max(0, Math.min(1, s)) : 0;
   }
 
   function update(dt: number): void {

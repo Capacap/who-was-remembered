@@ -3174,7 +3174,13 @@ async function main() {
   let booksMs = 0;
   const PICK_INTERVAL = 0.12; // ~8 Hz; the look-at label needn't be per-frame
   renderer.setAnimationLoop(() => {
-    const dt = Math.min(clock.getDelta(), 0.1); // clamp after tab-out stalls
+    // dt is clamped both ways: 0.1s cap after tab-out stalls, and a floor because
+    // getDelta() returns EXACTLY 0 on its first call. The controller divides by dt
+    // (vyBody, vVert), and 0/0 = NaN poisons those accumulators forever; on touch the
+    // controller runs from frame one (no pointer-lock gate), the NaN reached an
+    // AudioParam via the wind's speed coupling, and the resulting TypeError killed
+    // setAnimationLoop — the launch-day "mobile freezes on the first tap" bug.
+    const dt = Math.min(Math.max(clock.getDelta(), 1e-4), 0.1);
     // harness pins the camera in place of the controller; otherwise walk normally.
     mode = harness.active ? harness.applyPose() : update(dt);
 
