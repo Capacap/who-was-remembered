@@ -110,12 +110,13 @@ OUT_PATH = ROOT / "cache" / "placement.parquet"
 # gradient forces a large world. R_MAX is set so the bulk modern band (~1850 on)
 # clears a ~1-second walk between books (~1.4 u, 1 unit ~= 1 m). See /tmp
 # world-sizing math and the project memory. R_INNER is a wide empty plaza: the
-# player spawns at (0,0) and surveys the uneven modern ring across it, rather
-# than starting embedded in the dense Western wedge. A wider plaza also gives the
-# densest recent years more circumference to ring out across instead of piling
-# onto the origin (the spawn-ring crowding is set by 2*pi*R_INNER, not R_MAX).
+# player spawns at its rim (on a curated landmark bearing, facing outward) with
+# the open plaza behind, rather than starting embedded in the dense Western
+# wedge. A wider plaza also gives the densest recent years more circumference to
+# ring out across instead of piling onto the origin (the spawn-ring crowding is
+# set by 2*pi*R_INNER, not R_MAX).
 R_MAX = 7100.0
-R_INNER = 600.0        # empty central plaza: player spawns at (0,0) and surveys the ring across it
+R_INNER = 600.0        # empty central plaza: the player spawns at its rim, facing the field
 TIME_SPAN = 2800.0     # edge = year -800; the pre-800 tail scatters beyond as a frontier
 RADIUS_ALPHA = 1.0     # linear time: equal radial width per century (honest sparsity)
 RADIUS_JITTER = 2.5    # world units: ~one year of radial width, softens the year-rings
