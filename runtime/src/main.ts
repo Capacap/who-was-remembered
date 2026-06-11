@@ -2631,6 +2631,13 @@ async function main() {
   const devBooksEl = document.getElementById("dev-books") as HTMLInputElement;
   const spinnerEl = document.getElementById("pause-spinner") as HTMLSpanElement;
 
+  // On the itch build the card's itch link is redundant (the page's own Follow
+  // button frames the iframe) — drop it there; the serving host is the only signal.
+  const host = location.hostname;
+  if (host.endsWith(".itch.io") || host.endsWith(".itch.zone") || host.endsWith(".hwcdn.net")) {
+    (document.getElementById("pause-links") as HTMLDivElement).style.display = "none";
+  }
+
   // Resolution (render scale) — player-facing, NOT behind the dev gate. A segmented
   // choice over the same steps the P dev key cycles; the active one wears the accent.
   // syncQuality re-reads renderScale so the menu reflects a default or a P-key change.

@@ -698,6 +698,26 @@
         margin-top: 16px;
         color: var(--ink);
       }
+      /* footer link: same ruled-text language as the overlay card's Wikipedia link
+         (no web-blue, no CTA), set off by a hairline and quiet at 0.85em. */
+      #pause-links {
+        margin-top: 18px;
+        padding-top: 12px;
+        border-top: 1px solid var(--rule);
+        text-align: center;
+        font-size: 0.85em;
+      }
+      #pause-links a {
+        color: var(--ink-accent);
+        text-decoration: none;
+        border-bottom: 1px solid var(--ink-accent);
+        padding-bottom: 1px;
+        font-weight: 500;
+      }
+      #pause-links a:hover {
+        color: var(--ink);
+        border-color: var(--ink);
+      }
       /* display:flex above out-specifies the UA [hidden] rule, so a hidden setting
          row would still show — restore the hide for the feature-gated fullscreen row. */
       .pause-setting[hidden] {
@@ -1140,6 +1160,17 @@
               <div id="dev-find-results"></div>
             </div>
           </div>
+        </div>
+        <!-- the card's one outbound funnel: itch is where future projects can be
+             followed. Hidden by JS on the itch build itself, where the page's own
+             Follow button makes it redundant. -->
+        <div id="pause-links">
+          <a
+            href="https://capacap.itch.io/who-was-remembered"
+            target="_blank"
+            rel="noopener"
+            >also on itch.io</a
+          >
         </div>
       </div>
     </div>
