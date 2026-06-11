@@ -2212,6 +2212,9 @@ async function main() {
   // dev hook, same convention as window.MOVE: lets the camera be posed/inspected from the
   // devtools console (or a headless screenshot) without pointer lock or a rebuild.
   (window as unknown as { CAM: THREE.PerspectiveCamera }).CAM = camera;
+  // LOOK.pointerSpeed (default 1) scales mouse-look; capture pans want ~0.15 so a
+  // full arm sweep is a slow turn and hand jitter scales down with it.
+  (window as unknown as { LOOK: PointerLockControls }).LOOK = controls;
 
   // Procedural desert wind (see wind.ts): zero-payload Web Audio, volume on the pause
   // slider, rush coupled to skate speed in the render loop. The AudioContext can only
